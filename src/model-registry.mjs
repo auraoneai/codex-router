@@ -691,6 +691,12 @@ function modelProblem(model, providers, slugs, gatewayModels) {
     return `generic model ${model.slug} uses unsupported openai-completions publication`;
   }
   if (
+    model.upstreamProvider !== undefined &&
+    (typeof model.upstreamProvider !== "string" || !model.upstreamProvider.trim())
+  ) {
+    return `model ${model.slug} has an invalid upstreamProvider`;
+  }
+  if (
     model.requiresTrailingUserTurn !== undefined &&
     typeof model.requiresTrailingUserTurn !== "boolean"
   ) {
