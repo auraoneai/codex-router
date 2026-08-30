@@ -1085,16 +1085,11 @@ export function buildLoginFreeCatalog(native, routedModelsList, { pickerOrder = 
   return { models: sortCatalogModels(models), aliases };
 }
 
-// A signed-in Codex catalog contains two policy domains: the account's native
-// entries and the router's routed entries. Keep the router overlay off native
-// base slugs so stale external picker state cannot erase Codex's original
-// picker. Login-free mode deliberately aliases external models onto those
-// slugs, so it is the one mode where the overlay applies to all entries.
-export function effectivePickerHiddenModels(hiddenModels, nativeBaseSlugs, { loginFree = false } = {}) {
-  const hidden = new Set([...hiddenModels || []].map((slug) => String(slug)));
-  if (loginFree) return hidden;
-  const native = new Set([...nativeBaseSlugs || []].map((slug) => String(slug)));
-  return new Set([...hidden].filter((slug) => !native.has(slug)));
+// Explicit hide decisions apply to native and routed models. Positive
+// selection remains routed-only, so an old allowlist cannot erase native
+// models that the operator never chose to hide.
+export function effectivePickerHiddenModels(hiddenModels) {
+  return new Set([...hiddenModels || []].map((slug) => String(slug)));
 }
 
 export function publishCatalog({ refreshNative = refresh, output = true } = {}) {
@@ -1152,18 +1147,10 @@ export function publishCatalog({ refreshNative = refresh, output = true } = {}) 
     Date.now(),
   );
   const captured = nativeCatalog({ refreshNative });
-  // The router picker overlay is for routed models.  In a normal signed-in
-  // Codex install the account's native entries remain Codex-owned; applying a
-  // stale router `hidden` decision to them can erase the original Codex picker
-  // (for example after a previous "hide all" action).  Login-free mode is the
-  // exception: its native slugs are deliberately aliases for routed models,
-  // so the overlay remains authoritative there.
+  // Native entries ignore the routed positive allowlist, while explicit
+  // native hide decisions remain effective across catalog refreshes.
   const nativeBaseSlugs = new Set(captured.models.map((model) => String(model.slug || "")));
-  const effectiveHiddenModels = effectivePickerHiddenModels(
-    hiddenModels,
-    nativeBaseSlugs,
-    { loginFree },
-  );
+  const effectiveHiddenModels = effectivePickerHiddenModels(hiddenModels);
   const native = {
     ...captured,
     // Variants join before the multi-agent pass so the extended-context alias
@@ -1248,7 +1235,7 @@ export function publishCatalog({ refreshNative = refresh, output = true } = {}) 
         const selected = pickerState.hasExplicitVisibility
           ? visibleModels.has(policySlug)
           : !hidden;
-        return routerManaged && (hidden || !selected)
+        return hidden || (routerManaged && !selected)
           ? { ...model, visibility: "hide" }
           : model;
       }),
