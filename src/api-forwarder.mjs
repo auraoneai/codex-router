@@ -1571,6 +1571,17 @@ async function relayUpstreamResponse(
   }
 }
 
+// Prism uses this opaque router conversation id as its prompt-cache key. Keep
+// the metadata provider-scoped so no other upstream receives router affinity.
+function prismAffinityHeaders(provider, conversationId) {
+  if (canonicalProviderId(provider.id) !== "kiro-prism" || !conversationId) return {};
+  return {
+    "X-Prism-Session": conversationId,
+    "X-Prism-Client": "codex-router",
+    "X-Prism-Job-Type": "coding-agent",
+  };
+}
+
 async function upstreamSession(provider, credential, payload, options = {}, endpoint = provider) {
   if (provider.authProfile !== "github-copilot") {
     return { apiKey: credential.value, baseUrl: providerBaseUrl(endpoint), headers: {} };
@@ -1708,6 +1719,8 @@ async function handleRequest(request, response) {
 
   const original = await readRequestBody(request);
   const normalized = normalizeBody(original, request.headers["content-type"], route);
+  const conversationId = threadIdFromHeaders(request.headers);
+  const affinityHeaders = prismAffinityHeaders(normalized.provider, conversationId);
   const controller = new AbortController();
   request.once("aborted", () => controller.abort());
   response.once("close", () => {
@@ -1752,7 +1765,7 @@ async function handleRequest(request, response) {
   // pool is authoritative; the routing helper deliberately refuses to fall
   // back to the legacy single key when the pool has no usable entry.
   const poolRouting = await resolveProviderApiKeyForRequest(normalized.endpoint, {
-    sessionId: threadIdFromHeaders(request.headers),
+    sessionId: conversationId,
   });
   const credential = poolRouting.credential;
   if (!credential) {
@@ -1847,7 +1860,7 @@ async function handleRequest(request, response) {
       filePath: undefined,
       resolveCredential: (credentialId) =>
         resolveStoredCredential(normalized.endpoint, credentialId),
-      sessionId: threadIdFromHeaders(request.headers),
+      sessionId: conversationId,
       isResponseCommitted: () => response.headersSent || response.writableEnded || response.writableFinished,
       send: async ({ apiKey, credentialId }) => {
         const attemptCommandCode = isCommandCodeProvider(normalized.provider)
@@ -1889,7 +1902,7 @@ async function handleRequest(request, response) {
             upstreamBody,
             attemptSession.apiKey,
             normalized.provider,
-            attemptSession.headers,
+            { ...attemptSession.headers, ...affinityHeaders },
             normalized.endpoint,
           ),
           body: upstreamBody,
@@ -2020,7 +2033,7 @@ async function handleRequest(request, response) {
         upstreamBody,
         session.apiKey,
         normalized.provider,
-        session.headers,
+        { ...session.headers, ...affinityHeaders },
         normalized.endpoint,
       ),
       body: upstreamBody,
@@ -2067,7 +2080,7 @@ async function handleRequest(request, response) {
         upstreamBody,
         session.apiKey,
         normalized.provider,
-        session.headers,
+        { ...session.headers, ...affinityHeaders },
         normalized.endpoint,
       ),
       body: upstreamBody,
