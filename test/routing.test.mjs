@@ -6175,6 +6175,7 @@ test("remote compaction survives caller disconnect and reattaches the completed 
     const [operation] = Object.values(operations);
     assert.equal(operation.state, "completed");
     assert.equal(operation.attemptCount, 1);
+    assert.equal(operation.completedAfterDisconnect, true);
   } finally {
     await stopChild(router);
     await closeServer(gateway.server);

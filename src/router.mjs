@@ -418,6 +418,7 @@ function resourceLimitsPayload() {
       inFlight: agentPayloadCacheInFlight.size,
       ...agentPayloadCacheMetrics,
     },
+    compactionOperations: compactionOperationStore.snapshot(),
   };
 }
 
@@ -2683,6 +2684,7 @@ async function handleRoutedCompaction(
         ? "compaction_transport_timeout"
         : "compaction_upstream_timeout",
     });
+    compactionOperationStore.recordFallback(operationId, owner);
     const checkpoint = failed.fallbackCheckpoint;
     if (v2) {
       if (payload.stream === false) {
@@ -2736,6 +2738,7 @@ async function handleRoutedCompaction(
       ? "compaction_transport_timeout"
       : "compaction_upstream_timeout";
     const failed = compactionOperationStore.fail(operationId, owner, { failureCode });
+    compactionOperationStore.recordFallback(operationId, owner);
     const checkpoint = failed.fallbackCheckpoint;
     if (v2) {
       if (payload.stream === false) {
@@ -2760,7 +2763,9 @@ async function handleRoutedCompaction(
       ...served,
     };
   }
-  compactionOperationStore.complete(operationId, owner, result.checkpoint);
+  compactionOperationStore.complete(operationId, owner, result.checkpoint, {
+    completedAfterDisconnect: signal.aborted,
+  });
   if (v2) {
     if (payload.stream === false) {
       const item = {

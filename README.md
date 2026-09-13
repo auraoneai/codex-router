@@ -1125,6 +1125,13 @@ After admission, the bounded upstream compaction belongs to the durable
 operation rather than the initiating HTTP connection. If that caller or the
 public edge disconnects first, the router continues the operation to its
 deadline, stores a successful result exactly once, and reattaches it on retry.
+The local health payload exposes only aggregate lifecycle diagnostics under
+`resourceLimits.compactionOperations`: retained state counts, idempotent
+reuses, concurrent duplicates prevented, stored results and reattachments,
+deterministic fallbacks, recovery latency, sanitized failure classes, and
+completions that occurred after the initiating connection disappeared. It never
+exposes checkpoint text, operation identities, owner/session values, or private
+routes.
 
 Native OpenAI traffic is unchanged by default. `./bin/control
 tool-result-aging native on` extends the same compaction to native GPT models;

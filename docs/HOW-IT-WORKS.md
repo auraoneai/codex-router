@@ -283,6 +283,12 @@ survive router restarts in `compaction-operations.json` under the private state
 directory. A row left `running` by a terminated router is reconciled to a
 retriable timeout during the next start.
 
+The local health response exposes aggregate lifecycle evidence only: retained
+state counts, idempotent reuse, duplicate suppression, stored-result
+reattachment, post-disconnect completion, deterministic fallback, recovery
+latency, and sanitized failure classes. It never publishes operation or session
+identities, checkpoint text, credentials, or protected route details.
+
 The provider call has a 170-second deadline by default, configurable with
 `CODEX_ROUTER_COMPACTION_DEADLINE_MS`. This intentionally expires before the
 observed roughly 190-second edge timeout. On a provider or transport timeout,

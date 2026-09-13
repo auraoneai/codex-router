@@ -78,7 +78,23 @@ export class CompactionOperationStore {
 
   begin({ id, owner, rootSession, sourceBoundary, model, fallbackCheckpoint }) {
     const existing = this.get(id, owner);
-    if (existing) return { created: false, operation: existing };
+    if (existing) {
+      const operation = {
+        ...existing,
+        reuseCount: Number(existing.reuseCount || 0) + 1,
+        duplicatePreventionCount:
+          Number(existing.duplicatePreventionCount || 0) +
+          (existing.state === "running" ? 1 : 0),
+        reattachmentCount:
+          Number(existing.reattachmentCount || 0) +
+          (existing.state === "completed" && existing.checkpoint ? 1 : 0),
+        lastReusedAt: this.now(),
+        updatedAt: this.now(),
+      };
+      this.operations[id] = operation;
+      this.#persist();
+      return { created: false, operation: structuredClone(operation) };
+    }
     const timestamp = this.now();
     const operation = {
       id,
@@ -89,6 +105,9 @@ export class CompactionOperationStore {
       policyVersion: COMPACTION_POLICY_VERSION,
       state: "running",
       attemptCount: 1,
+      reuseCount: 0,
+      duplicatePreventionCount: 0,
+      reattachmentCount: 0,
       fallbackCheckpoint,
       checkpoint: null,
       createdAt: timestamp,
@@ -99,8 +118,12 @@ export class CompactionOperationStore {
     return { created: true, operation: structuredClone(operation) };
   }
 
-  complete(id, owner, checkpoint) {
-    return this.#transition(id, owner, "completed", { checkpoint });
+  complete(id, owner, checkpoint, { completedAfterDisconnect = false } = {}) {
+    return this.#transition(id, owner, "completed", {
+      checkpoint,
+      completedAt: this.now(),
+      completedAfterDisconnect: Boolean(completedAfterDisconnect),
+    });
   }
 
   fail(id, owner, { terminal = false, failureCode = "compaction_transport_timeout" } = {}) {
@@ -110,6 +133,67 @@ export class CompactionOperationStore {
       terminal ? "failed_terminal" : "failed_retriable",
       { failureCode },
     );
+  }
+
+  recordFallback(id, owner) {
+    return this.#transition(id, owner, "failed_retriable", {
+      fallbackDeliveredAt: this.now(),
+    });
+  }
+
+  snapshot() {
+    const operations = Object.values(this.operations);
+    const states = Object.fromEntries(
+      COMPACTION_OPERATION_STATES.map((state) => [
+        state,
+        operations.filter((operation) => operation.state === state).length,
+      ]),
+    );
+    const recoveryLatencies = operations
+      .map((operation) => {
+        const finishedAt = operation.completedAt || operation.fallbackDeliveredAt;
+        return Number.isFinite(finishedAt) && Number.isFinite(operation.createdAt)
+          ? Math.max(0, finishedAt - operation.createdAt)
+          : null;
+      })
+      .filter(Number.isFinite);
+    const failuresByCode = {};
+    for (const operation of operations) {
+      if (!operation.failureCode) continue;
+      failuresByCode[operation.failureCode] =
+        Number(failuresByCode[operation.failureCode] || 0) + 1;
+    }
+    return {
+      retainedOperations: operations.length,
+      states,
+      idempotentReuses: operations.reduce(
+        (total, operation) => total + Number(operation.reuseCount || 0),
+        0,
+      ),
+      concurrentDuplicatesPrevented: operations.reduce(
+        (total, operation) => total + Number(operation.duplicatePreventionCount || 0),
+        0,
+      ),
+      completedAfterDisconnect: operations.filter(
+        (operation) => operation.completedAfterDisconnect === true,
+      ).length,
+      storedResults: operations.filter((operation) => operation.checkpoint).length,
+      storedResultsReattached: operations.reduce(
+        (total, operation) => total + Number(operation.reattachmentCount || 0),
+        0,
+      ),
+      deterministicFallbacks: operations.filter(
+        (operation) => Number.isFinite(operation.fallbackDeliveredAt),
+      ).length,
+      recoveryLatencyMs: {
+        count: recoveryLatencies.length,
+        max: recoveryLatencies.length ? Math.max(...recoveryLatencies) : null,
+        average: recoveryLatencies.length
+          ? Math.round(recoveryLatencies.reduce((sum, value) => sum + value, 0) / recoveryLatencies.length)
+          : null,
+      },
+      failuresByCode,
+    };
   }
 
   #transition(id, owner, state, changes) {

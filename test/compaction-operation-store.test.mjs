@@ -53,6 +53,67 @@ test("begin is durable single-flight and completed results survive restart", () 
   assert.equal(recovered.state, "completed");
   assert.equal(recovered.attemptCount, 1);
   assert.equal(recovered.checkpoint.orientation.objective, "done");
+  assert.deepEqual(restarted.snapshot(), {
+    retainedOperations: 1,
+    states: {
+      pending: 0,
+      running: 0,
+      completed: 1,
+      failed_retriable: 0,
+      failed_terminal: 0,
+      abandoned_or_expired: 0,
+    },
+    idempotentReuses: 1,
+    concurrentDuplicatesPrevented: 1,
+    completedAfterDisconnect: 0,
+    storedResults: 1,
+    storedResultsReattached: 0,
+    deterministicFallbacks: 0,
+    recoveryLatencyMs: { count: 1, max: 0, average: 0 },
+    failuresByCode: {},
+  });
+});
+
+test("snapshot distinguishes in-flight duplicate prevention from fallback delivery", () => {
+  let now = 100;
+  const store = new CompactionOperationStore({
+    filePath: path.join(mkdtempSync(path.join(tmpdir(), "compaction-metrics-")), "ops.json"),
+    now: () => now,
+  });
+  const spec = {
+    id: "operation-metrics",
+    owner: "owner-a",
+    rootSession: "root-a",
+    sourceBoundary: "boundary-a",
+    model: "model-a",
+    fallbackCheckpoint: { safe: true },
+  };
+  store.begin(spec);
+  now = 125;
+  store.begin(spec);
+  now = 150;
+  store.fail(spec.id, spec.owner, { failureCode: "compaction_transport_timeout" });
+  now = 175;
+  store.recordFallback(spec.id, spec.owner);
+  assert.deepEqual(store.snapshot(), {
+    retainedOperations: 1,
+    states: {
+      pending: 0,
+      running: 0,
+      completed: 0,
+      failed_retriable: 1,
+      failed_terminal: 0,
+      abandoned_or_expired: 0,
+    },
+    idempotentReuses: 1,
+    concurrentDuplicatesPrevented: 1,
+    completedAfterDisconnect: 0,
+    storedResults: 0,
+    storedResultsReattached: 0,
+    deterministicFallbacks: 1,
+    recoveryLatencyMs: { count: 1, max: 75, average: 75 },
+    failuresByCode: { compaction_transport_timeout: 1 },
+  });
 });
 
 test("owner mismatch fails closed and stale running work becomes retriable", () => {
