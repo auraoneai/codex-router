@@ -1121,6 +1121,10 @@ before the edge's observed timeout; a timeout returns the stored conservative
 second upstream generation. Completed and timed-out operations survive restarts
 in the private router state directory. Override the deadline with
 `CODEX_ROUTER_COMPACTION_DEADLINE_MS` when the deployed edge budget changes.
+After admission, the bounded upstream compaction belongs to the durable
+operation rather than the initiating HTTP connection. If that caller or the
+public edge disconnects first, the router continues the operation to its
+deadline, stores a successful result exactly once, and reattaches it on retry.
 
 Native OpenAI traffic is unchanged by default. `./bin/control
 tool-result-aging native on` extends the same compaction to native GPT models;

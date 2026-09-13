@@ -6110,6 +6110,78 @@ test("remote compaction deadline falls back once and retry reuses the durable op
   }
 });
 
+test("remote compaction survives caller disconnect and reattaches the completed result", async () => {
+  let requests = 0;
+  const gateway = await mockServer(async (request, response) => {
+    requests += 1;
+    await bodyJson(request);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    json(response, 200, {
+      id: "resp-after-disconnect",
+      object: "response",
+      output: [{ type: "message", content: [{ type: "output_text", text: "stored after disconnect" }] }],
+    });
+  });
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "routing-compaction-disconnect-"));
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_COMPACTION_DEADLINE_MS: "1000",
+    MODEL_ROUTER_STATE_DIR: stateDir,
+    CODEX_ROUTER_QUIET: "1",
+  });
+  const headers = {
+    Authorization: "Bearer CODEX_CALLER_SECRET",
+    "Content-Type": "application/json",
+    "x-codex-thread-id": "thread-disconnect",
+  };
+  const body = JSON.stringify({
+    model: "deepseek/deepseek-v4-pro",
+    stream: false,
+    input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "survive disconnect" }] },
+      { type: "compaction_trigger" },
+    ],
+  });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const controller = new AbortController();
+    const disconnected = fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers,
+      body,
+      signal: controller.signal,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    controller.abort();
+    await assert.rejects(disconnected, (error) => error.name === "AbortError");
+
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    const retry = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers,
+      body,
+    });
+    assert.equal(retry.status, 200);
+    const retryBody = await retry.json();
+    assert.match(retryBody.output[0].encrypted_content, /^kcr2:/);
+    assert.equal(requests, 1, "disconnect recovery must not regenerate the summary");
+
+    const operations = JSON.parse(
+      readFileSync(path.join(stateDir, "compaction-operations.json"), "utf8"),
+    );
+    const [operation] = Object.values(operations);
+    assert.equal(operation.state, "completed");
+    assert.equal(operation.attemptCount, 1);
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 // AGENTS.md requires the same collaboration handling on `/responses` and
 // `/responses/compact` alike. Compaction replays the whole conversation, so a
 // `/goal` or subagent session compacting through a routed model would otherwise

@@ -2659,18 +2659,16 @@ async function handleRoutedCompaction(
   const deadlineController = new AbortController();
   const deadline = setTimeout(() => deadlineController.abort("compaction deadline"), deadlineMs);
   deadline.unref?.();
-  const operationSignal = AbortSignal.any([signal, deadlineController.signal]);
+  // Once admitted, compaction is an operation owned by the durable store, not
+  // by one HTTP connection. A client or edge disconnect must not cancel work
+  // that can still finish before the bounded operation deadline and be reused
+  // by the next request for the same source boundary.
+  const operationSignal = deadlineController.signal;
   let result;
   try {
     result = await summarize(request, payload, route, operationSignal, { allowFailover: false });
   } catch (error) {
     clearTimeout(deadline);
-    if (signal.aborted) {
-      compactionOperationStore.fail(operationId, owner, {
-        failureCode: "compaction_transport_timeout",
-      });
-      throw error;
-    }
     if (!allowFailover) {
       compactionOperationStore.fail(operationId, owner, {
         terminal: true,
