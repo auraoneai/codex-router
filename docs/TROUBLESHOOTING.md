@@ -484,6 +484,22 @@ This is expected. Codex Router declines the optional Responses WebSocket
 upgrade, and current Codex falls back to compressed HTTP. A warning alone is not
 a failed model request.
 
+## Remote compaction previously ended in a 504
+
+Current routed compaction records a durable operation before contacting the
+provider and applies a 170-second deadline, ahead of the observed edge timeout.
+If the provider does not finish, the router returns a conservative `kcr2:`
+checkpoint from retained evidence. Repeating the same compaction request reuses
+the stored operation and does not start another provider generation.
+
+The private state file is `compaction-operations.json` under the configured
+router state directory. Usage events mark recovered requests with
+`compactionRecoveryFallback` and repeated requests with
+`compactionOperationReused`. A fallback intentionally records unknown state
+where no retained source proves it; that is evidence preservation, not amnesia.
+If edge or origin limits change, set `CODEX_ROUTER_COMPACTION_DEADLINE_MS` below
+the shortest enforced timeout and restart the router service.
+
 ## Voice Mode reports an unsupported `/v1/live` route
 
 Codex Voice uses native realtime endpoints that are separate from the Responses

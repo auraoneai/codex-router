@@ -31,6 +31,11 @@ import {
   renderCheckpoint,
   renderCompactionValue,
 } from "./compaction-checkpoint.mjs";
+import {
+  compactionOperationId,
+  compactionOperationStore,
+  compactionSourceBoundary,
+} from "./compaction-operation-store.mjs";
 import { handlePanelRequest, isPanelRoute } from "./desktop-panel.mjs";
 import { handleGeminiRequest, isGeminiRoute } from "./gemini-surface.mjs";
 import {
@@ -2546,6 +2551,9 @@ function recordCompactionUsage(result, route, startedAt) {
     ...result?.usage,
     ...result?.toolResultAging,
     ...(result?.failoverFrom ? { failoverFrom: result.failoverFrom } : {}),
+    ...(result?.operationId ? { compactionOperationId: result.operationId } : {}),
+    ...(result?.operationReused ? { compactionOperationReused: true } : {}),
+    ...(result?.recoveryFallback ? { compactionRecoveryFallback: true } : {}),
   });
 }
 
@@ -2594,7 +2602,113 @@ async function handleRoutedCompaction(
   v2,
   { allowFailover = true } = {},
 ) {
-  const result = await summarize(request, payload, route, signal, { allowFailover });
+  const owner = String(request.headers["x-codex-router-caller"] || "local");
+  const rootSession = threadIdFromHeaders(request.headers) || "unscoped";
+  const sourceBoundary = compactionSourceBoundary([
+    { type: "router_compaction_protocol", version: v2 ? 2 : 1, exact: !allowFailover },
+    ...(Array.isArray(payload.input) ? payload.input : []),
+  ]);
+  const operationId = compactionOperationId({
+    owner,
+    rootSession,
+    sourceBoundary,
+    model: route.slug,
+  });
+  const fallbackCheckpoint = finalizeCheckpoint(
+    "",
+    prepareCompaction(Array.isArray(payload.input) ? payload.input : []),
+  );
+  const admission = compactionOperationStore.begin({
+    id: operationId,
+    owner,
+    rootSession,
+    sourceBoundary,
+    model: route.slug,
+    fallbackCheckpoint,
+  });
+  if (!admission.created) {
+    const stored = admission.operation;
+    const checkpoint = stored.checkpoint || stored.fallbackCheckpoint;
+    if (v2) {
+      if (payload.stream === false) {
+        const item = {
+          type: "compaction",
+          id: `cmp_${randomUUID().replaceAll("-", "")}`,
+          encrypted_content: encodeCheckpoint(checkpoint),
+        };
+        writeJson(response, 200, compactionSnapshot(payload.model, item));
+      } else {
+        writeCompactionSse(response, payload.model, checkpoint);
+      }
+    } else {
+      writeJson(response, 200, { output: compactOutput(payload.input || [], checkpoint) });
+    }
+    return {
+      status: 200,
+      operationId,
+      operationReused: true,
+      recoveryFallback: stored.state !== "completed",
+      route,
+    };
+  }
+
+  const configuredDeadline = Number(process.env.CODEX_ROUTER_COMPACTION_DEADLINE_MS || 170_000);
+  const deadlineMs = Number.isFinite(configuredDeadline) && configuredDeadline > 0
+    ? configuredDeadline
+    : 170_000;
+  const deadlineController = new AbortController();
+  const deadline = setTimeout(() => deadlineController.abort("compaction deadline"), deadlineMs);
+  deadline.unref?.();
+  const operationSignal = AbortSignal.any([signal, deadlineController.signal]);
+  let result;
+  try {
+    result = await summarize(request, payload, route, operationSignal, { allowFailover: false });
+  } catch (error) {
+    clearTimeout(deadline);
+    if (signal.aborted) {
+      compactionOperationStore.fail(operationId, owner, {
+        failureCode: "compaction_transport_timeout",
+      });
+      throw error;
+    }
+    if (!allowFailover) {
+      compactionOperationStore.fail(operationId, owner, {
+        terminal: true,
+        failureCode: deadlineController.signal.aborted
+          ? "compaction_transport_timeout"
+          : "compaction_upstream_timeout",
+      });
+      throw error;
+    }
+    const failed = compactionOperationStore.fail(operationId, owner, {
+      failureCode: deadlineController.signal.aborted
+        ? "compaction_transport_timeout"
+        : "compaction_upstream_timeout",
+    });
+    const checkpoint = failed.fallbackCheckpoint;
+    if (v2) {
+      if (payload.stream === false) {
+        const item = {
+          type: "compaction",
+          id: `cmp_${randomUUID().replaceAll("-", "")}`,
+          encrypted_content: encodeCheckpoint(checkpoint),
+        };
+        writeJson(response, 200, compactionSnapshot(payload.model, item));
+      } else {
+        writeCompactionSse(response, payload.model, checkpoint);
+      }
+    } else {
+      writeJson(response, 200, { output: compactOutput(payload.input || [], checkpoint) });
+    }
+    return {
+      status: 200,
+      operationId,
+      recoveryFallback: true,
+      route,
+    };
+  } finally {
+    clearTimeout(deadline);
+  }
   // A compaction moved to another model is metered against the model that
   // actually produced the summary, the same as any other turn.
   const served = {
@@ -2604,14 +2718,51 @@ async function handleRoutedCompaction(
     ...(result.failoverFrom ? { failoverFrom: result.failoverFrom } : {}),
   };
   if (!result.ok) {
-    writeJson(response, result.status, result.payload);
+    if (!allowFailover) {
+      compactionOperationStore.fail(operationId, owner, {
+        terminal: true,
+        failureCode: result.status === 504
+          ? "compaction_transport_timeout"
+          : "compaction_upstream_timeout",
+      });
+      writeJson(response, result.status, result.payload);
+      return {
+        status: result.status,
+        usage: result.usage,
+        toolResultAging: result.toolResultAging,
+        operationId,
+        ...served,
+      };
+    }
+    const failureCode = result.status === 504
+      ? "compaction_transport_timeout"
+      : "compaction_upstream_timeout";
+    const failed = compactionOperationStore.fail(operationId, owner, { failureCode });
+    const checkpoint = failed.fallbackCheckpoint;
+    if (v2) {
+      if (payload.stream === false) {
+        const item = {
+          type: "compaction",
+          id: `cmp_${randomUUID().replaceAll("-", "")}`,
+          encrypted_content: encodeCheckpoint(checkpoint),
+        };
+        writeJson(response, 200, compactionSnapshot(payload.model, item));
+      } else {
+        writeCompactionSse(response, payload.model, checkpoint);
+      }
+    } else {
+      writeJson(response, 200, { output: compactOutput(payload.input || [], checkpoint) });
+    }
     return {
-      status: result.status,
+      status: 200,
       usage: result.usage,
       toolResultAging: result.toolResultAging,
+      operationId,
+      recoveryFallback: true,
       ...served,
     };
   }
+  compactionOperationStore.complete(operationId, owner, result.checkpoint);
   if (v2) {
     if (payload.stream === false) {
       const item = {
@@ -2627,6 +2778,7 @@ async function handleRoutedCompaction(
       status: 200,
       usage: result.usage,
       toolResultAging: result.toolResultAging,
+      operationId,
       ...served,
     };
   }
@@ -2635,6 +2787,7 @@ async function handleRoutedCompaction(
     status: 200,
     usage: result.usage,
     toolResultAging: result.toolResultAging,
+    operationId,
     ...served,
   };
 }

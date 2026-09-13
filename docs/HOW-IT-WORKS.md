@@ -273,6 +273,26 @@ model-written text `UNVERIFIED_LEGACY_SUMMARY`. Native OpenAI compaction items
 remain opaque and byte-preserved on native OpenAI requests; they are never
 decoded or promoted to evidence.
 
+Routed compaction is a durable single-flight operation. Its identity binds the
+authenticated caller, propagated root thread, exact source boundary, selected
+model, and checkpoint policy version. The router records the operation before
+calling the provider. A repeated request with the same identity reuses the
+stored checkpoint, or the already-recorded conservative fallback, instead of
+starting a second provider generation. Completed and timed-out operations
+survive router restarts in `compaction-operations.json` under the private state
+directory. A row left `running` by a terminated router is reconciled to a
+retriable timeout during the next start.
+
+The provider call has a 170-second deadline by default, configurable with
+`CODEX_ROUTER_COMPACTION_DEADLINE_MS`. This intentionally expires before the
+observed roughly 190-second edge timeout. On a provider or transport timeout,
+the ordinary routed-compaction path returns a valid `kcr2:` checkpoint built
+from retained evidence and records the recovery in usage telemetry. Exact-route
+verification remains fail-closed: it never certifies a fallback as service by
+the requested route. The fallback can be more conservative than a successful
+model summary, but it preserves source records and avoids leaving the Codex
+session stuck in a repeat-compaction loop.
+
 Routed turns that carry a native OpenAI compaction item are unchanged by this
 work: the router does not yet build a checkpoint from them, and continues to
 follow its existing unreadable-compaction path. Bridging that boundary means

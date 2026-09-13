@@ -1113,6 +1113,15 @@ reads, bounded command output, and concise prose. Routed compaction requests use
 the same dense shaping because they are already at the context boundary. No
 second toggle or restart is required.
 
+Routed remote compaction is durable and single-flight. Before the provider call,
+the router stores an operation keyed by caller, root thread, source boundary,
+model, and checkpoint policy. The default 170-second compaction deadline occurs
+before the edge's observed timeout; a timeout returns the stored conservative
+`kcr2:` fallback, and an identical client retry reuses that operation without a
+second upstream generation. Completed and timed-out operations survive restarts
+in the private router state directory. Override the deadline with
+`CODEX_ROUTER_COMPACTION_DEADLINE_MS` when the deployed edge budget changes.
+
 Native OpenAI traffic is unchanged by default. `./bin/control
 tool-result-aging native on` extends the same compaction to native GPT models;
 `native off` restores the default. It is opt-in because it changes what is sent

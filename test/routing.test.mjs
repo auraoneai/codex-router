@@ -1981,7 +1981,9 @@ test("compaction never treats reasoning as final text and falls back to chat con
     Authorization: "Bearer CODEX_CALLER_SECRET",
     "Content-Type": "application/json",
   };
+  let compactSequence = 0;
   const compact = async () => {
+    compactSequence += 1;
     const response = await fetch(`${routerBase(routerPort)}/responses`, {
       method: "POST",
       headers,
@@ -1989,7 +1991,7 @@ test("compaction never treats reasoning as final text and falls back to chat con
         model: "deepseek/deepseek-v4-pro",
         stream: false,
         input: [
-          { type: "message", role: "user", content: [{ type: "input_text", text: "keep me" }] },
+          { type: "message", role: "user", content: [{ type: "input_text", text: `keep me ${compactSequence}` }] },
           { type: "compaction_trigger" },
         ],
       }),
@@ -5944,7 +5946,7 @@ async function waitForStderr(child, pattern) {
 // A routed compaction that leaves no usage event and no log line is invisible:
 // nothing in the router's own telemetry can answer "was compaction even
 // attempted?", which is what made issue #95 slow to diagnose.
-test("routed compaction records usage and logs on success and on failure", async () => {
+test("routed compaction records usage and converts a provider failure into a checkpoint fallback", async () => {
   let failing = false;
   const gateway = await mockServer(async (request, response) => {
     await bodyJson(request);
@@ -6005,23 +6007,102 @@ test("routed compaction records usage and logs on success and on failure", async
     const failed = await fetch(`${routerBase(routerPort)}/responses/compact`, {
       method: "POST",
       headers,
-      body,
+      body: JSON.stringify({
+        model: "deepseek/deepseek-v4-pro",
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "different boundary" }] },
+        ],
+      }),
     });
-    assert.equal(failed.status, 502);
+    assert.equal(failed.status, 200);
+    const fallback = checkpointFromCompactResponse(await failed.json());
+    assert.ok(
+      fallback.orientation.unknowns.includes("Task state must be reconstructed from retained evidence."),
+    );
     const events = await waitForUsageEvents(stateDir, 2, router);
     const failure = events.at(-1);
     assert.equal(failure.model, "deepseek/deepseek-v4-pro");
     assert.equal(failure.provider, "deepseek");
-    assert.equal(failure.status, 502);
+    assert.equal(failure.status, 200);
     // A failed compaction reports no tokens at all rather than zeros, which
     // would be indistinguishable from the zero-token accounting behind #95.
     assert.equal("inputTokens" in failure, false);
     assert.equal("outputTokens" in failure, false);
     assert.equal("totalTokens" in failure, false);
-    await waitForStderr(
-      router,
-      /\[codex-router\] model=deepseek\/deepseek-v4-pro provider=deepseek status=502/,
+    await waitForStderr(router, /provider=deepseek status=200/);
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("remote compaction deadline falls back once and retry reuses the durable operation", async () => {
+  let requests = 0;
+  const gateway = await mockServer(async (request, response) => {
+    requests += 1;
+    await bodyJson(request);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    if (!response.destroyed) {
+      json(response, 200, {
+        id: "resp-too-late",
+        object: "response",
+        output: [{ type: "message", content: [{ type: "output_text", text: "late" }] }],
+      });
+    }
+  });
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "routing-compaction-deadline-"));
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_COMPACTION_DEADLINE_MS: "40",
+    MODEL_ROUTER_STATE_DIR: stateDir,
+    CODEX_ROUTER_QUIET: "1",
+  });
+  const headers = {
+    Authorization: "Bearer CODEX_CALLER_SECRET",
+    "Content-Type": "application/json",
+    "x-codex-thread-id": "thread-deadline",
+  };
+  const body = JSON.stringify({
+    model: "deepseek/deepseek-v4-pro",
+    stream: false,
+    input: [
+      { type: "message", role: "user", content: [{ type: "input_text", text: "preserve this objective" }] },
+      { type: "compaction_trigger" },
+    ],
+  });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const first = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers,
+      body,
+    });
+    assert.equal(first.status, 200);
+    const firstBody = await first.json();
+    assert.equal(firstBody.output[0].type, "compaction");
+    assert.match(firstBody.output[0].encrypted_content, /^kcr2:/);
+
+    const second = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers,
+      body,
+    });
+    assert.equal(second.status, 200);
+    const secondBody = await second.json();
+    assert.match(secondBody.output[0].encrypted_content, /^kcr2:/);
+    assert.equal(requests, 1, "the retry must not submit duplicate compaction work");
+
+    const operations = JSON.parse(
+      readFileSync(path.join(stateDir, "compaction-operations.json"), "utf8"),
     );
+    const [operation] = Object.values(operations);
+    assert.equal(operation.state, "failed_retriable");
+    assert.equal(operation.failureCode, "compaction_transport_timeout");
+    assert.equal(operation.attemptCount, 1);
   } finally {
     await stopChild(router);
     await closeServer(gateway.server);
