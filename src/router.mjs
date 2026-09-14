@@ -281,6 +281,15 @@ const EMPTY_COMPLETION_PRELUDE_MS =
   configuredEmptyCompletionPreludeMs >= 0
     ? configuredEmptyCompletionPreludeMs
     : 30_000;
+const configuredEmptyCompletionStreamStallMs = Number(
+  process.env.CODEX_ROUTER_EMPTY_COMPLETION_STREAM_STALL_MS ||
+    EMPTY_COMPLETION_PRELUDE_MS * 4,
+);
+const EMPTY_COMPLETION_STREAM_STALL_MS =
+  Number.isFinite(configuredEmptyCompletionStreamStallMs) &&
+  configuredEmptyCompletionStreamStallMs >= EMPTY_COMPLETION_PRELUDE_MS
+    ? configuredEmptyCompletionStreamStallMs
+    : EMPTY_COMPLETION_PRELUDE_MS * 4;
 const configuredEmptyCompletionPreludeBytes = Number(
   process.env.CODEX_ROUTER_EMPTY_COMPLETION_PRELUDE_BYTES || 1024 * 1024,
 );
@@ -4301,6 +4310,7 @@ async function handleResponses(request, response, requestUrl) {
           ? new EmptyCompletionGuard(contentType, {
               maxPreludeBytes: EMPTY_COMPLETION_PRELUDE_BYTES,
               maxPreludeMs: EMPTY_COMPLETION_PRELUDE_MS,
+              maxStreamStallMs: EMPTY_COMPLETION_STREAM_STALL_MS,
             })
           : undefined;
       if (guard) {

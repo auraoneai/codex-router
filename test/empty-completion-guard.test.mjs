@@ -16,11 +16,13 @@ async function runGuard(
     chunkSize = 0,
     maxPreludeBytes,
     maxPreludeMs,
+    maxStreamStallMs,
   } = {},
 ) {
   const guard = new EmptyCompletionGuard(contentType, {
     ...(maxPreludeBytes === undefined ? {} : { maxPreludeBytes }),
     ...(maxPreludeMs === undefined ? {} : { maxPreludeMs }),
+    ...(maxStreamStallMs === undefined ? {} : { maxStreamStallMs }),
   });
   const chunks = [];
   const collector = new Writable({
@@ -48,6 +50,56 @@ async function runGuard(
     preludeLimit: guard.preludeLimitKind(),
   };
 }
+
+test("Responses in-progress heartbeats survive beyond the prelude deadline", async () => {
+  const created = [
+    "event: response.created",
+    'data: {"type":"response.created","response":{"id":"r-live"}}',
+    "",
+    "",
+  ].join("\n");
+  const heartbeat = [
+    "event: response.in_progress",
+    'data: {"type":"response.in_progress","response":{"id":"r-live","status":"in_progress"}}',
+    "",
+    "",
+  ].join("\n");
+  const answer = [
+    "event: response.output_text.delta",
+    'data: {"type":"response.output_text.delta","delta":"done"}',
+    "",
+    "event: response.completed",
+    'data: {"type":"response.completed","response":{"id":"r-live","output":[]}}',
+    "",
+    "",
+  ].join("\n");
+  async function* liveTurn() {
+    yield Buffer.from(created + heartbeat);
+    await new Promise((resolve) => setTimeout(resolve, 12));
+    yield Buffer.from(heartbeat);
+    await new Promise((resolve) => setTimeout(resolve, 12));
+    yield Buffer.from(answer);
+  }
+  const guard = new EmptyCompletionGuard("text/event-stream", {
+    maxPreludeMs: 10,
+    maxStreamStallMs: 20,
+  });
+  const chunks = [];
+  await pipeline(
+    Readable.from(liveTurn()),
+    guard,
+    new Writable({
+      write(chunk, _encoding, callback) {
+        chunks.push(Buffer.from(chunk));
+        callback();
+      },
+    }),
+  );
+  assert.equal(guard.releasedForLiveness(), false);
+  assert.equal(guard.hasContent(), true);
+  assert.equal(guard.preludeLimitKind(), "time");
+  assert.match(Buffer.concat(chunks).toString("utf8"), /done/);
+});
 
 const CONTENT_TURN = [
   'event: response.created',
