@@ -200,9 +200,13 @@ test("provider registry exposes configured API and OAuth model families", () => 
     ],
   );
   assert.equal(PROVIDERS.get("deepseek").baseUrl, "https://api.deepseek.com");
-  assert.equal(MODELS.filter((model) => model.provider === "kiro-prism").length, 28);
+  assert.equal(MODELS.filter((model) => model.provider === "kiro-prism").length, 29);
   assert.equal(MODEL_BY_SLUG.get("kiro-prism/grok-4.6")?.upstreamModel, "grok-4.6");
   assert.equal(MODEL_BY_SLUG.get("kiro-prism/kimi-k3")?.upstreamModel, "kimi-k3");
+  assert.equal(
+    MODEL_BY_SLUG.get("kiro-prism/deepseek-v4.1-flash")?.upstreamModel,
+    "deepseek-v4.1-flash",
+  );
   assert.equal(MODELS.filter((model) => model.provider === "free-prism").length, 2);
   assert.equal(MODELS.filter((model) => model.provider === "cloudflare-workers-ai").length, 2);
   assert.equal(PROVIDERS.get("free-prism").ownedBy, "AuraOne");

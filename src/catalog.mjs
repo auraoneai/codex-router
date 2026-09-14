@@ -782,12 +782,14 @@ const KIRO_PICKER_ORDER = new Map([
   ["kiro-prism/gpt-5.6-sol", 1],
   ["kiro-prism/gpt-5.6-luna", 2],
   ["kiro-prism/gpt-5.6-terra", 3],
+  ["kiro-prism/deepseek-v4.1-flash", 4],
 ]);
 
 const KIRO_PICKER_DISPLAY_NAMES = new Map([
   ["kiro-prism/gpt-5.6-sol", "5.6 Sol · GPT (Kiro Prism)"],
   ["kiro-prism/gpt-5.6-luna", "5.6 Luna · GPT (Kiro Prism)"],
   ["kiro-prism/gpt-5.6-terra", "5.6 Terra · GPT (Kiro Prism)"],
+  ["kiro-prism/deepseek-v4.1-flash", "DeepSeek V4.1 Flash · Modal (Kiro Prism)"],
 ]);
 
 function pickerModelOrder(model) {
