@@ -479,24 +479,38 @@ test("native ChatGPT turns fall back before relay and remain on the working subs
   const childCodex = path.join(childRoot, "codex");
   const childAccounts = path.join(childState, "chatgpt-accounts");
   const childPolicy = path.join(childState, "chatgpt-account-policy.json");
+  const secondBackupId = "chatgpt_secondbackup000000";
+  const secondBackupAccount = "acct-second-backup";
   writePrivateJson(path.join(childCodex, "auth.json"), auth(defaultAccount, "unused-on-disk-default"));
   writePrivateJson(path.join(childAccounts, backupId, "auth.json"), auth(backupAccount, "backup-router-token"));
+  writePrivateJson(path.join(childAccounts, secondBackupId, "auth.json"), auth(secondBackupAccount, "second-backup-router-token"));
   writePrivateJson(childPolicy, {
     schemaVersion: 1,
     policy: "sticky-fallback",
     preferred: "default",
-    accounts: [{
-      id: backupId,
-      label: "Backup subscription",
-      state: "active",
-      accountFingerprint: createHash("sha256").update(backupAccount).digest("hex"),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    }],
+    accounts: [
+      {
+        id: backupId,
+        label: "Backup subscription",
+        state: "active",
+        accountFingerprint: createHash("sha256").update(backupAccount).digest("hex"),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      {
+        id: secondBackupId,
+        label: "Second backup subscription",
+        state: "active",
+        accountFingerprint: createHash("sha256").update(secondBackupAccount).digest("hex"),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    ],
   });
 
   const seen = [];
   let failureMode = "rate";
+  let revokedSent = false;
   const native = await mockServer(async (request, response) => {
     for await (const _chunk of request) { /* drain */ }
     seen.push({ authorization: request.headers.authorization, account: request.headers["chatgpt-account-id"] });
@@ -508,6 +522,17 @@ test("native ChatGPT turns fall back before relay and remain on the working subs
     if (request.headers.authorization === "Bearer caller-default-token" && failureMode === "auth") {
       response.writeHead(401, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ error: { message: "invalid session" } }));
+      return;
+    }
+    if (failureMode === "revoked" && !revokedSent) {
+      revokedSent = true;
+      response.writeHead(401, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        error: {
+          code: "token_revoked",
+          message: "Encountered invalidated oauth token for user",
+        },
+      }));
       return;
     }
     response.writeHead(200, { "Content-Type": "application/json" });
@@ -587,6 +612,22 @@ test("native ChatGPT turns fall back before relay and remain on the working subs
   const second = await call();
   assert.equal(second.status, 200, `${await second.text()}\n${errors}`);
   assert.deepEqual(seen.at(-1), { authorization: "Bearer backup-router-token", account: backupAccount });
+
+  failureMode = "revoked";
+  const revokedFailure = await fetch(`${base}/responses`, {
+    method: "POST",
+    headers: {
+      Authorization: "Bearer caller-default-token",
+      "ChatGPT-Account-Id": defaultAccount,
+      "Thread-Id": "revoked-token-must-fallback",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ model: "gpt-5.6-sol", input: "hello", stream: false }),
+  });
+  assert.equal(revokedFailure.status, 200, `${await revokedFailure.text()}\n${errors}`);
+  const revokedAttempts = seen.slice(-2);
+  assert.equal(revokedAttempts.length, 2);
+  assert.notEqual(revokedAttempts[0].account, revokedAttempts[1].account);
 });
 
 test("a banked reset is redeemed against the account's own Codex home", async () => {

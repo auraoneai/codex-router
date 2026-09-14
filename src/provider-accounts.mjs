@@ -405,6 +405,25 @@ export async function classifyProviderAccountResponse(response) {
       until: Date.now() + (retryAfterMs(response.headers) || DEFAULT_FAILURE_COOLDOWN_MS),
     };
   }
+  // A revoked OAuth credential is an account-local terminal condition, not a
+  // deterministic request failure.  It is therefore safe to remove that
+  // account's affinity and try another credential before any response bytes
+  // have been relayed.  Keep ordinary 401s fail-closed: a malformed key,
+  // missing scope, or caller authorization error must not silently spend a
+  // second account.
+  if (response.status === 401) {
+    let text = "";
+    try {
+      text = (await boundedResponseText(response)).toLowerCase();
+    } catch {}
+    const revoked = /(?:token[_ -]?revoked|invalidated oauth token|oauth token (?:has been )?revoked)/.test(text);
+    if (!revoked) return { recoverable: false };
+    return {
+      recoverable: true,
+      reason: "token_revoked",
+      until: Date.now() + DEFAULT_FAILURE_COOLDOWN_MS,
+    };
+  }
   if (![403, 503].includes(response.status)) return { recoverable: false };
   let text = "";
   try {

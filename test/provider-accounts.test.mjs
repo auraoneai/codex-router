@@ -77,6 +77,11 @@ test("only quota and rate-limit responses are account-recoverable", async () => 
   assert.equal((await classifyProviderAccountResponse(new Response("busy", { status: 429 }))).recoverable, true);
   assert.equal((await classifyProviderAccountResponse(new Response("quota exhausted", { status: 403 }))).recoverable, true);
   assert.equal((await classifyProviderAccountResponse(new Response("bad key", { status: 401 }))).recoverable, false);
+  const revoked = await classifyProviderAccountResponse(new Response(JSON.stringify({
+    error: { code: "token_revoked", message: "Encountered invalidated oauth token for user" },
+  }), { status: 401 }));
+  assert.equal(revoked.recoverable, true);
+  assert.equal(revoked.reason, "token_revoked");
   assert.equal((await classifyProviderAccountResponse(new Response("forbidden", { status: 403 }))).recoverable, false);
   assert.equal((await classifyProviderAccountResponse(new Response("bad request", { status: 400 }))).recoverable, false);
 });
