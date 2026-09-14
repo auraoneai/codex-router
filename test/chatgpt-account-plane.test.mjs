@@ -19,7 +19,7 @@ test("purpose inference maps labels without inventing fingerprints", () => {
   assert.equal(inferPurpose("Backup Pro", { state: "paused" }), "reserve");
 });
 
-test("soft leftover demotes new chats but sticky stays first", () => {
+test("soft leftover remains spendable for new and sticky chats until exhausted", () => {
   const leftoverById = new Map([
     ["default", { weekly: { remainingPercent: 12 } }],
     ["chatgpt_healthyaccount0001", { weekly: { remainingPercent: 40 }, fiveHour: { remainingPercent: 80 } }],
@@ -30,7 +30,7 @@ test("soft leftover demotes new chats but sticky stays first", () => {
     [{ id: "default" }, { id: "chatgpt_healthyaccount0001" }],
     { preferred: "default", leftoverById, order: ["default", "chatgpt_healthyaccount0001"] },
   );
-  assert.deepEqual(next.map((entry) => entry.id), ["chatgpt_healthyaccount0001", "default"]);
+  assert.deepEqual(next.map((entry) => entry.id), ["default", "chatgpt_healthyaccount0001"]);
   const sticky = orderChatGptAccountCandidates(
     [{ id: "default" }, { id: "chatgpt_healthyaccount0001" }],
     { sticky: "default", preferred: "default", leftoverById, order: ["default", "chatgpt_healthyaccount0001"] },

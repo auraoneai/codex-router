@@ -306,8 +306,8 @@ test("a reserve ChatGPT account auto-resumes after a leftover reset", async () =
   });
   assert.equal(usage.accounts.find((entry) => entry.id === backupId)?.state, "active");
   assert.equal(JSON.parse(readFileSync(policyPath, "utf8")).accounts.find((entry) => entry.id === backupId)?.state, "active");
-  assert.notEqual(usage.routing?.using, "default");
-  assert.equal(usage.skippedPreferred, true);
+  assert.equal(usage.routing?.using, "default", "positive preferred quota must be consumed before rotation");
+  assert.equal(usage.skippedPreferred, false);
 });
 
 test("preferred ChatGPT selection becomes conversation-sticky and respects cooldown", async () => {

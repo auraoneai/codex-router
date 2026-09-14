@@ -98,7 +98,11 @@ export function orderChatGptAccountCandidates(candidates, {
   const leftoverRank = (id) => {
     const health = leftoverHealth(leftover.get(id), softDrainPercent);
     if (health === "drained") return hasReserve(id) ? 3 : 4;
-    if (health === "soft") return 2;
+    // A low-but-positive window remains spendable.  Keep the soft state for
+    // operator visibility and reserve decisions, but do not use it to move new
+    // work away from the current/preferred account: doing so strands the last
+    // 1-15% on every subscription.  Conversation affinity still keeps a task
+    // together, and an actual zero/quota response advances to the next account.
     return 1;
   };
   const purposeRank = (id) => pinIndex.get(purposes.get(id)) ?? 50;
@@ -109,14 +113,12 @@ export function orderChatGptAccountCandidates(candidates, {
       const home = entry.id === preferred;
       if (quota === 1 && home) return 1;
       if (quota === 1) return 2;
-      if (quota === 2 && home) return 3;
-      if (quota === 2) return 4;
       // Drained on Codex quota but holding a live Luna reserve. Ahead of a fully
       // drained account, behind everything that still has ordinary quota.
-      if (quota === 3 && home) return 5;
-      if (quota === 3) return 6;
-      if (home) return 7;
-      return 8;
+      if (quota === 3 && home) return 3;
+      if (quota === 3) return 4;
+      if (home) return 5;
+      return 6;
     };
     const delta = rank(left) - rank(right);
     if (delta !== 0) return delta;
