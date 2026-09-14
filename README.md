@@ -332,6 +332,16 @@ Linux installations support the Codex CLI.
 | Qwen3.7 Plus (ClinePass) | `clinepass/qwen3.7-plus` | ClinePass API key |
 | Qwen3.8 Max (ClinePass) | `clinepass/qwen3.8-max` | ClinePass API key |
 
+Kiro Prism Responses streams emit parsed progress frames while long admission,
+compaction, and model work is still running. The router keeps its 30-second
+pre-content latency bound, then uses a separate 120-second post-release stall
+bound. Each complete progress frame resets the stall bound. This prevents the
+empty-completion guard from racing Prism's 30-second progress cadence and
+closing a healthy stream before `response.completed`, while still bounding a
+genuinely stalled stream. Operators can override the latter with
+`CODEX_ROUTER_EMPTY_COMPLETION_STREAM_STALL_MS`; it may not be shorter than the
+pre-content bound.
+
 Kimi has two API platforms and they are not interchangeable. `kimi-api` is the
 global console at platform.moonshot.ai; `kimi-api-cn` is the mainland console at
 platform.moonshot.cn. Accounts, billing, and keys are separate — a key minted on
