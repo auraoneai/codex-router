@@ -154,6 +154,21 @@ test("classifies Codex primary/secondary windows as 5-hour and weekly", () => {
   );
 });
 
+test("classifies an omitted paid rolling window as fully available", () => {
+  assert.deepEqual(
+    classifyCodexQuotaWindows({
+      planType: "pro",
+      primary: { usedPercent: 10, remainingPercent: 90, windowDurationMins: 10_080, resetsAt: 100 },
+      secondary: null,
+    }),
+    {
+      fiveHour: { usedPercent: 0, remainingPercent: 100, windowDurationMins: 300, resetsAt: null },
+      weekly: { usedPercent: 10, remainingPercent: 90, windowDurationMins: 10_080, resetsAt: 100 },
+      other: [],
+    },
+  );
+});
+
 test("the usage panel names a missing Codex instead of blaming the app-server", async () => {
   // `null`, not `undefined`: a default parameter fires for `undefined`, so
   // passing that resolved a real binary and the rejection never happened on any

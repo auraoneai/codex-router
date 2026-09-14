@@ -372,6 +372,8 @@ export interface ChatGptRoutingHint {
 export interface ChatGptAccountsUsageSnapshot {
   providerId: "openai" | string;
   fetchedAt?: string;
+  ageMs?: number | null;
+  stale?: boolean;
   preferred?: string;
   using?: string;
   skippedPreferred?: boolean;

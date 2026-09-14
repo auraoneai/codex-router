@@ -140,6 +140,22 @@ export function classifyCodexQuotaWindows(usage) {
     else if (kind === "weekly" && !classified.weekly) classified.weekly = entry;
     else classified.other.push(entry);
   }
+  // Codex omits an untouched rolling window instead of returning 0% used.
+  // Paid accounts still have that budget, so expose 100% rather than a dash.
+  if (
+    !classified.fiveHour &&
+    classified.weekly &&
+    ["plus", "pro", "team", "business", "enterprise"].includes(
+      String(usage?.planType || "").toLowerCase(),
+    )
+  ) {
+    classified.fiveHour = {
+      usedPercent: 0,
+      remainingPercent: 100,
+      windowDurationMins: 300,
+      resetsAt: null,
+    };
+  }
   return classified;
 }
 

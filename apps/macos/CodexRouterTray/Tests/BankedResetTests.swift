@@ -50,6 +50,24 @@ struct BankedResetTests {
     #expect(row(resetCredits: ChatGptAccountResetCredits(availableCount: -4)).canRedeemBankedReset == false)
   }
 
+  @Test("drained and expired rows render unavailable without rewriting manual state")
+  func effectiveAvailability() {
+    #expect(row(resetCredits: nil).state == "active")
+    #expect(row(resetCredits: nil).quotaDrained)
+    #expect(row(resetCredits: nil).effectivelyAvailable == false)
+    #expect(row(resetCredits: nil, session: "expired").effectivelyAvailable == false)
+  }
+
+  @Test("multi-account spend supplies the OpenAI headline total")
+  func aggregateSpend() {
+    let snapshot = ChatGptAccountsUsageSnapshot(
+      fetchedAt: "2026-09-13T19:26:00.000Z",
+      accounts: [],
+      spendToday: ["default": 561_000_000, "personal": 239_000_000]
+    )
+    #expect(snapshot.spendTodayTotal == 800_000_000)
+  }
+
   @Test("each unsuccessful outcome explains itself instead of claiming a reset")
   func outcomeMessages() {
     let label = "gc@veerone.com"

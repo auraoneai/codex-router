@@ -665,7 +665,11 @@ function callerNativeHeaders(request) {
 function nativeAccountCandidates(request) {
   const headers = callerNativeHeaders(request);
   const candidates = selectChatGptAccountCandidates(headers, routedConversationId(request));
-  return candidates.length ? candidates : [{ id: "default", headers }];
+  if (candidates.length) return candidates;
+  if (hasNativeSession(headers)) {
+    throw new Error("Every available ChatGPT account is paused, expired, or out of quota.");
+  }
+  return [{ id: "default", headers }];
 }
 
 // The reasoning depth for a turn that is about to spend an account's Luna

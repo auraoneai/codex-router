@@ -1140,6 +1140,11 @@ private struct IslandAccountQuotaTable: View {
           Text(routerLocalized("All usage"))
             .font(.system(size: 8, weight: .semibold, design: .monospaced))
             .foregroundStyle(routerMuted)
+          if store.chatGptAccountUsage?.stale == true {
+            Text(routerLocalized("STALE"))
+              .font(.system(size: 7, weight: .bold, design: .monospaced))
+              .foregroundStyle(routerRed)
+          }
           Spacer()
           Text("5h")
             .frame(width: 32, alignment: .trailing)
@@ -1161,23 +1166,31 @@ private struct IslandAccountQuotaTable: View {
               Button {
                 Task { await store.setChatGptAccountEnabled(account.id, account.state == "paused") }
               } label: {
-                IslandDenseSwitch(isOn: account.state != "paused", locked: account.id == "default")
+                IslandDenseSwitch(isOn: account.effectivelyAvailable, locked: account.id == "default")
                   .frame(width: IslandAccountQuotaPresentation.toggleHitWidth, height: IslandAccountQuotaPresentation.rowHeight)
                   .contentShape(Rectangle())
               }
               .buttonStyle(.plain)
-              .disabled(account.id == "default")
+              .disabled(account.id == "default" || (account.state != "paused" && !account.effectivelyAvailable))
               .help(
                 account.id == "default"
                   ? routerLocalized("Home login stays on")
-                  : account.state == "paused"
+                  : account.session != "usable"
+                    ? routerLocalized("Sign in again in Control Center")
+                    : account.quotaDrained
+                      ? routerLocalized("Quota exhausted until reset")
+                      : account.state == "paused"
                     ? routerLocalized("Turn this subscription on")
                     : routerLocalized("Turn this subscription off")
               )
               .accessibilityLabel(
                 account.id == "default"
                   ? routerLocalized("Home login stays on")
-                  : account.state == "paused"
+                  : account.session != "usable"
+                    ? routerLocalized("Subscription login unavailable")
+                    : account.quotaDrained
+                      ? routerLocalized("Subscription quota exhausted")
+                      : account.state == "paused"
                     ? routerLocalized("Turn this subscription on")
                     : routerLocalized("Turn this subscription off")
               )
@@ -1193,7 +1206,7 @@ private struct IslandAccountQuotaTable: View {
                   }
                   Text(account.label)
                     .font(.system(size: 10, weight: account.preferred == true ? .semibold : .medium, design: .rounded))
-                    .foregroundStyle(account.state == "paused" ? routerMuted : .white.opacity(0.92))
+                    .foregroundStyle(account.effectivelyAvailable ? .white.opacity(0.92) : routerMuted)
                     .lineLimit(1)
                   Spacer(minLength: 6)
                   quotaValue(account.fiveHour?.remainingPercent, width: 32)
@@ -1204,7 +1217,7 @@ private struct IslandAccountQuotaTable: View {
                 .contentShape(Rectangle())
               }
               .buttonStyle(.plain)
-              .disabled(account.state == "paused")
+              .disabled(!account.effectivelyAvailable)
               .help(
                 account.state == "paused"
                   ? routerLocalized("Paused accounts stay out of rotation")

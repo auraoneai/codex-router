@@ -440,6 +440,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     Task { await store.startPolling() }
     Task { await store.startActivityPolling() }
     Task { await store.startAccountUsagePolling() }
+    Task { await store.startChatGptAccountUsagePolling() }
     Task { await store.startProviderPolling() }
     store.publishWidgetSnapshot()
     if Self.launchedByUser {
@@ -731,6 +732,7 @@ final class RouterStore: ObservableObject {
   private var polling = false
   private var activityPolling = false
   private var accountUsagePolling = false
+  private var chatGptAccountUsagePolling = false
   private var providerPolling = false
   private let defaults = UserDefaults.standard
   private let islandVisibilityKey = "ModelRouterTray.islandVisible"
@@ -1427,7 +1429,10 @@ final class RouterStore: ObservableObject {
   }
 
   var selectedTodayTokens: Double {
-    dailyUsage(days: 1).last?.tokens ?? 0
+    if selectedUsageUsesChatGPT, let aggregate = chatGptAccountUsage?.spendTodayTotal {
+      return aggregate
+    }
+    return dailyUsage(days: 1).last?.tokens ?? 0
   }
 
   var selectedUsageResetDate: Date? {
@@ -1826,10 +1831,23 @@ final class RouterStore: ObservableObject {
     defer { accountUsagePolling = false }
     while !Task.isCancelled {
       await refreshAccountUsage()
-      await refreshChatGptAccountUsage()
       await refreshProviderUsage()
       do {
         try await Task.sleep(nanoseconds: 30 * 1_000_000_000)
+      } catch {
+        return
+      }
+    }
+  }
+
+  func startChatGptAccountUsagePolling() async {
+    guard !chatGptAccountUsagePolling else { return }
+    chatGptAccountUsagePolling = true
+    defer { chatGptAccountUsagePolling = false }
+    while !Task.isCancelled {
+      await refreshChatGptAccountUsage()
+      do {
+        try await Task.sleep(nanoseconds: 15 * 1_000_000_000)
       } catch {
         return
       }
@@ -4135,6 +4153,13 @@ struct ChatGptAccountUsageRow: Decodable, Identifiable, Equatable {
 
   var bankedResetCount: Int { max(0, resetCredits?.availableCount ?? 0) }
   var canRedeemBankedReset: Bool { bankedResetCount > 0 && session != "expired" }
+  var quotaDrained: Bool {
+    if health == "drained" { return true }
+    return [fiveHour, weekly].compactMap { $0?.remainingPercent }.contains { $0 <= 0.5 }
+  }
+  var effectivelyAvailable: Bool {
+    state != "paused" && session == "usable" && !quotaDrained
+  }
 
   init(
     id: String,
@@ -4182,6 +4207,8 @@ struct ChatGptAccountsUsageSnapshot: Decodable, Equatable {
   let routing: ChatGptRoutingHint?
   let spendToday: [String: Double]?
   let spendByPurpose: [String: Double]?
+  let ageMs: Double?
+  let stale: Bool?
   let accounts: [ChatGptAccountUsageRow]
 
   init(
@@ -4192,7 +4219,9 @@ struct ChatGptAccountsUsageSnapshot: Decodable, Equatable {
     skippedPreferred: Bool? = nil,
     routing: ChatGptRoutingHint? = nil,
     spendToday: [String: Double]? = nil,
-    spendByPurpose: [String: Double]? = nil
+    spendByPurpose: [String: Double]? = nil,
+    ageMs: Double? = nil,
+    stale: Bool? = nil
   ) {
     self.fetchedAt = fetchedAt
     self.preferred = preferred
@@ -4201,7 +4230,14 @@ struct ChatGptAccountsUsageSnapshot: Decodable, Equatable {
     self.routing = routing
     self.spendToday = spendToday
     self.spendByPurpose = spendByPurpose
+    self.ageMs = ageMs
+    self.stale = stale
     self.accounts = accounts
+  }
+
+  var spendTodayTotal: Double? {
+    guard let spendToday else { return nil }
+    return spendToday.values.reduce(0, +)
   }
 
   var usingAccount: ChatGptAccountUsageRow? {

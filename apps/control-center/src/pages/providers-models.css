@@ -322,6 +322,11 @@
 
 .pm-account-row.is-dragging { opacity: 0.55; }
 .pm-account-row.is-drop-target { border-color: var(--accent, #3d6d8c); }
+.pm-account-row.is-drained,
+.pm-account-row.is-unavailable {
+  border-color: color-mix(in srgb, var(--danger, #c23b2e) 38%, var(--line));
+  background: color-mix(in srgb, var(--danger, #c23b2e) 4%, var(--surface-1));
+}
 
 .pm-account-drag {
   margin: 1px 0 0;

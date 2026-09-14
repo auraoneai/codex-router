@@ -1839,7 +1839,9 @@ function ChatGptAccountsDialog({
         for (const row of rows) next[row.id] = row;
         setUsageById(next);
         setRouting(result.usage?.routing ?? result.routing ?? null);
-        setUsageUpdatedAt(Date.now());
+        const fetchedAt = result.usage?.fetchedAt ?? result.fetchedAt;
+        const fetchedAtMs = fetchedAt ? Date.parse(fetchedAt) : Number.NaN;
+        setUsageUpdatedAt(Number.isFinite(fetchedAtMs) ? fetchedAtMs : null);
       } catch {
         if (!cancelled && initial) setUsageById({});
       } finally {
@@ -1935,7 +1937,7 @@ function ChatGptAccountsDialog({
       <div className="pm-account-list" role="list">
         {accounts.map((account) => (
           <div
-            className={`pm-account-row${draggingId === account.id ? " is-dragging" : ""}${dropId === account.id ? " is-drop-target" : ""}`}
+            className={`pm-account-row${usageById[account.id]?.health === "drained" ? " is-drained" : ""}${account.session && account.session !== "usable" ? " is-unavailable" : ""}${draggingId === account.id ? " is-dragging" : ""}${dropId === account.id ? " is-drop-target" : ""}`}
             role="listitem"
             key={account.id}
             onDragOver={(event) => {
@@ -2044,6 +2046,7 @@ function ChatGptAccountsDialog({
                 {account.purpose || usageById[account.id]?.purpose ? `${account.purpose || usageById[account.id]?.purpose} · ` : ""}
                 {account.state}
                 {account.session ? ` · ${account.session}` : ""}
+                {usageById[account.id]?.health === "drained" ? " · quota exhausted" : ""}
                 {Number.isFinite(account.expiresInHours) ? ` · session ${account.expiresInHours}h` : ""}
                 {usageById[account.id]?.planType ? ` · ${usageById[account.id].planType}` : ""}
               </small>
@@ -2054,7 +2057,7 @@ function ChatGptAccountsDialog({
       </div>
       <small className="pm-account-refresh">
         {usageUpdatedAt
-          ? `Limits updated ${formatDateTime(usageUpdatedAt)} · refresh every 15s`
+          ? `${now - usageUpdatedAt > 90_000 ? "Quota snapshot stale" : "Quota snapshot updated"} ${formatDateTime(usageUpdatedAt)} · checking every 15s`
           : "Reading leftover 5-hour and weekly limits…"}
       </small>
       <form className="pm-credential-form pm-account-form" onSubmit={submit}>

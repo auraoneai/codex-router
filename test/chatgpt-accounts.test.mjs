@@ -33,6 +33,7 @@ const {
   chatGptAccountIsDrained,
   orderChatGptAccountCandidates,
   redeemChatGptAccountResetCredit,
+  runChatGptLeftoverProbeOnce,
   selectChatGptAccountCandidates,
   setChatGptAccountOrder,
   setChatGptAccountPurpose,
@@ -190,7 +191,7 @@ test("ChatGPT account labels can be renamed including the default login", () => 
   renameChatGptAccount(backupId, "Backup subscription");
 });
 
-test("new ChatGPT conversations skip drained leftovers until a conversation is sticky", () => {
+test("candidate ordering demotes drained leftovers before final eligibility filtering", () => {
   assert.equal(chatGptAccountIsDrained({ weekly: { remainingPercent: 0 } }), true);
   assert.equal(chatGptAccountIsDrained({ fiveHour: { remainingPercent: 0 }, weekly: { remainingPercent: 40 } }), true);
   assert.equal(chatGptAccountIsDrained({ weekly: { remainingPercent: 12 } }), false);
@@ -218,6 +219,34 @@ test("new ChatGPT conversations skip drained leftovers until a conversation is s
     },
   );
   assert.equal(sticky[0].id, "default");
+});
+
+test("fresh quota exhaustion removes sticky accounts and a reset admits them again", () => {
+  const caller = {
+    authorization: "Bearer default-test-token",
+    "chatgpt-account-id": defaultAccount,
+  };
+  rememberChatGptAccount("conversation-reset", "default");
+  writePrivateJson(path.join(stateDir, "chatgpt-account-usage.json"), {
+    fetchedAt: new Date().toISOString(),
+    accounts: [
+      { id: "default", state: "active", fiveHour: { remainingPercent: 0 }, weekly: { remainingPercent: 60 } },
+      { id: backupId, state: "active", fiveHour: { remainingPercent: 75 }, weekly: { remainingPercent: 40 } },
+    ],
+  });
+  const exhaustedSelection = selectChatGptAccountCandidates(caller, "conversation-reset")
+    .map((entry) => entry.id);
+  assert.equal(exhaustedSelection.includes("default"), false);
+  assert.equal(exhaustedSelection.includes(backupId), true);
+
+  writePrivateJson(path.join(stateDir, "chatgpt-account-usage.json"), {
+    fetchedAt: new Date().toISOString(),
+    accounts: [
+      { id: "default", state: "active", fiveHour: { remainingPercent: 100 }, weekly: { remainingPercent: 60 } },
+      { id: backupId, state: "active", fiveHour: { remainingPercent: 75 }, weekly: { remainingPercent: 40 } },
+    ],
+  });
+  assert.equal(selectChatGptAccountCandidates(caller, "conversation-reset")[0].id, "default");
 });
 
 test("ChatGPT account purposes persist and pin leftover-tied fallback", () => {
@@ -317,6 +346,64 @@ test("ChatGPT account usage probes each isolated Codex home", async () => {
   const backup = usage.accounts.find((entry) => entry.id === backupId);
   assert.equal(backup.weekly.remainingPercent, 10);
   assert.equal(backup.fiveHour.remainingPercent, 80);
+});
+
+test("ChatGPT account usage bounds parallel account probes", async () => {
+  let active = 0;
+  let maxActive = 0;
+  await chatGptAccountsUsage({
+    readUsage: async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      active -= 1;
+      return {
+        fetchedAt: new Date().toISOString(),
+        planType: "pro",
+        primary: { usedPercent: 10, remainingPercent: 90, windowDurationMins: 10_080 },
+        secondary: { usedPercent: 20, remainingPercent: 80, windowDurationMins: 300 },
+      };
+    },
+  });
+  assert.ok(maxActive > 1);
+  assert.ok(maxActive <= 4);
+});
+
+test("ChatGPT account usage preserves a last good row when its live probe times out", async () => {
+  const first = await chatGptAccountsUsage({
+    readUsage: async () => ({
+      fetchedAt: new Date().toISOString(),
+      planType: "plus",
+      primary: { usedPercent: 20, remainingPercent: 80, windowDurationMins: 10_080 },
+      secondary: { usedPercent: 25, remainingPercent: 75, windowDurationMins: 300 },
+    }),
+  });
+  const second = await chatGptAccountsUsage({
+    readUsage: async () => { throw new Error("temporary timeout"); },
+  });
+  const previous = first.accounts.find((account) => account.id === "default");
+  const retained = second.accounts.find((account) => account.id === "default");
+  assert.equal(retained.fiveHour.remainingPercent, previous.fiveHour.remainingPercent);
+  assert.equal(retained.weekly.remainingPercent, previous.weekly.remainingPercent);
+  assert.equal(retained.stale, true);
+  assert.equal(retained.error, "temporary timeout");
+});
+
+test("leftover probe is single-flight", async () => {
+  let reads = 0;
+  let release;
+  const deferred = new Promise((resolve) => { release = resolve; });
+  const read = async () => {
+    reads += 1;
+    await deferred;
+  };
+  const first = runChatGptLeftoverProbeOnce({ read });
+  const second = runChatGptLeftoverProbeOnce({ read });
+  assert.equal(first, second);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(reads, 1);
+  release();
+  await first;
 });
 
 test("paused ChatGPT profiles are not selected", () => {

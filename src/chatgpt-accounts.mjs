@@ -67,6 +67,7 @@ export { CHATGPT_ACCOUNT_PURPOSES, SOFT_DRAIN_PERCENT };
 const MAX_AFFINITIES = 5_000;
 const TRANSPORT_COOLDOWN_MS = 30_000;
 const EXPIRY_SKEW_MS = 120_000;
+const USAGE_PROBE_CONCURRENCY = 4;
 
 const affinities = new Map();
 const cooldowns = new Map();
@@ -1030,12 +1031,24 @@ export function selectChatGptAccountCandidates(callerHeaders, conversationId) {
     });
   }
   const sticky = conversationId ? affinities.get(affinityKey(conversationId))?.accountId : undefined;
+  const leftoverById = leftoverByIdFromCache(now);
+  const reserveById = reserveSelectionById(now) || new Map();
   const ordered = orderChatGptAccountCandidates(candidates, {
     sticky,
-    ...selectionOptions(policy, leftoverByIdFromCache(now), reserveSelectionById(now)),
+    ...selectionOptions(policy, leftoverById, reserveById),
   });
-  const ready = ordered.filter((entry) => (cooldowns.get(entry.id) || 0) <= now);
-  return ready.length ? ready : ordered;
+  // Quota exhaustion is derived availability, not persisted pause state. A
+  // fresh zero-percent snapshot removes the account even when an old chat is
+  // sticky; the next healthy snapshot admits it again automatically. A live
+  // Luna allowance is a separate budget and remains eligible.
+  const eligible = leftoverById.size
+    ? ordered.filter((entry) => (
+      !chatGptAccountIsDrained(leftoverById.get(entry.id)) ||
+      Boolean(reserveById.get(entry.id)?.present && reserveById.get(entry.id)?.allowed)
+    ))
+    : ordered;
+  const ready = eligible.filter((entry) => (cooldowns.get(entry.id) || 0) <= now);
+  return ready.length ? ready : eligible;
 }
 
 export function rememberChatGptAccount(conversationId, accountId) {
@@ -1083,17 +1096,31 @@ export async function chatGptAccountsUsage({
   if (cached) {
     try {
       const parsed = readUsageCacheFile();
-      if (parsed?.accounts?.length) return parsed;
+      if (parsed?.accounts?.length) {
+        const fetchedAt = Date.parse(parsed.fetchedAt);
+        const ageMs = Number.isFinite(fetchedAt) ? Math.max(0, Date.now() - fetchedAt) : null;
+        return {
+          ...parsed,
+          ageMs,
+          stale: ageMs === null || ageMs > LEFTOVER_PROBE_MS * 3,
+        };
+      }
     } catch {
       // Fall through to a live leftover probe.
     }
   }
   const snapshot = chatGptAccountsSnapshot();
-  const accounts = [];
-  for (const entry of snapshot.accounts) {
+  let previousById = new Map();
+  try {
+    const previous = readUsageCacheFile();
+    previousById = new Map((previous?.accounts || []).map((account) => [account.id, account]));
+  } catch {
+    // A missing or malformed cache should not block a live refresh.
+  }
+  const readAccount = async (entry) => {
     const preferred = Boolean(entry.preferred);
     if (entry.session !== "usable") {
-      accounts.push({
+      return {
         id: entry.id,
         label: entry.label,
         state: entry.state,
@@ -1103,15 +1130,14 @@ export async function chatGptAccountsUsage({
         fiveHour: null,
         weekly: null,
         error: entry.session === "expired" ? "Session expired." : "Session is not usable.",
-      });
-      continue;
+      };
     }
     try {
       const usage = await readUsage({
         codexHome: usageHomeForAccount(entry.id),
         timeoutMs,
       });
-      accounts.push({
+      return {
         id: entry.id,
         label: entry.label,
         state: entry.state,
@@ -1121,9 +1147,23 @@ export async function chatGptAccountsUsage({
         ...classifyCodexQuotaWindows(usage),
         resetCredits: usage.resetCredits ?? null,
         fetchedAt: usage.fetchedAt,
-      });
+      };
     } catch (error) {
-      accounts.push({
+      const previous = previousById.get(entry.id);
+      if (previous && (previous.fiveHour || previous.weekly)) {
+        return {
+          ...previous,
+          label: entry.label,
+          state: entry.state,
+          preferred,
+          session: entry.session,
+          purpose: entry.purpose,
+          using: entry.using,
+          stale: true,
+          error: error instanceof Error ? error.message : "Usage unavailable.",
+        };
+      }
+      return {
         id: entry.id,
         label: entry.label,
         state: entry.state,
@@ -1133,8 +1173,13 @@ export async function chatGptAccountsUsage({
         fiveHour: null,
         weekly: null,
         error: error instanceof Error ? error.message : "Usage unavailable.",
-      });
+      };
     }
+  };
+  const accounts = [];
+  for (let index = 0; index < snapshot.accounts.length; index += USAGE_PROBE_CONCURRENCY) {
+    const batch = snapshot.accounts.slice(index, index + USAGE_PROBE_CONCURRENCY);
+    accounts.push(...await Promise.all(batch.map(readAccount)));
   }
   const result = applyLeftoverPolicy({
     providerId: "openai",
@@ -1191,14 +1236,27 @@ export async function redeemChatGptAccountResetCredit(accountId, {
 }
 
 let leftoverProbe;
+let leftoverProbeInFlight;
+
+export function runChatGptLeftoverProbeOnce({
+  read = chatGptAccountsUsage,
+  onError = (error) => {
+    console.error(`[codex-router] chatgpt leftover probe failed: ${error instanceof Error ? error.message : error}`);
+  },
+} = {}) {
+  if (leftoverProbeInFlight) return leftoverProbeInFlight;
+  leftoverProbeInFlight = Promise.resolve()
+    .then(() => read())
+    .catch(onError)
+    .finally(() => {
+      leftoverProbeInFlight = undefined;
+    });
+  return leftoverProbeInFlight;
+}
 
 export function startChatGptLeftoverProbe({ intervalMs = LEFTOVER_PROBE_MS } = {}) {
   if (leftoverProbe || discoveryDisabled()) return leftoverProbe;
-  const run = () => {
-    chatGptAccountsUsage().catch((error) => {
-      console.error(`[codex-router] chatgpt leftover probe failed: ${error instanceof Error ? error.message : error}`);
-    });
-  };
+  const run = () => runChatGptLeftoverProbeOnce();
   leftoverProbe = setInterval(run, intervalMs);
   leftoverProbe.unref?.();
   run();
