@@ -586,7 +586,7 @@ export async function readRequestBody(
 // is crossed.
 export async function readResponseBody(
   upstream,
-  { maxBytes = MAX_BUFFERED_RESPONSE_BYTES, signal } = {},
+  { maxBytes = MAX_BUFFERED_RESPONSE_BYTES, signal, onChunk } = {},
 ) {
   if (!upstream?.body) return Buffer.alloc(0);
   const reader = upstream.body.getReader();
@@ -603,6 +603,7 @@ export async function readResponseBody(
         ? result.value
         : new Uint8Array(result.value || []);
       total += chunk.byteLength;
+      onChunk?.(chunk.byteLength, total);
       if (total > limit) {
         await reader.cancel().catch(() => {});
         const error = new Error(`Upstream response exceeds ${limit} bytes.`);

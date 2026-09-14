@@ -21,6 +21,7 @@ export const COMPACTION_OPERATION_STATES = Object.freeze([
 ]);
 
 const DEFAULT_MAX_ENTRIES = 256;
+const DEFAULT_LEASE_MS = 180_000;
 
 function canonical(value) {
   if (Array.isArray(value)) return value.map(canonical);
@@ -76,24 +77,44 @@ export class CompactionOperationStore {
     return structuredClone(operation);
   }
 
-  begin({ id, owner, rootSession, sourceBoundary, model, fallbackCheckpoint }) {
+  begin({
+    id,
+    owner,
+    rootSession,
+    sourceBoundary,
+    model,
+    fallbackCheckpoint,
+    leaseOwner = `${process.pid}:${randomUUID()}`,
+    leaseMs = DEFAULT_LEASE_MS,
+  }) {
     const existing = this.get(id, owner);
     if (existing) {
+      const reclaimable =
+        existing.state === "abandoned_or_expired" ||
+        (existing.state === "failed_retriable" &&
+          existing.failureCode === "compaction_router_restart");
       const operation = {
         ...existing,
+        ...(reclaimable
+          ? {
+              state: "running",
+              attemptCount: Number(existing.attemptCount || 0) + 1,
+              leaseOwner,
+              leaseExpiresAt: this.now() + leaseMs,
+              failureCode: null,
+            }
+          : {}),
         reuseCount: Number(existing.reuseCount || 0) + 1,
         duplicatePreventionCount:
           Number(existing.duplicatePreventionCount || 0) +
           (existing.state === "running" ? 1 : 0),
-        reattachmentCount:
-          Number(existing.reattachmentCount || 0) +
-          (existing.state === "completed" && existing.checkpoint ? 1 : 0),
+        reattachmentCount: Number(existing.reattachmentCount || 0),
         lastReusedAt: this.now(),
         updatedAt: this.now(),
       };
       this.operations[id] = operation;
       this.#persist();
-      return { created: false, operation: structuredClone(operation) };
+      return { created: reclaimable, reclaimed: reclaimable, operation: structuredClone(operation) };
     }
     const timestamp = this.now();
     const operation = {
@@ -110,6 +131,11 @@ export class CompactionOperationStore {
       reattachmentCount: 0,
       fallbackCheckpoint,
       checkpoint: null,
+      leaseOwner,
+      leaseExpiresAt: timestamp + leaseMs,
+      deliveredAt: null,
+      installedAt: null,
+      continuationAcceptedAt: null,
       createdAt: timestamp,
       updatedAt: timestamp,
     };
@@ -123,6 +149,8 @@ export class CompactionOperationStore {
       checkpoint,
       completedAt: this.now(),
       completedAfterDisconnect: Boolean(completedAfterDisconnect),
+      leaseOwner: null,
+      leaseExpiresAt: null,
     });
   }
 
@@ -131,13 +159,40 @@ export class CompactionOperationStore {
       id,
       owner,
       terminal ? "failed_terminal" : "failed_retriable",
-      { failureCode },
+      { failureCode, leaseOwner: null, leaseExpiresAt: null },
     );
   }
 
   recordFallback(id, owner) {
     return this.#transition(id, owner, "failed_retriable", {
       fallbackDeliveredAt: this.now(),
+    });
+  }
+
+  recordDelivered(id, owner, { reattached = false } = {}) {
+    const current = this.get(id, owner);
+    if (!current?.checkpoint) return current;
+    return this.#transition(id, owner, current.state, {
+      deliveredAt: this.now(),
+      deliveryCount: Number(current.deliveryCount || 0) + 1,
+      reattachmentCount:
+        Number(current.reattachmentCount || 0) + (reattached ? 1 : 0),
+    });
+  }
+
+  recordContinuationAccepted(owner, rootSession) {
+    const candidate = Object.values(this.operations)
+      .filter((operation) =>
+        operation.owner === owner &&
+        operation.rootSession === rootSession &&
+        operation.state === "completed" &&
+        operation.deliveredAt &&
+        !operation.continuationAcceptedAt)
+      .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+    if (!candidate) return undefined;
+    return this.#transition(candidate.id, owner, candidate.state, {
+      installedAt: this.now(),
+      continuationAcceptedAt: this.now(),
     });
   }
 
@@ -182,6 +237,11 @@ export class CompactionOperationStore {
         (total, operation) => total + Number(operation.reattachmentCount || 0),
         0,
       ),
+      resultsDelivered: operations.filter((operation) => operation.deliveredAt).length,
+      resultsInstalled: operations.filter((operation) => operation.installedAt).length,
+      sessionsAutoContinued: operations.filter(
+        (operation) => operation.continuationAcceptedAt,
+      ).length,
       deterministicFallbacks: operations.filter(
         (operation) => Number.isFinite(operation.fallbackDeliveredAt),
       ).length,
@@ -230,8 +290,10 @@ export class CompactionOperationStore {
       // belongs to a process that no longer exists and cannot complete it.
       if (operation.state === "running") {
         operation.state = "failed_retriable";
-        operation.failureCode = "compaction_transport_timeout";
+        operation.failureCode = "compaction_router_restart";
         operation.updatedAt = this.now();
+        operation.leaseOwner = null;
+        operation.leaseExpiresAt = null;
         changed = true;
       }
     }

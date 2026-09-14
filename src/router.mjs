@@ -30,12 +30,19 @@ import {
   prepareCompaction,
   renderCheckpoint,
   renderCompactionValue,
+  validCompactionModelOutput,
 } from "./compaction-checkpoint.mjs";
 import {
   compactionOperationId,
   compactionOperationStore,
   compactionSourceBoundary,
 } from "./compaction-operation-store.mjs";
+
+// Process-local waiters attach duplicate HTTP requests to the one durable
+// operation. The durable record is authoritative across restarts; this map is
+// only the notification channel that lets concurrent callers receive the
+// finished checkpoint instead of an immediate lossy fallback.
+const compactionExecutions = new Map();
 import { handlePanelRequest, isPanelRoute } from "./desktop-panel.mjs";
 import { handleGeminiRequest, isGeminiRoute } from "./gemini-surface.mjs";
 import {
@@ -810,7 +817,7 @@ function routedConversationId(request) {
     .slice(0, 43);
 }
 
-function routedHeaders(request) {
+function routedHeaders(request, { jobType } = {}) {
   const conversationId = routedConversationId(request);
   return {
     Authorization: `Bearer ${INTERNAL_KEY}`,
@@ -818,6 +825,7 @@ function routedHeaders(request) {
     "Accept-Encoding": "identity",
     "User-Agent": `codex-router/${VERSION}`,
     ...(conversationId ? { "X-Codex-Router-Conversation": conversationId } : {}),
+    ...(jobType ? { "X-Prism-Job-Type": jobType } : {}),
   };
 }
 
@@ -2331,25 +2339,57 @@ function extractResponseText(payload) {
 // is empty, in which case asking it again only buys the same rejection.
 function compactionAttempts(route, aged, { allowFailover = true } = {}) {
   if (!allowFailover) return [route];
-  const settings = readFailoverSettings();
-  if (!settings.enabled) return [route];
-  const candidates = rankFailoverCandidates(
-    selectedConfiguredListedModels().filter((model) => !readHiddenModels().has(model.slug)),
-    {
-      from: route,
-      // The transcript being summarized is nearly all of the request, so its
-      // serialized size is the honest measure of what a candidate must hold.
-      estimatedTokens: estimateInputTokens(JSON.stringify(aged.input ?? [])),
-      needsImage: inputHasImage(aged.input),
-      // Compaction sends `tools: []`, so no candidate needs the collaboration
-      // proof to serve one.
-      chain: settings.chain,
+  // Remote compaction has a deliberately narrower recovery policy than an
+  // ordinary turn.  Sol is the preferred summarizer, while Opus is the
+  // capacity/transport/validation recovery model.  Do not rely on the user's
+  // general failover chain containing Opus: that setting controls task turns,
+  // not the internal operation required to keep a session alive.
+  const configuredOpus = MODEL_BY_SLUG.get("kiro-prism/claude-opus-5");
+  const opus = configuredOpus && readProviderSelection().includes(configuredOpus.provider)
+    ? configuredOpus
+    : undefined;
+  return opus && route.slug !== opus.slug ? [route, opus] : [route];
+}
+
+function compactionAttemptSignal(operationSignal) {
+  const configured = Number(
+    process.env.CODEX_ROUTER_COMPACTION_ATTEMPT_DEADLINE_MS || 80_000,
+  );
+  const timeoutMs = Number.isFinite(configured) && configured > 0 ? configured : 80_000;
+  const controller = new AbortController();
+  const firstEventMs = Number(
+    process.env.CODEX_ROUTER_COMPACTION_FIRST_EVENT_DEADLINE_MS || 30_000,
+  );
+  const idleMs = Number(
+    process.env.CODEX_ROUTER_COMPACTION_PROGRESS_IDLE_DEADLINE_MS || 30_000,
+  );
+  const abortFor = (reason) => controller.abort(reason);
+  const overallTimer = setTimeout(() => abortFor("compaction attempt deadline"), timeoutMs);
+  overallTimer.unref?.();
+  let progressTimer = setTimeout(
+    () => abortFor("compaction first-event deadline"),
+    Number.isFinite(firstEventMs) && firstEventMs > 0 ? firstEventMs : 30_000,
+  );
+  progressTimer.unref?.();
+  const abortFromOperation = () => controller.abort(operationSignal.reason);
+  if (operationSignal?.aborted) abortFromOperation();
+  else operationSignal?.addEventListener("abort", abortFromOperation, { once: true });
+  return {
+    signal: controller.signal,
+    progress() {
+      clearTimeout(progressTimer);
+      progressTimer = setTimeout(
+        () => abortFor("compaction progress-idle deadline"),
+        Number.isFinite(idleMs) && idleMs > 0 ? idleMs : 30_000,
+      );
+      progressTimer.unref?.();
     },
-  )
-    .slice(0, MAX_FAILOVER_HOPS)
-    .map((entry) => entry.model);
-  if (!candidates.length) return [route];
-  return providerCooldown(route.provider) ? candidates : [route, ...candidates];
+    dispose() {
+      clearTimeout(overallTimer);
+      clearTimeout(progressTimer);
+      operationSignal?.removeEventListener("abort", abortFromOperation);
+    },
+  };
 }
 
 // One compaction attempt against one model. Everything route-dependent lives
@@ -2398,7 +2438,7 @@ async function summarizeWith(request, payload, route, aged, prepared, signal) {
   const serialized = JSON.stringify(body);
   const upstream = await fetch(`${GATEWAY_BASE}/responses`, {
     method: "POST",
-    headers: routedHeaders(request),
+    headers: routedHeaders(request, { jobType: "compaction" }),
     body: serialized,
     signal,
   });
@@ -2440,14 +2480,48 @@ async function summarize(request, payload, route, signal, { allowFailover = true
   let last;
   for (let index = 0; index < attempts.length; index += 1) {
     const attemptRoute = attempts[index];
-    const sent = await summarizeWith(request, payload, attemptRoute, aged, prepared, signal);
+    const attempt = compactionAttemptSignal(signal);
+    let sent;
+    try {
+      sent = await summarizeWith(
+        request,
+        payload,
+        attemptRoute,
+        aged,
+        prepared,
+        attempt.signal,
+      );
+    } catch (error) {
+      attempt.dispose();
+      if (signal?.aborted || !allowFailover || index + 1 >= attempts.length) throw error;
+      failed.push({ route: attemptRoute, status: 504 });
+      last ??= {
+        ok: false,
+        status: 504,
+        payload: { error: { message: "Compaction attempt timed out." } },
+        toolResultAging: aged.stats,
+        route: attemptRoute,
+      };
+      if (index + 1 < attempts.length) {
+        logFailover(
+          attemptRoute,
+          attempts[index + 1],
+          "compaction/attempt_timeout",
+          504,
+          "retrying",
+        );
+      }
+      continue;
+    }
     let bytes;
     try {
       bytes = await readResponseBody(sent.upstream, {
         maxBytes: 32 * 1024 * 1024,
-        signal,
+        signal: attempt.signal,
+        onChunk: () => attempt.progress(),
       });
     } catch (error) {
+      attempt.dispose();
       if (error?.code === "ERR_UPSTREAM_RESPONSE_TOO_LARGE") {
         return {
           ok: false,
@@ -2456,8 +2530,20 @@ async function summarize(request, payload, route, signal, { allowFailover = true
           toolResultAging: aged.stats,
         };
       }
+      if (!signal?.aborted && allowFailover && index + 1 < attempts.length) {
+        failed.push({ route: attemptRoute, status: 504 });
+        last ??= {
+          ok: false,
+          status: 504,
+          payload: { error: { message: "Compaction attempt timed out." } },
+          toolResultAging: aged.stats,
+          route: attemptRoute,
+        };
+        continue;
+      }
       throw error;
     }
+    attempt.dispose();
     if (bytes.length > 32 * 1024 * 1024) {
       return {
         ok: false,
@@ -2484,16 +2570,36 @@ async function summarize(request, payload, route, signal, { allowFailover = true
           `[codex-router] compaction read no model text model=${attemptRoute.slug} provider=${canonicalProviderId(attemptRoute.provider)}`,
         );
       }
-      return {
-        ok: true,
-        checkpoint: finalizeCheckpoint(answer, prepared),
-        input: originalInput,
+      if (validCompactionModelOutput(answer)) {
+        return {
+          ok: true,
+          checkpoint: finalizeCheckpoint(answer, prepared),
+          input: originalInput,
+          usage,
+          toolResultAging: aged.stats,
+          route: attemptRoute,
+          failed,
+          ...(attemptRoute === route ? {} : { failoverFrom: route.slug }),
+        };
+      }
+      failed.push({ route: attemptRoute, status: 502, usage });
+      last ??= {
+        ok: false,
+        status: 502,
+        payload: { error: { message: "Compaction model returned an invalid checkpoint." } },
         usage,
         toolResultAging: aged.stats,
         route: attemptRoute,
-        failed,
-        ...(attemptRoute === route ? {} : { failoverFrom: route.slug }),
       };
+      if (!allowFailover || index + 1 >= attempts.length) return { ...last, failed };
+      logFailover(
+        attemptRoute,
+        attempts[index + 1],
+        "compaction/invalid_checkpoint",
+        502,
+        "retrying",
+      );
+      continue;
     }
     // Each attempt that failed was still sent and still billed, so it is
     // metered on its own row exactly as on the turn path -- otherwise a
@@ -2517,7 +2623,10 @@ async function summarize(request, payload, route, signal, { allowFailover = true
       retryAfterSeconds: Number(sent.upstream.headers.get("retry-after")),
     });
     if (!allowFailover) return { ...last, failed };
-    if (!verdict.swap) return { ...last, failed };
+    const compactionRecoverable = [408, 429, 500, 502, 503, 504].includes(
+      sent.upstream.status,
+    );
+    if (!verdict.swap && !compactionRecoverable) return { ...last, failed };
     recordProviderCooldown(attemptRoute.provider, verdict);
     if (index + 1 < attempts.length) {
       logFailover(
@@ -2628,8 +2737,14 @@ async function handleRoutedCompaction(
     fallbackCheckpoint,
   });
   if (!admission.created) {
-    const stored = admission.operation;
+    if (admission.operation.state === "running" && compactionExecutions.has(operationId)) {
+      await compactionExecutions.get(operationId);
+    }
+    const stored = compactionOperationStore.get(operationId, owner) || admission.operation;
     const checkpoint = stored.checkpoint || stored.fallbackCheckpoint;
+    if (stored.state === "completed" && stored.checkpoint) {
+      compactionOperationStore.recordDelivered(operationId, owner, { reattached: true });
+    }
     if (v2) {
       if (payload.stream === false) {
         const item = {
@@ -2653,6 +2768,18 @@ async function handleRoutedCompaction(
     };
   }
 
+  let settleExecution;
+  const execution = new Promise((resolve) => {
+    settleExecution = resolve;
+  });
+  compactionExecutions.set(operationId, execution);
+  const finishExecution = () => {
+    settleExecution?.();
+    if (compactionExecutions.get(operationId) === execution) {
+      compactionExecutions.delete(operationId);
+    }
+  };
+
   const configuredDeadline = Number(process.env.CODEX_ROUTER_COMPACTION_DEADLINE_MS || 170_000);
   const deadlineMs = Number.isFinite(configuredDeadline) && configuredDeadline > 0
     ? configuredDeadline
@@ -2667,7 +2794,7 @@ async function handleRoutedCompaction(
   const operationSignal = deadlineController.signal;
   let result;
   try {
-    result = await summarize(request, payload, route, operationSignal, { allowFailover: false });
+    result = await summarize(request, payload, route, operationSignal, { allowFailover });
   } catch (error) {
     clearTimeout(deadline);
     if (!allowFailover) {
@@ -2677,6 +2804,7 @@ async function handleRoutedCompaction(
           ? "compaction_transport_timeout"
           : "compaction_upstream_timeout",
       });
+      finishExecution();
       throw error;
     }
     const failed = compactionOperationStore.fail(operationId, owner, {
@@ -2685,6 +2813,7 @@ async function handleRoutedCompaction(
         : "compaction_upstream_timeout",
     });
     compactionOperationStore.recordFallback(operationId, owner);
+    finishExecution();
     const checkpoint = failed.fallbackCheckpoint;
     if (v2) {
       if (payload.stream === false) {
@@ -2725,6 +2854,7 @@ async function handleRoutedCompaction(
           ? "compaction_transport_timeout"
           : "compaction_upstream_timeout",
       });
+      finishExecution();
       writeJson(response, result.status, result.payload);
       return {
         status: result.status,
@@ -2739,6 +2869,7 @@ async function handleRoutedCompaction(
       : "compaction_upstream_timeout";
     const failed = compactionOperationStore.fail(operationId, owner, { failureCode });
     compactionOperationStore.recordFallback(operationId, owner);
+    finishExecution();
     const checkpoint = failed.fallbackCheckpoint;
     if (v2) {
       if (payload.stream === false) {
@@ -2766,6 +2897,8 @@ async function handleRoutedCompaction(
   compactionOperationStore.complete(operationId, owner, result.checkpoint, {
     completedAfterDisconnect: signal.aborted,
   });
+  compactionOperationStore.recordDelivered(operationId, owner);
+  finishExecution();
   if (v2) {
     if (payload.stream === false) {
       const item = {
@@ -3436,6 +3569,7 @@ async function handleResponses(request, response, requestUrl) {
   let preludeLimitRetryable = false;
   let finalStatus;
   let activityStatus;
+  let continuationEvidence;
   let usageRecorded = false;
   bindClientAbort(request, response, () => {
     clientGone = true;
@@ -3460,6 +3594,15 @@ async function handleResponses(request, response, requestUrl) {
     const compactV2 =
       Array.isArray(payload.input) &&
       payload.input.at(-1)?.type === "compaction_trigger";
+    if (!compactV1 && !compactV2) {
+      const rootSession = threadIdFromHeaders(request.headers);
+      if (rootSession) {
+        continuationEvidence = {
+          owner: String(request.headers["x-codex-router-caller"] || "local"),
+          rootSession,
+        };
+      }
+    }
     requestedModel = typeof payload.model === "string" ? payload.model : "";
     const threadModel = internalThreadModel(request, requestedModel).model;
     // ChatGPT's native backend does not expose the compact endpoint on every
@@ -4638,6 +4781,17 @@ async function handleResponses(request, response, requestUrl) {
     throw error;
   } finally {
     const status = activityStatus ?? finalStatus ?? response.statusCode;
+    if (
+      continuationEvidence &&
+      status >= 200 &&
+      status < 300 &&
+      (!clientGone || usageTransform?.completedResponseObserved() === true)
+    ) {
+      compactionOperationStore.recordContinuationAccepted(
+        continuationEvidence.owner,
+        continuationEvidence.rootSession,
+      );
+    }
     activity.finish(status);
     // Timestamped per-request timing for latency diagnosis. Never gated on
     // QUIET: the production LaunchAgent hard-sets CODEX_ROUTER_QUIET=1. A

@@ -500,6 +500,19 @@ where no retained source proves it; that is evidence preservation, not amnesia.
 If edge or origin limits change, set `CODEX_ROUTER_COMPACTION_DEADLINE_MS` below
 the shortest enforced timeout and restart the router service.
 
+The normal recovery policy gives Sol the first bounded attempt, then moves
+recoverable capacity, transport, HTTP 408/429/5xx, malformed, empty, truncated,
+or reasoning-only failures to Kiro Prism Opus 5. This is internal compaction
+only; it does not switch the conversation's task model.
+`CODEX_ROUTER_COMPACTION_ATTEMPT_DEADLINE_MS` defaults to `80000` and must stay
+below the overall deadline, which defaults to `170000`.
+First-event and progress-idle deadlines each default to `30000` through
+`CODEX_ROUTER_COMPACTION_FIRST_EVENT_DEADLINE_MS` and
+`CODEX_ROUTER_COMPACTION_PROGRESS_IDLE_DEADLINE_MS`. A Router restart orphans
+the old worker; the next identical request reclaims that durable row under a
+fresh lease. Same-process retries do not regenerate a bounded attempt that
+already reached its stored fallback.
+
 ## Voice Mode reports an unsupported `/v1/live` route
 
 Codex Voice uses native realtime endpoints that are separate from the Responses

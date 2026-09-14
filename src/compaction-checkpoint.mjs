@@ -930,6 +930,16 @@ function modelContractErrors(value) {
   return errors;
 }
 
+// The router must distinguish a model-produced checkpoint from the safe
+// deterministic checkpoint `finalizeCheckpoint` builds when model output is
+// unusable.  The latter preserves continuity, but it is a recovery fallback,
+// not a successful generation and must not prevent the compaction-only Opus
+// attempt.
+export function validCompactionModelOutput(rawModelText) {
+  const candidate = modelObject(rawModelText);
+  return modelContractErrors(candidate).length === 0;
+}
+
 function validRefs(value, prefix, sources, catalogSourceIds, invalid, remaining) {
   const accepted = [];
   for (const id of uniqueStrings(Array.isArray(value) ? value : [], MAX_REFERENCED_SOURCES)) {

@@ -277,15 +277,19 @@ Routed compaction is a durable single-flight operation. Its identity binds the
 authenticated caller, propagated root thread, exact source boundary, selected
 model, and checkpoint policy version. The router records the operation before
 calling the provider. A repeated request with the same identity reuses the
-stored checkpoint, or the already-recorded conservative fallback, instead of
-starting a second provider generation. Completed and timed-out operations
+stored checkpoint or waits for the same live execution instead of starting a
+second provider generation. A conservative fallback is returned only after
+the durable operation exhausts its recovery path. Completed and timed-out operations
 survive router restarts in `compaction-operations.json` under the private state
 directory. A row left `running` by a terminated router is reconciled to a
-retriable timeout during the next start.
+retriable restart state; the next identical request reclaims it under a new
+lease with an incremented attempt count. A same-process retry after a bounded
+failed attempt reuses the stored fallback instead of generating twice.
 
 The local health response exposes aggregate lifecycle evidence only: retained
-state counts, idempotent reuse, duplicate suppression, stored-result
-reattachment, post-disconnect completion, deterministic fallback, recovery
+state counts, idempotent reuse, duplicate suppression, result delivery and
+reattachment, accepted same-thread continuation, post-disconnect completion,
+deterministic fallback, recovery
 latency, and sanitized failure classes. It never publishes operation or session
 identities, checkpoint text, credentials, or protected route details.
 
@@ -298,6 +302,15 @@ verification remains fail-closed: it never certifies a fallback as service by
 the requested route. The fallback can be more conservative than a successful
 model summary, but it preserves source records and avoids leaving the Codex
 session stuck in a repeat-compaction loop.
+
+Sol's individual attempt is bounded to 80 seconds by default with
+`CODEX_ROUTER_COMPACTION_ATTEMPT_DEADLINE_MS`. Recoverable capacity,
+transport, HTTP 408/429/5xx, malformed, empty, truncated, or reasoning-only
+results retry the internal compaction on Kiro Prism Opus 5. The conversation's
+ordinary task model is unchanged.
+First response data and each later data chunk reset separate 30-second
+first-event and progress-idle timers. The 80-second attempt deadline remains
+the outer bound for one model.
 
 Routed turns that carry a native OpenAI compaction item are unchanged by this
 work: the router does not yet build a checkpoint from them, and continues to

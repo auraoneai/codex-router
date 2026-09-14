@@ -1119,15 +1119,26 @@ model, and checkpoint policy. The default 170-second compaction deadline occurs
 before the edge's observed timeout; a timeout returns the stored conservative
 `kcr2:` fallback, and an identical client retry reuses that operation without a
 second upstream generation. Completed and timed-out operations survive restarts
-in the private router state directory. Override the deadline with
+in the private router state directory. A row orphaned by a Router restart is
+reclaimed under a new lease with an incremented attempt count; an ordinary
+same-process retry after a bounded deadline reuses its fallback and does not
+regenerate. Override the deadline with
 `CODEX_ROUTER_COMPACTION_DEADLINE_MS` when the deployed edge budget changes.
+Sol receives the first bounded attempt. Recoverable capacity, transport,
+HTTP 408/429/5xx, malformed, empty, truncated, or reasoning-only results move
+only the internal compaction operation to `kiro-prism/claude-opus-5`; the
+user's ordinary task remains on Sol. The per-attempt default is 80 seconds and
+is configurable with `CODEX_ROUTER_COMPACTION_ATTEMPT_DEADLINE_MS` inside the
+170-second overall operation deadline. First response data and later
+progress-idle periods are independently bounded at 30 seconds.
 After admission, the bounded upstream compaction belongs to the durable
 operation rather than the initiating HTTP connection. If that caller or the
 public edge disconnects first, the router continues the operation to its
 deadline, stores a successful result exactly once, and reattaches it on retry.
 The local health payload exposes only aggregate lifecycle diagnostics under
 `resourceLimits.compactionOperations`: retained state counts, idempotent
-reuses, concurrent duplicates prevented, stored results and reattachments,
+reuses, concurrent duplicates prevented, stored results, deliveries,
+reattachments, and accepted same-thread post-compaction continuations,
 deterministic fallbacks, recovery latency, sanitized failure classes, and
 completions that occurred after the initiating connection disappeared. It never
 exposes checkpoint text, operation identities, owner/session values, or private

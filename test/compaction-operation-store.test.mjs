@@ -68,6 +68,9 @@ test("begin is durable single-flight and completed results survive restart", () 
     completedAfterDisconnect: 0,
     storedResults: 1,
     storedResultsReattached: 0,
+    resultsDelivered: 0,
+    resultsInstalled: 0,
+    sessionsAutoContinued: 0,
     deterministicFallbacks: 0,
     recoveryLatencyMs: { count: 1, max: 0, average: 0 },
     failuresByCode: {},
@@ -110,6 +113,9 @@ test("snapshot distinguishes in-flight duplicate prevention from fallback delive
     completedAfterDisconnect: 0,
     storedResults: 0,
     storedResultsReattached: 0,
+    resultsDelivered: 0,
+    resultsInstalled: 0,
+    sessionsAutoContinued: 0,
     deterministicFallbacks: 1,
     recoveryLatencyMs: { count: 1, max: 75, average: 75 },
     failuresByCode: { compaction_transport_timeout: 1 },
@@ -137,5 +143,49 @@ test("owner mismatch fails closed and stale running work becomes retriable", () 
   const restarted = store(filePath, () => now);
   const recovered = restarted.get("cmpop_private", "owner-a");
   assert.equal(recovered.state, "failed_retriable");
-  assert.equal(recovered.failureCode, "compaction_transport_timeout");
+  assert.equal(recovered.failureCode, "compaction_router_restart");
+  const reclaimed = restarted.begin({
+    id: "cmpop_private",
+    owner: "owner-a",
+    rootSession: "root-a",
+    sourceBoundary: "boundary-a",
+    model: "sol",
+    fallbackCheckpoint: { safe: true },
+  });
+  assert.equal(reclaimed.created, true);
+  assert.equal(reclaimed.reclaimed, true);
+  assert.equal(reclaimed.operation.state, "running");
+  assert.equal(reclaimed.operation.attemptCount, 2);
+});
+
+test("delivery and accepted continuation are recorded separately", () => {
+  let now = 10;
+  const operations = new CompactionOperationStore({
+    filePath: path.join(mkdtempSync(path.join(tmpdir(), "compaction-delivery-")), "ops.json"),
+    now: () => now,
+  });
+  const spec = {
+    id: "cmpop_delivery",
+    owner: "owner-a",
+    rootSession: "root-a",
+    sourceBoundary: "boundary-a",
+    model: "sol",
+    fallbackCheckpoint: { safe: true },
+  };
+  operations.begin(spec);
+  now = 20;
+  operations.complete(spec.id, spec.owner, { complete: true });
+  now = 30;
+  operations.recordDelivered(spec.id, spec.owner, { reattached: true });
+  let current = operations.get(spec.id, spec.owner);
+  assert.equal(current.deliveredAt, 30);
+  assert.equal(current.installedAt, null);
+  assert.equal(current.continuationAcceptedAt, null);
+  now = 40;
+  operations.recordContinuationAccepted(spec.owner, spec.rootSession);
+  current = operations.get(spec.id, spec.owner);
+  assert.equal(current.installedAt, 40);
+  assert.equal(current.continuationAcceptedAt, 40);
+  assert.equal(operations.snapshot().storedResultsReattached, 1);
+  assert.equal(operations.snapshot().sessionsAutoContinued, 1);
 });

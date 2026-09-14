@@ -2005,15 +2005,11 @@ test("compaction never treats reasoning as final text and falls back to chat con
 
   try {
     await waitFor(`${routerBase(routerPort)}/models`, router);
-    const reasoningOnly = await compact();
-    assert.deepEqual(reasoningOnly.source_refs.requirements, []);
-    assert.deepEqual(reasoningOnly.sources, {});
-    assert.doesNotMatch(JSON.stringify(reasoningOnly), /REASONING ONLY DRAFT/u);
-
     const chatFallback = await compact();
     assert.deepEqual(chatFallback.source_refs.requirements, ["U001"]);
     assert.deepEqual(Object.keys(chatFallback.sources), ["U001"]);
     assert.equal(chatFallback.orientation.objective, "Chat fallback final answer.");
+    assert.doesNotMatch(JSON.stringify(chatFallback), /REASONING ONLY DRAFT/u);
 
     const topLevel = await compact();
     assert.deepEqual(topLevel.source_refs.requirements, ["U001"]);
@@ -5745,7 +5741,16 @@ test("thread compaction stays on its task model while threadless internal turns 
   });
   const gateway = await mockServer(async (request, response) => {
     gatewayRequests.push(await bodyJson(request));
-    json(response, 200, { route: "external" });
+    json(response, 200, {
+      route: "external",
+      id: "resp-route-compaction",
+      object: "response",
+      output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({
+        objective: "continue",
+        requirement_refs: [], attempt_refs: [], observation_refs: [],
+        unverified: [], unknowns: [], blockers: [], next_step: "continue",
+      }) }] }],
+    });
   });
   const routerPort = await openPort();
   const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-native-picker-"));
@@ -5958,7 +5963,11 @@ test("routed compaction records usage and converts a provider failure into a che
       id: "resp-summary",
       object: "response",
       output: [
-        { type: "message", content: [{ type: "output_text", text: "compact summary" }] },
+        { type: "message", content: [{ type: "output_text", text: JSON.stringify({
+          objective: "compact summary",
+          requirement_refs: [], attempt_refs: [], observation_refs: [],
+          unverified: [], unknowns: [], blockers: [], next_step: "continue",
+        }) }] },
       ],
       usage: { input_tokens: 1234, output_tokens: 56, total_tokens: 1290 },
     });
@@ -6019,7 +6028,7 @@ test("routed compaction records usage and converts a provider failure into a che
     assert.ok(
       fallback.orientation.unknowns.includes("Task state must be reconstructed from retained evidence."),
     );
-    const events = await waitForUsageEvents(stateDir, 2, router);
+    const events = await waitForUsageEvents(stateDir, 3, router);
     const failure = events.at(-1);
     assert.equal(failure.model, "deepseek/deepseek-v4-pro");
     assert.equal(failure.provider, "deepseek");
@@ -6119,7 +6128,16 @@ test("remote compaction survives caller disconnect and reattaches the completed 
     json(response, 200, {
       id: "resp-after-disconnect",
       object: "response",
-      output: [{ type: "message", content: [{ type: "output_text", text: "stored after disconnect" }] }],
+      output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({
+        objective: "survive disconnect",
+        requirement_refs: [],
+        attempt_refs: [],
+        observation_refs: [],
+        unverified: [],
+        unknowns: [],
+        blockers: [],
+        next_step: "continue",
+      }) }] }],
     });
   });
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "routing-compaction-disconnect-"));
@@ -6183,6 +6201,108 @@ test("remote compaction survives caller disconnect and reattaches the completed 
   }
 });
 
+test("remote compaction uses the dedicated Sol to Opus recovery chain", async () => {
+  const seen = [];
+  const gateway = await mockServer(async (request, response) => {
+    const body = await bodyJson(request);
+    seen.push(body.model);
+    if (body.model === "kiro-prism-gpt-5-6-sol") {
+      if (JSON.stringify(body.input).includes("invalid checkpoint")) {
+        json(response, 200, {
+          id: "resp-invalid-sol-compaction",
+          object: "response",
+          output: [{ type: "reasoning", summary: [{ type: "summary_text", text: "not a checkpoint" }] }],
+        });
+        return;
+      }
+      json(response, 504, { error: { message: "upstream timed out" } });
+      return;
+    }
+    json(response, 200, {
+      id: "resp-opus-compaction",
+      object: "response",
+      output: [{
+        type: "message",
+        content: [{
+          type: "output_text",
+          text: JSON.stringify({
+            objective: "continue the original task",
+            requirement_refs: [],
+            attempt_refs: [],
+            observation_refs: [],
+            unverified: [],
+            unknowns: [],
+            blockers: [],
+            next_step: "continue",
+          }),
+        }],
+      }],
+    });
+  });
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "routing-compaction-sol-opus-"));
+  writeFileSync(
+    path.join(stateDir, "enabled-providers.json"),
+    `${JSON.stringify({ version: 1, providers: ["kiro-prism"] })}\n`,
+  );
+  writeFileSync(path.join(stateDir, "kiro-prism-api-key.secret"), "test-prism-key\n");
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    MODEL_ROUTER_STATE_DIR: stateDir,
+    CODEX_ROUTER_QUIET: "1",
+  });
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/responses/compact`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer CODEX_CALLER_SECRET",
+        "Content-Type": "application/json",
+        "x-codex-thread-id": "thread-sol-opus",
+      },
+      body: JSON.stringify({
+        model: "kiro-prism/gpt-5.6-sol",
+        input: [{
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "preserve this task" }],
+        }],
+      }),
+    });
+    assert.equal(response.status, 200, await response.text());
+    assert.deepEqual(seen, [
+      "kiro-prism-gpt-5-6-sol",
+      "kiro-prism-claude-opus-5",
+    ]);
+    const invalid = await fetch(`${routerBase(routerPort)}/responses/compact`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer CODEX_CALLER_SECRET",
+        "Content-Type": "application/json",
+        "x-codex-thread-id": "thread-sol-opus-invalid",
+      },
+      body: JSON.stringify({
+        model: "kiro-prism/gpt-5.6-sol",
+        input: [{
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "invalid checkpoint recovery" }],
+        }],
+      }),
+    });
+    assert.equal(invalid.status, 200, await invalid.text());
+    assert.deepEqual(seen.slice(-2), [
+      "kiro-prism-gpt-5-6-sol",
+      "kiro-prism-claude-opus-5",
+    ]);
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 // AGENTS.md requires the same collaboration handling on `/responses` and
 // `/responses/compact` alike. Compaction replays the whole conversation, so a
 // `/goal` or subagent session compacting through a routed model would otherwise
@@ -6222,7 +6342,11 @@ test("routed compaction resolves subagent handoffs before summarizing", async ()
       id: "resp-summary",
       object: "response",
       output: [
-        { type: "message", content: [{ type: "output_text", text: "compact summary" }] },
+        { type: "message", content: [{ type: "output_text", text: JSON.stringify({
+          objective: "compact summary",
+          requirement_refs: [], attempt_refs: [], observation_refs: [],
+          unverified: [], unknowns: [], blockers: [], next_step: "continue",
+        }) }] },
       ],
     });
   });
@@ -6242,6 +6366,7 @@ test("routed compaction resolves subagent handoffs before summarizing", async ()
         Authorization: "Bearer CHATGPT_SESSION_TOKEN",
         "ChatGPT-Account-Id": "account-id",
         "Content-Type": "application/json",
+        "x-codex-router-exact-route": "1",
       },
       body: JSON.stringify({
         model: "kimi-oauth/k3",
