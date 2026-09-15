@@ -5732,7 +5732,7 @@ test("router redirects native background turns to the configured routed model", 
   }
 });
 
-test("thread compaction stays on its task model while threadless internal turns inherit the routed model", async () => {
+test("native children stay native while threadless internal compaction inherits the routed model", async () => {
   const nativeRequests = [];
   const gatewayRequests = [];
   const native = await mockServer(async (request, response) => {
@@ -5770,6 +5770,10 @@ test("thread compaction stays on its task model while threadless internal turns 
   database.prepare("insert into threads values (?, ?)").run(
     "33333333-3333-4333-8333-333333333333",
     "kiro-prism/gpt-5.6-sol",
+  );
+  database.prepare("insert into threads values (?, ?)").run(
+    "44444444-4444-4444-8444-444444444444",
+    "gpt-5.6-sol",
   );
   database.close();
   writeFileSync(
@@ -5820,22 +5824,26 @@ test("thread compaction stays on its task model while threadless internal turns 
     assert.equal(nativeRequests[0].model, "gpt-6-astra");
     assert.equal(gatewayRequests.length, 0);
 
-    assert.equal((await send({ "X-OpenAI-Subagent": "1" })).status, 200);
-    assert.equal(nativeRequests.length, 1);
-    assert.equal(gatewayRequests.length, 1);
-    assert.equal(gatewayRequests[0].model, "kimi-oauth-k3");
+    assert.equal((await send({
+      "X-OpenAI-Subagent": "review-child",
+      "Thread-Id": "44444444-4444-4444-8444-444444444444",
+      "X-Codex-Parent-Thread-Id": "22222222-2222-4222-8222-222222222222",
+    })).status, 200);
+    assert.equal(nativeRequests.length, 2);
+    assert.equal(nativeRequests.at(-1).model, "gpt-6-astra");
+    assert.equal(gatewayRequests.length, 0);
 
     assert.equal((await compact("/responses/compact", "compact v1")).status, 200);
-    assert.equal(nativeRequests.length, 1);
-    assert.equal(gatewayRequests.length, 2);
-    assert.equal(gatewayRequests[1].model, "kimi-oauth-k3");
+    assert.equal(nativeRequests.length, 2);
+    assert.equal(gatewayRequests.length, 1);
+    assert.equal(gatewayRequests[0].model, "kimi-oauth-k3");
 
     assert.equal((await compact(
       "/responses/compact",
       "native thread compact",
       "22222222-2222-4222-8222-222222222222",
     )).status, 200);
-    assert.equal(nativeRequests.length, 1);
+    assert.equal(nativeRequests.length, 2);
     assert.equal(gatewayRequests.at(-1).model, "kimi-oauth-kimi-for-coding");
 
     assert.equal((await compact(
@@ -5843,30 +5851,30 @@ test("thread compaction stays on its task model while threadless internal turns 
       "routed thread compact",
       "33333333-3333-4333-8333-333333333333",
     )).status, 200);
-    assert.equal(nativeRequests.length, 1);
+    assert.equal(nativeRequests.length, 2);
     assert.equal(gatewayRequests.at(-1).model, "kiro-prism-gpt-5-6-sol");
 
     assert.equal((await continuation(
       "11111111-1111-4111-8111-111111111111",
       "gpt-5.6-sol",
     )).status, 200);
-    assert.equal(nativeRequests.length, 1);
+    assert.equal(nativeRequests.length, 2);
     assert.equal(gatewayRequests.at(-1).model, "kimi-oauth-k3");
 
     assert.equal((await compact("/responses", [
       { type: "message", role: "user", content: [{ type: "input_text", text: "keep" }] },
       { type: "compaction_trigger" },
     ])).status, 200);
-    assert.equal(nativeRequests.length, 1);
-    assert.equal(gatewayRequests.length, 6);
-    assert.equal(gatewayRequests[5].model, "kimi-oauth-k3");
+    assert.equal(nativeRequests.length, 2);
+    assert.equal(gatewayRequests.length, 5);
+    assert.equal(gatewayRequests[4].model, "kimi-oauth-k3");
 
     assert.equal((await continuation("11111111-1111-4111-8111-111111111111")).status, 200);
-    assert.equal(nativeRequests.length, 1);
+    assert.equal(nativeRequests.length, 2);
     assert.equal(gatewayRequests.at(-1).model, "kimi-oauth-k3");
 
     assert.equal((await continuation("22222222-2222-4222-8222-222222222222")).status, 200);
-    assert.equal(nativeRequests.length, 2);
+    assert.equal(nativeRequests.length, 3);
     assert.equal(nativeRequests.at(-1).model, "gpt-reserve");
   } finally {
     await stopChild(router);

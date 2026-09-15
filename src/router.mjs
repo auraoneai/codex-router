@@ -3658,13 +3658,19 @@ async function handleResponses(request, response, requestUrl) {
         // Following a remembered model still works if the hint file cannot be written.
       }
     }
-    // Delegated/background agents and threadless internal compaction turns
-    // inherit the operator's routed model. A compaction request that names an
-    // existing thread stays with that thread's model; otherwise changing the
-    // picker in another window can strand a long-running native task at the
-    // exact moment it needs to compact.
-    const followed = request.headers["x-openai-subagent"] ||
-      ((compactV1 || compactV2) && !threadCompactionRoute) ||
+    // Threadless internal compaction turns inherit the operator's routed
+    // model. Ordinary delegated turns do not: Codex has already placed the
+    // child's effective model in the request and/or its thread record. Using
+    // the machine-global remembered model merely because a request carries
+    // `x-openai-subagent` lets a model selected in an unrelated window move a
+    // healthy native parent's child onto an external provider. Explicit routed
+    // child models still resolve through `registeredRoute` above, while native
+    // failure takeover remains the separate post-failure path below.
+    //
+    // A compaction request that names an existing thread stays with that
+    // thread's model; otherwise changing the picker in another window can
+    // strand a long-running native task at the exact moment it needs to compact.
+    const followed = ((compactV1 || compactV2) && !threadCompactionRoute) ||
       (!threadModel && requestedModel === "gpt-reserve")
       ? followOperatorModel(registeredRoute, {
           modelsBySlug: MODEL_BY_SLUG,
