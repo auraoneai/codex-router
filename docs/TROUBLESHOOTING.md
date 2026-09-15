@@ -259,6 +259,33 @@ Fix it by editing `contextWindow` and `autoCompact` (85% of the window) in
 curating the model again. Either way run `./bin/install` and restart the
 service so the picker catalog and the gateway routes carry the new figures.
 
+## A native subagent appeared under an unrelated routed model
+
+An ordinary Codex child inherits the effective model Codex placed in its
+request or stored for its child thread. The `x-openai-subagent` header only
+identifies collaboration traffic; it must not apply the machine-global model
+remembered from another window. Older Router builds did treat that header as a
+routing instruction, so a healthy native parent's child could unexpectedly
+appear in an external provider's usage records.
+
+Update the Router and restart its service to load the provider-inheritance
+fix. If a native child still moves, inspect the policies that are allowed to do
+so intentionally:
+
+```sh
+./bin/control model-sync status
+./bin/control native-redirect status
+./bin/control failover status
+```
+
+Model synchronization can apply one chosen model across turns. Native redirect
+can move otherwise unregistered native background requests before dispatch.
+Native takeover can move a request only after the native backend returns a
+qualifying usage failure and before output is relayed. The remembered operator
+model by itself must not move an ordinary native child. Threadless internal
+compaction is a separate exception and may use that remembered route without
+changing the parent or child's business-turn model.
+
 ## Finished subagents stay Working
 
 Codex 0.147 keeps a child visually working after it has already written

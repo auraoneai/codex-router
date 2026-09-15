@@ -47,9 +47,13 @@ turns.
 ## Spawned threads and model inheritance
 
 For a new local Codex thread, omit the `model` field unless the user
-explicitly requested one. The router selects the parent routed model. An
-explicit model is never overridden. Follow-up messages retain the target
-thread's settings, and cloud tasks choose their model outside this relay.
+explicitly requested one. Codex then carries the parent or thread's effective
+model into the child; the router does not infer a child provider from
+`x-openai-subagent` or from the machine-global remembered model. Explicitly
+routed children remain routed, native children remain native, and follow-up
+messages retain the target thread's settings. Threadless internal compaction is
+the separate exception that may follow the remembered routed model. Cloud
+tasks choose their model outside this relay.
 
 ## What the token and usage numbers mean
 

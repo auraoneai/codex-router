@@ -326,6 +326,23 @@ They are never sent to an external model provider.
 Commands, permissions, MCP tools, skills, and task state remain in Codex. Only
 model inference and external-model compaction are routed.
 
+Delegation metadata does not select a provider. On an ordinary child turn,
+Codex's effective request model and the stored child-thread model are
+authoritative; `x-openai-subagent` alone never applies the machine-global
+remembered route. An explicitly routed child stays routed, while a native
+child stays native. Two separately configured policies can intentionally
+change that outcome: model synchronization can rewrite the turn to the chosen
+global model, and native redirect can move an otherwise unregistered native
+background model before dispatch. Neither behavior is inferred merely from
+the request being a subagent.
+
+Compaction and failure recovery have different boundaries. Compaction naming a
+thread follows that thread's route; a native thread may use the configured
+routed compactor. Only threadless internal compaction and threadless
+`gpt-reserve` may follow the remembered routed model. Native takeover is
+evaluated only after the native upstream returns a qualifying usage failure and
+before any response byte reaches the client.
+
 Codex collaboration messages can place a delegated subagent task in native
 OpenAI `encrypted_content`. External providers cannot read that opaque item. For
 routed subagents only, the router uses the already-authenticated native Codex

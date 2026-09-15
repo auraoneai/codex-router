@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Native Codex subagents no longer follow an unrelated window's remembered
+  routed model.** The `x-openai-subagent` header is collaboration metadata, not
+  permission to replace a child's effective model with the machine-global
+  remembered route. Ordinary native children now remain on their native parent
+  provider, while explicitly routed children continue to use their registered
+  route. Thread-addressed compaction still follows its owning thread,
+  threadless internal compaction may still use the remembered routed model,
+  and configured native redirect and post-failure takeover remain separate,
+  explicit policies.
+
 - **Reinstalling over a state directory owned by another checkout no longer
   deadlocks.** The installers recorded the state directory's new owner only
   after the background service reported healthy, while the service itself

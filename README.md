@@ -997,6 +997,30 @@ reasoning effort, and the global defaults stop applying to it. Every other windo
 and scheduled task is untouched. Choosing the default again in that window hands
 it back to the router, so nothing has to be un-pinned by hand.
 
+#### Child and internal turn routing
+
+A child is not moved merely because it is a subagent. Codex's effective request
+model and stored child-thread model decide an ordinary child turn: a native
+parent's native child stays native, while an explicitly routed child stays on
+that routed model. The model remembered from another picker window is not a
+child-routing instruction.
+
+The related controls are deliberately separate. **Use one model everywhere**
+can intentionally synchronize task turns. Native redirect can move otherwise
+unregistered native background requests before dispatch:
+
+```sh
+./bin/control native-redirect status
+./bin/control native-redirect set ROUTED_MODEL
+./bin/control native-redirect clear
+```
+
+Thread-addressed compaction follows its owning thread (a native thread may use
+the separately configured routed compactor). Threadless internal compaction may
+follow the remembered routed model. Native takeover, described next, is only
+considered after the native backend returns a qualifying usage failure. These
+paths do not silently change a healthy native parent or child's task model.
+
 ### Continue on another model when ChatGPT usage runs out
 
 The signed-in ChatGPT plan is flat-rate, so a closed usage window used to end the
@@ -1011,9 +1035,11 @@ The full order is three stages, and only the last one is configured here:
 
 1. **Native ChatGPT**, until the primary limit is spent.
 2. **The ChatGPT reserve allowance** (`gpt-reserve`). The Codex app escalates to
-   this by itself; the router relays those turns untouched so a second budget on
-   a subscription you already pay for is never skipped for a routed model. It is
-   deliberately not a selectable setting, and an escalation never pins a thread.
+   this by itself. A known native thread remains on its native path, a known
+   routed thread remains on its stored route, and a threadless internal request
+   may follow the remembered routed model. That preserves the second budget on
+   a subscription you already pay for without treating every child as a routed
+   turn. Reserve escalation is not a selectable setting and never pins a thread.
 3. **Other accounts that still hold a reserve allowance**, if reserve rotation is
    on. See below.
 4. **The takeover model**, once every ChatGPT allowance is spent and the

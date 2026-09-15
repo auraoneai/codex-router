@@ -1749,6 +1749,16 @@ purpose.
 
 ## Routed subagent regression prevention
 
+- Treat `x-openai-subagent` as collaboration metadata, never as
+  provider-selection authority. Codex has already selected an ordinary child's
+  effective model in the request and/or stored child thread. A native parent's
+  native child must remain on the native endpoint even when an unrelated
+  window remembers an external model, and an explicitly routed child must keep
+  its registered route. Do not feed ordinary child turns through
+  `followOperatorModel`. Keep remembered-model following limited to threadless
+  internal compaction and threadless `gpt-reserve`, keep native redirect as a
+  separate pre-dispatch policy, and keep native takeover after an actual native
+  failure. `test/routing.test.mjs` must cover these boundaries together.
 - A normal `/responses` smoke test does not cover Codex collaboration. Current
   model-generated subagent tasks and messages can arrive as native
   `encrypted_content`, with visible text ending at `Payload:`. External models
