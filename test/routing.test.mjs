@@ -6430,6 +6430,82 @@ test("routed compaction resolves subagent handoffs before summarizing", async ()
   }
 });
 
+// Prism measures the final Kiro payload after its own normalization and fitted
+// payload reuse. Router still owns durable compaction orchestration, but it
+// must not run a second byte-ratio context estimate before that authoritative
+// boundary or replace the usage Prism reports afterward.
+test("Kiro Prism exclusively owns authoritative context estimation", async () => {
+  const gatewayBodies = [];
+  const gateway = await mockServer(async (request, response) => {
+    gatewayBodies.push(await bodyJson(request));
+    const completed = {
+      type: "response.completed",
+      response: {
+        id: "resp_prism_authoritative_estimate",
+        usage: { input_tokens: 0, output_tokens: 12, total_tokens: 12 },
+      },
+    };
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(
+      `event: response.output_text.delta\ndata: ${JSON.stringify({ type: "response.output_text.delta", delta: "ok" })}\n\n` +
+        `event: response.completed\ndata: ${JSON.stringify(completed)}\n\ndata: [DONE]\n\n`,
+    );
+  });
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "routing-prism-estimation-owner-"));
+  writeFileSync(
+    path.join(stateDir, "enabled-providers.json"),
+    `${JSON.stringify({ version: 1, providers: ["kiro-prism"] })}\n`,
+  );
+  writeFileSync(path.join(stateDir, "kiro-prism-api-key.secret"), "test-prism-key\n");
+  writeFileSync(
+    path.join(stateDir, "tool-result-aging.json"),
+    JSON.stringify({ version: 1, enabled: true, nativeEnabled: false }),
+  );
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    MODEL_ROUTER_STATE_DIR: stateDir,
+  });
+  const instructions = "preserve this instruction exactly";
+  // This clears both the pressure threshold and the model's declared context
+  // window under Router's byte-ratio heuristic. Prism must still receive it
+  // unchanged and make the only authoritative admission decision.
+  const input = "x".repeat(950_000);
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer CODEX_CALLER_SECRET",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "kiro-prism/gpt-5.6-sol",
+        instructions,
+        input,
+      }),
+    });
+    assert.equal(response.status, 200, router.testErrors());
+    const streamed = await response.text();
+    assert.match(streamed, /"input_tokens":0/);
+    assert.equal(gatewayBodies.length, 1);
+    assert.equal(gatewayBodies[0].instructions, instructions);
+    assert.equal(gatewayBodies[0].input, input);
+
+    const [event] = await waitForUsageEvents(stateDir, 1, router);
+    assert.equal(event.model, "kiro-prism/gpt-5.6-sol");
+    assert.equal(event.inputTokens, 0);
+    assert.equal("estimatedInputTokens" in event, false);
+    assert.doesNotMatch(router.testErrors(), /estimated-input-tokens=/);
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
 // Issue #95: opencode's Go endpoint reports `input_tokens: 0` for its DeepSeek
 // V4 models, so Codex's context counter never climbs, auto-compaction never
 // fires, and the provider eventually rejects the turn at its real limit. Codex

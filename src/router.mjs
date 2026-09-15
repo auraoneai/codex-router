@@ -3369,7 +3369,11 @@ async function prepareRoutedRequest({
   normalizedInput,
   agingEnabled,
 }) {
-  const tokenMaxxing = agingEnabled && tokenMaxxingActive({
+  // Prism performs the authoritative measurement against the final Kiro
+  // payload, after its own normalization and any fitted-payload reuse. A
+  // byte-ratio pass here would be a second, less informed context estimate.
+  // Other routed providers still need Router's conservative pressure signal.
+  const tokenMaxxing = agingEnabled && !delegatesContextEstimation(route) && tokenMaxxingActive({
     enabled: true,
     estimatedTokens: estimateInputTokens(
       JSON.stringify({ ...payload, input: normalizedInput }),
@@ -3393,6 +3397,10 @@ async function prepareRoutedRequest({
     agedInput: aged.input,
     toolResultAging: aged.stats,
   };
+}
+
+function delegatesContextEstimation(route) {
+  return Boolean(route) && canonicalProviderId(route.provider) === "kiro-prism";
 }
 
 // The models this turn could be moved to, best first. Deliberately computed
@@ -3421,6 +3429,7 @@ function failoverCandidates({ route, agedInput, flattenedNamespaces, chain }) {
 }
 
 function routedRequestFits(route, body) {
+  if (delegatesContextEstimation(route)) return true;
   const estimatedTokens = estimateInputTokens(body);
   return (
     !Number.isFinite(estimatedTokens) ||
@@ -4271,7 +4280,7 @@ async function handleResponses(request, response, requestUrl) {
     const createResponsePipeline = (contentType) => {
       const usageObserver = new ResponseUsageTransform(contentType, {
         estimatedInputTokens:
-          ZERO_INPUT_ESTIMATE && route
+          ZERO_INPUT_ESTIMATE && route && !delegatesContextEstimation(route)
             ? estimateInputTokens(routedBody, { contextWindow: route.contextWindow })
             : undefined,
       });
