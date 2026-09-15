@@ -1,7 +1,8 @@
 name: Test hang diagnostic
 
 "on":
-  workflow_dispatch: {}
+  push:
+    branches: [ci/diagnose-test-hang]
 
 permissions:
   contents: read
