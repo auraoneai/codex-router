@@ -1,6 +1,18 @@
-import { Agent, EnvHttpProxyAgent, fetch as undiciFetch, setGlobalDispatcher } from "undici";
+import { Agent, EnvHttpProxyAgent, fetch as undiciFetch, Pool, setGlobalDispatcher } from "undici";
 
 import { environmentHttpProxyConfigured } from "./proxy-environment.mjs";
+
+export const DEFAULT_UPSTREAM_CONNECTIONS = 128;
+
+function upstreamConnections(environment) {
+  const raw = environment.MODEL_ROUTER_UPSTREAM_CONNECTIONS;
+  if (raw === undefined || raw === "") return DEFAULT_UPSTREAM_CONNECTIONS;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1 || value > 1_024) {
+    throw new Error("MODEL_ROUTER_UPSTREAM_CONNECTIONS must be an integer from 1 to 1024.");
+  }
+  return value;
+}
 
 // Node 26's bundled fetch negotiates HTTP/2 by default. A live router process
 // observed its pooled session remain destroyed after ERR_HTTP2_INVALID_SESSION,
@@ -10,10 +22,10 @@ import { environmentHttpProxyConfigured } from "./proxy-environment.mjs";
 // state while retaining keep-alive connection reuse.
 //
 // Concurrent Codex turns each hold one HTTP/1.1 streaming socket for the
-// whole generation. Do not cap `connections`: Undici's HTTP/1.1 pool is
-// unbounded by default, and one router plane serves every installed client.
-// A numeric ceiling queues the next turn once it fills and recreates
-// "waiting for network".
+// whole generation. Keep the per-origin ceiling deliberately generous so
+// ordinary concurrent turns never queue, but finite so a broken or abusive
+// caller cannot grow one provider's socket set without bound. The override is
+// primarily for controlled saturation tests and constrained installations.
 //
 // Leave `keepAliveTimeout` at Undici's 4s default. This pool is shared by
 // every outbound provider request, and an upstream that idle-closes without
@@ -21,10 +33,24 @@ import { environmentHttpProxyConfigured } from "./proxy-environment.mjs";
 // hold connections longer than it does -- surfacing as UND_ERR_SOCKET on a
 // POST Undici will not retry. Only the loopback probe pool below, whose one
 // origin is our own server, raises it.
-export function fetchDispatcherOptions() {
+export function fetchDispatcherOptions(environment = process.env) {
   return {
     allowH2: false,
     pipelining: 1,
+    connections: upstreamConnections(environment),
+  };
+}
+
+export function proxyFetchDispatcherOptions(environment = process.env, PoolClass = Pool) {
+  const options = fetchDispatcherOptions(environment);
+  return {
+    ...options,
+    // EnvHttpProxyAgent's plain-HTTP forwarding wrapper otherwise creates its
+    // inner proxy Pool with only `{ connect }`, dropping `connections`. Keep
+    // the same per-target-origin ceiling on that supported proxy path.
+    factory(origin, poolOptions) {
+      return new PoolClass(origin, { ...poolOptions, connections: options.connections });
+    },
   };
 }
 
@@ -35,10 +61,14 @@ export function installStableFetchTransport({
   environment = process.env,
   execArgv = process.execArgv,
 } = {}) {
-  const DispatcherClass = environmentHttpProxyConfigured(environment, execArgv)
+  const proxyConfigured = environmentHttpProxyConfigured(environment, execArgv);
+  const DispatcherClass = proxyConfigured
     ? EnvHttpProxyAgentClass
     : AgentClass;
-  const dispatcher = new DispatcherClass(fetchDispatcherOptions());
+  const options = proxyConfigured
+    ? proxyFetchDispatcherOptions(environment)
+    : fetchDispatcherOptions(environment);
+  const dispatcher = new DispatcherClass(options);
   setDispatcher(dispatcher);
   return dispatcher;
 }
