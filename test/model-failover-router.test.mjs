@@ -1323,6 +1323,56 @@ const RESPONSES_MODEL = {
   gatewayModel: "meta-muse-spark-1-2",
 };
 
+const PRISM_RESPONSES_MODEL = {
+  slug: "kiro-prism/gpt-5.6-luna",
+  gatewayModel: "kiro-prism-gpt-5-6-luna",
+};
+
+test("failover delegates oversized Kiro Prism admission to Prism", async () => {
+  const seen = [];
+  const gw = await gateway(async (request, response) => {
+    const body = await bodyJson(request);
+    seen.push(body);
+    if (body.model === PRIMARY.gatewayModel) {
+      const payload = Buffer.from(QUOTA_BODY, "utf8");
+      response.writeHead(429, {
+        "Content-Type": "application/json",
+        "Content-Length": String(payload.length),
+      });
+      response.end(payload);
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(contentSse("prism-authoritative-admission"));
+  });
+  const routerPort = await openPort();
+  const child = run(routerEnv(gw.port, routerPort), {
+    chain: [PRISM_RESPONSES_MODEL.slug],
+    toolResultAging: true,
+  });
+  const input = "x".repeat(950_000);
+  try {
+    await waitFor(`http://127.0.0.1:${routerPort}/health`, child);
+    const result = await readRouted(routerPort, {
+      model: PRIMARY.slug,
+      stream: true,
+      instructions: "Preserve exactly.",
+      input,
+    });
+    assert.equal(result.status, 200, child.testErrors());
+    assert.match(result.body, /answered-by-prism-authoritative-admission/u);
+    assert.equal(seen.length, 2);
+    assert.equal(seen[1].model, PRISM_RESPONSES_MODEL.gatewayModel);
+    assert.equal(seen[1].instructions, "Preserve exactly.");
+    assert.equal(seen[1].input, input);
+    assert.doesNotMatch(child.testErrors(), /outcome=context-too-small/u);
+  } finally {
+    await stopChild(child);
+    await closeServer(gw.server);
+  }
+});
+
+
 test("failover keeps the newest tool result exact for the serving model", async () => {
   const seen = [];
   const gw = await gateway(async (request, response) => {

@@ -3819,7 +3819,12 @@ function subagentTransportFailoverCandidates({ request, route, agedInput, search
   })?.attempts || [];
 }
 
+function delegatesContextEstimation(route) {
+  return Boolean(route) && canonicalProviderId(route.provider) === "kiro-prism";
+}
+
 function routedRequestFits(route, body) {
+  if (delegatesContextEstimation(route)) return true;
   const estimatedTokens = estimateInputTokens(body);
   return (
     !Number.isFinite(estimatedTokens) ||
@@ -4586,7 +4591,7 @@ async function handleResponses(request, response, requestUrl) {
         grokServiceTier: route?.slug === "grok-oauth/grok-4.6",
         onEvent: (payload) => activity.progress.event(payload),
         estimatedInputTokens:
-          ZERO_INPUT_ESTIMATE && route
+          ZERO_INPUT_ESTIMATE && route && !delegatesContextEstimation(route)
             ? estimateInputTokens(routedBody, {
                 contextWindow: route.contextWindow,
                 maxTokensPerImage: maxImageTokensForRoute(route),
