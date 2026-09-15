@@ -8,10 +8,12 @@ import { getGlobalDispatcher, setGlobalDispatcher } from "undici";
 
 import {
   createLoopbackProbeDispatcher,
+  DEFAULT_UPSTREAM_CONNECTIONS,
   fetchDispatcherOptions,
   installStableFetchTransport,
   loopbackProbeDispatcher,
   loopbackProbeFetch,
+  proxyFetchDispatcherOptions,
 } from "../src/fetch-transport.mjs";
 
 const SRC_DIR = fileURLToPath(new URL("../src", import.meta.url));
@@ -54,7 +56,11 @@ test("the router disables HTTP/2 on its process-wide fetch dispatcher", () => {
 
   assert.equal(created.length, 1);
   assert.equal(dispatcher.kind, "direct");
-  assert.deepEqual(created[0].options, { allowH2: false, pipelining: 1 });
+  assert.deepEqual(created[0].options, {
+    allowH2: false,
+    pipelining: 1,
+    connections: DEFAULT_UPSTREAM_CONNECTIONS,
+  });
   assert.equal(dispatcher, created[0]);
   assert.deepEqual(installed, [dispatcher]);
 });
@@ -68,7 +74,7 @@ test("the process-wide pool does not hold idle sockets past the undici default",
   const { created } = installFakeTransport({});
 
   assert.equal("keepAliveTimeout" in created[0].options, false);
-  assert.equal("connections" in created[0].options, false);
+  assert.equal(created[0].options.connections, DEFAULT_UPSTREAM_CONNECTIONS);
 
   const probe = createLoopbackProbeDispatcher({
     AgentClass: class {
@@ -93,8 +99,41 @@ test("the router uses the environment proxy dispatcher only with explicit opt-in
     assert.equal(created.length, 1);
     assert.equal(dispatcher.kind, "environment-proxy");
     assert.equal(dispatcher, created[0]);
-    assert.deepEqual(dispatcher.options, fetchDispatcherOptions());
+    assert.equal(dispatcher.options.allowH2, false);
+    assert.equal(dispatcher.options.pipelining, 1);
+    assert.equal(dispatcher.options.connections, DEFAULT_UPSTREAM_CONNECTIONS);
+    assert.equal(typeof dispatcher.options.factory, "function");
   }
+});
+
+test("the process-wide pool accepts only a bounded per-origin connection override", () => {
+  const { created } = installFakeTransport({ MODEL_ROUTER_UPSTREAM_CONNECTIONS: "7" });
+  assert.equal(created[0].options.connections, 7);
+
+  for (const value of ["0", "1.5", "1025", "many"]) {
+    assert.throws(
+      () => installFakeTransport({ MODEL_ROUTER_UPSTREAM_CONNECTIONS: value }),
+      /must be an integer from 1 to 1024/u,
+    );
+  }
+});
+
+test("the proxy pool factory preserves the per-origin connection ceiling", () => {
+  const created = [];
+  class FakePool {
+    constructor(origin, options) {
+      created.push({ origin, options });
+    }
+  }
+  const options = proxyFetchDispatcherOptions(
+    { MODEL_ROUTER_UPSTREAM_CONNECTIONS: "3" },
+    FakePool,
+  );
+  options.factory("http://proxy.example", { connect: "connector" });
+  assert.deepEqual(created, [{
+    origin: "http://proxy.example",
+    options: { connect: "connector", connections: 3 },
+  }]);
 });
 
 test("proxy variables alone do not opt the router into proxying", () => {
@@ -105,7 +144,10 @@ test("proxy variables alone do not opt the router into proxying", () => {
 
   assert.equal(created.length, 1);
   assert.equal(dispatcher.kind, "direct");
-  assert.deepEqual(dispatcher.options, fetchDispatcherOptions());
+  assert.deepEqual(dispatcher.options, fetchDispatcherOptions({
+    HTTP_PROXY: "http://proxy.example:8080",
+    HTTPS_PROXY: "http://secure-proxy.example:8443",
+  }));
 });
 
 test("the router accepts the NODE_OPTIONS and command-line opt-in forms", () => {
@@ -116,7 +158,8 @@ test("the router accepts the NODE_OPTIONS and command-line opt-in forms", () => 
     const { created, dispatcher } = installFakeTransport(environment, execArgv);
     assert.equal(created.length, 1);
     assert.equal(dispatcher.kind, "environment-proxy");
-    assert.deepEqual(dispatcher.options, fetchDispatcherOptions());
+    assert.equal(dispatcher.options.connections, DEFAULT_UPSTREAM_CONNECTIONS);
+    assert.equal(typeof dispatcher.options.factory, "function");
   }
 });
 
@@ -133,7 +176,7 @@ test("NO_PROXY or ALL_PROXY alone keeps the lower-overhead direct agent", () => 
     assert.equal(created.length, 1);
     assert.equal(dispatcher.kind, "direct");
     assert.equal(dispatcher, created[0]);
-    assert.deepEqual(dispatcher.options, fetchDispatcherOptions());
+    assert.deepEqual(dispatcher.options, fetchDispatcherOptions(environment));
   }
 });
 
@@ -192,6 +235,78 @@ test("the installed transport proxies requests and honors NO_PROXY", async () =>
     setGlobalDispatcher(originalDispatcher);
     await dispatcher?.close();
     await Promise.all([close(target), close(proxy)]);
+    for (const [name, value] of Object.entries(originalEnvironment)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test("the proxy transport bounds each target origin and releases a canceled stream slot", async () => {
+  const names = [
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "NODE_USE_ENV_PROXY", "MODEL_ROUTER_UPSTREAM_CONNECTIONS",
+  ];
+  const originalEnvironment = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  const originalDispatcher = getGlobalDispatcher();
+  const requests = [];
+  const held = new Map();
+  const proxySockets = new Set();
+  const proxy = http.createServer((request, response) => {
+    requests.push(request.url);
+    if (request.url.endsWith("/hold")) {
+      response.writeHead(200, { "Content-Type": "text/plain" });
+      response.flushHeaders();
+      held.set(request.url, response);
+      return;
+    }
+    response.end("ok");
+  });
+  proxy.on("connection", (socket) => {
+    proxySockets.add(socket);
+    socket.once("close", () => proxySockets.delete(socket));
+  });
+  await new Promise((resolve, reject) => {
+    proxy.once("error", reject);
+    proxy.listen(0, "127.0.0.1", resolve);
+  });
+
+  let dispatcher;
+  try {
+    const proxyPort = proxy.address().port;
+    for (const name of names) delete process.env[name];
+    process.env.NODE_USE_ENV_PROXY = "1";
+    process.env.HTTP_PROXY = `http://127.0.0.1:${proxyPort}`;
+    process.env.MODEL_ROUTER_UPSTREAM_CONNECTIONS = "1";
+    dispatcher = installStableFetchTransport();
+
+    const abort = new AbortController();
+    const heldResponse = await fetch("http://origin-a.test/hold", { signal: abort.signal });
+    const reader = heldResponse.body.getReader();
+    const queued = fetch("http://origin-a.test/queued");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(
+      requests.includes("http://origin-a.test/queued"),
+      false,
+      `queued=${JSON.stringify(requests)} sockets=${proxySockets.size}`,
+    );
+
+    const independent = await fetch("http://origin-b.test/independent");
+    assert.equal(await independent.text(), "ok");
+    assert.equal(requests.includes("http://origin-b.test/independent"), true);
+
+    abort.abort();
+    await assert.rejects(() => reader.read(), /abort|operation|terminated/iu);
+    const released = await queued;
+    assert.equal(await released.text(), "ok");
+    assert.equal(requests.includes("http://origin-a.test/queued"), true);
+  } finally {
+    for (const response of held.values()) response.destroy();
+    for (const socket of proxySockets) socket.destroy();
+    setGlobalDispatcher(originalDispatcher);
+    await dispatcher?.close();
+    await new Promise((resolve) => proxy.close(resolve));
     for (const [name, value] of Object.entries(originalEnvironment)) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
