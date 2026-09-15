@@ -11,6 +11,14 @@ export const PROVIDER_LATENCY_TRACES_PATH = path.join(
 
 const ROUTER_ID = /^router-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
+// Prism owns the authoritative context estimate used for admission and
+// compaction. Router may repair missing *reported usage* after a response, but
+// must never repeat Prism's preflight estimate while selecting a route.
+export const CONTEXT_ESTIMATION_BOUNDARY = Object.freeze({
+  authority: "prism",
+  routerPerformsAuthoritativeEstimate: false,
+});
+
 function boundedText(value, fallback = "unknown") {
   const text = typeof value === "string" ? value.trim() : "";
   return (text || fallback).slice(0, 160);
@@ -56,6 +64,18 @@ export function createProviderLatencyTrace({
   let status = "pending";
   let errorCode;
   let finished = false;
+  let localhostParseMs;
+  let routeSelectionMs;
+
+  function phaseTimer(assign) {
+    const phaseStartedAt = process.hrtime.bigint();
+    let stopped = false;
+    return () => {
+      if (stopped) return;
+      stopped = true;
+      assign(elapsedMs(phaseStartedAt));
+    };
+  }
 
   function beginAttempt({
     provider,
@@ -137,7 +157,11 @@ export function createProviderLatencyTrace({
       payloadClass,
       ...(resolvedModel ? { resolvedModel } : {}),
       ...(returnedModel ? { returnedModel } : {}),
+      contextEstimationAuthority: CONTEXT_ESTIMATION_BOUNDARY.authority,
+      routerAuthoritativeContextEstimate: CONTEXT_ESTIMATION_BOUNDARY.routerPerformsAuthoritativeEstimate,
       durationMs: elapsedMs(startedAt),
+      ...(localhostParseMs !== undefined ? { localhostParseMs } : {}),
+      ...(routeSelectionMs !== undefined ? { routeSelectionMs } : {}),
       ...(attempts[0] ? { routerPreUpstreamMs: attempts[0].startedMs } : {}),
       status,
       ...(errorCode ? { errorCode } : {}),
@@ -160,6 +184,16 @@ export function createProviderLatencyTrace({
     fetchCallbacks,
     markSemantic,
     markFirstFrame,
+    startLocalhostParse() {
+      return phaseTimer((duration) => {
+        if (localhostParseMs === undefined) localhostParseMs = duration;
+      });
+    },
+    startRouteSelection() {
+      return phaseTimer((duration) => {
+        if (routeSelectionMs === undefined) routeSelectionMs = duration;
+      });
+    },
     finishAttempt,
     finish,
     snapshot,

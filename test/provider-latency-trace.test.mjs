@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,7 +12,11 @@ test("provider latency traces keep content-free correlated attempts", async () =
   try {
     const telemetry = await import(`../src/provider-latency-trace.mjs?test=${Date.now()}`);
     const trace = telemetry.createProviderLatencyTrace({ requestedModel: "asked-model" });
+    const finishParse = trace.startLocalhostParse();
+    finishParse();
     trace.setResolvedModel("resolved-model");
+    const finishRouteSelection = trace.startRouteSelection();
+    finishRouteSelection();
     const callbacks = trace.fetchCallbacks({ provider: "openrouter", model: "resolved-model" });
     callbacks.onAttemptStart({ attempt: 1 });
     callbacks.onAttemptFinish({ attempt: 1, response: { status: 503 } });
@@ -29,6 +34,14 @@ test("provider latency traces keep content-free correlated attempts", async () =
     assert.equal(record.requestedModel, "asked-model");
     assert.equal(record.resolvedModel, "resolved-model");
     assert.equal(record.returnedModel, "returned-model");
+    assert.ok(Number.isInteger(record.localhostParseMs));
+    assert.ok(Number.isInteger(record.routeSelectionMs));
+    assert.equal(record.contextEstimationAuthority, "prism");
+    assert.equal(record.routerAuthoritativeContextEstimate, false);
+    assert.deepEqual(telemetry.CONTEXT_ESTIMATION_BOUNDARY, {
+      authority: "prism",
+      routerPerformsAuthoritativeEstimate: false,
+    });
     assert.deepEqual(record.attempts.map((attempt) => attempt.attemptNumber), [1, 2]);
     assert.deepEqual(record.attempts.map((attempt) => attempt.status), ["http_503", "http_200"]);
     assert.ok(Number.isInteger(record.attempts[1].firstSemanticEventMs));
@@ -53,4 +66,18 @@ test("provider latency traces keep content-free correlated attempts", async () =
     else process.env.MODEL_ROUTER_STATE_DIR = previous;
     rmSync(stateDir, { recursive: true, force: true });
   }
+});
+
+test("Router leaves authoritative context estimation to Prism", async () => {
+  const routerPath = fileURLToPath(new URL("../src/router.mjs", import.meta.url));
+  const source = readFileSync(routerPath, "utf8");
+  const selectionStart = source.indexOf("const finishRouteSelection = latencyTrace.startRouteSelection();");
+  const selectionBoundary = source.indexOf("finishRouteSelection();");
+  assert.ok(selectionStart > 0, "route-selection start is missing");
+  assert.ok(selectionBoundary > 0, "route-selection boundary is missing");
+  assert.doesNotMatch(
+    source.slice(selectionStart, selectionBoundary),
+    /estimateInputTokens\s*\(/,
+    "Router performed a token estimate before selecting the Prism route",
+  );
 });

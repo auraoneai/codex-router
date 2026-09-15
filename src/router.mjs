@@ -3601,7 +3601,10 @@ async function handleResponses(request, response, requestUrl) {
     latencyTrace.setPayloadClass(
       body.length < 4_096 ? "tiny" : body.length < 65_536 ? "small" : body.length < 524_288 ? "ordinary" : "large",
     );
+    const finishLocalhostParse = latencyTrace.startLocalhostParse();
     let payload = await parseBodyAsync(body);
+    finishLocalhostParse();
+    const finishRouteSelection = latencyTrace.startRouteSelection();
     controller.signal.throwIfAborted();
     payload = synchronizedPayload(payload, {
       bypass: exactRouteProbe,
@@ -3694,6 +3697,7 @@ async function handleResponses(request, response, requestUrl) {
       ? registeredRoute
       : undefined;
     latencyTrace.setResolvedModel(route?.slug || requestedModel);
+    finishRouteSelection();
     if (registeredRoute && !route) {
       writeJson(response, 409, {
         error: {
