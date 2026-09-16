@@ -165,8 +165,24 @@
       "defaultEffort": "medium",
       "reasoningLevels": [
         {
+          "effort": "low",
+          "description": "Low reasoning effort"
+        },
+        {
           "effort": "medium",
-          "description": "Gateway default reasoning"
+          "description": "Medium reasoning effort"
+        },
+        {
+          "effort": "high",
+          "description": "High reasoning effort"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning effort"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning effort"
         }
       ],
       "contextWindow": 272000,
@@ -191,8 +207,24 @@
       "defaultEffort": "medium",
       "reasoningLevels": [
         {
+          "effort": "low",
+          "description": "Low reasoning effort"
+        },
+        {
           "effort": "medium",
-          "description": "Gateway default reasoning"
+          "description": "Medium reasoning effort"
+        },
+        {
+          "effort": "high",
+          "description": "High reasoning effort"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning effort"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning effort"
         }
       ],
       "contextWindow": 272000,
@@ -217,8 +249,24 @@
       "defaultEffort": "medium",
       "reasoningLevels": [
         {
+          "effort": "low",
+          "description": "Low reasoning effort"
+        },
+        {
           "effort": "medium",
-          "description": "Gateway default reasoning"
+          "description": "Medium reasoning effort"
+        },
+        {
+          "effort": "high",
+          "description": "High reasoning effort"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning effort"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning effort"
         }
       ],
       "contextWindow": 272000,
@@ -815,7 +863,7 @@
       "upstreamModel": "qwen3.8-max",
       "provider": "kiro-prism",
       "listed": true,
-      "displayName": "Qwen 3.8 Max · Token Plan (Kiro Prism)",
+      "displayName": "Qwen 3.8 Max \u00b7 Token Plan (Kiro Prism)",
       "description": "QwenCloud Token Plan subscription model qwen3.8-max",
       "priority": 99,
       "defaultEffort": "medium",
@@ -895,7 +943,7 @@
       "upstreamModel": "kimi-k3",
       "provider": "kiro-prism",
       "listed": true,
-      "displayName": "Kimi K3 · Modal (Kiro Prism)",
+      "displayName": "Kimi K3 \u00b7 Modal (Kiro Prism)",
       "description": "Moonshot Kimi K3 through Kiro Prism's budget-capped Modal endpoint",
       "priority": 99,
       "defaultEffort": "medium",
@@ -929,7 +977,7 @@
       "upstreamModel": "deepseek-v4.1-flash",
       "provider": "kiro-prism",
       "listed": true,
-      "displayName": "DeepSeek V4.1 Flash · Modal (Kiro Prism)",
+      "displayName": "DeepSeek V4.1 Flash \u00b7 Modal (Kiro Prism)",
       "description": "DeepSeek V4.1 Flash through Kiro Prism's budget-capped Modal Shared API endpoints",
       "priority": 99,
       "defaultEffort": "high",
