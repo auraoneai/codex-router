@@ -44,6 +44,7 @@ enum RouterControlContractPolicy {
       || arguments == ["local-models", "list", "--json"]
       || arguments == ["vision-bridge", "pull-status"]
       || arguments == ["chatgpt-session", "status"]
+      || arguments == ["chatgpt-account-pool", "usage", "cached"]
       || arguments == ["health", "--json"]
     {
       return .read
@@ -969,6 +970,19 @@ final class RouterStore: ObservableObject {
   @Published private(set) var activitySessionName: String?
   @Published private(set) var accountUsage: CodexAccountUsage?
   @Published private(set) var accountUsageError: String?
+  // Per-account quota for the whole ChatGPT subscription pool, plus the order
+  // rotation will actually use. Read from the router's cached probe snapshot:
+  // the tray must never drive the live probe, which spawns an app-server per
+  // account. Rotation reads the same file, so the island and the router cannot
+  // disagree about which account answers next.
+  @Published private(set) var chatGptAccountUsage: ChatGptAccountPoolUsage?
+  @Published private(set) var chatGptAccountUsageError: String?
+  // `preferred` in the snapshot is a probe-time copy of the pool's selected
+  // account, so a successful `select` does not change it until the next probe.
+  // Holding the selection locally keeps the preferred dot honest in between,
+  // and it is dropped as soon as a snapshot agrees with it.
+  @Published private(set) var chatGptPreferredOverride: String?
+  @Published private(set) var chatGptAccountOperation: String?
   @Published private(set) var providerUsage: ProviderUsageSnapshot?
   @Published private(set) var providerUsageError: String?
   @Published private(set) var providerSetup: [String: ProviderSetupState] = [:]
@@ -2108,6 +2122,7 @@ final class RouterStore: ObservableObject {
     defer { accountUsagePolling = false }
     while !Task.isCancelled {
       await refreshAccountUsage()
+      await refreshChatGptAccountUsage()
       await refreshProviderUsage()
       do {
         // Provider usage probes fan out across every configured account and can
@@ -2131,6 +2146,47 @@ final class RouterStore: ObservableObject {
     }
     accountUsageResolved = true
     resolveInitialUsageProvider()
+  }
+
+  /// Reads the cached per-account snapshot. `usage cached` reads a file and
+  /// ranks it; the bare `usage` form re-probes every account and is deliberately
+  /// never called from the tray, on a timer or otherwise.
+  func refreshChatGptAccountUsage() async {
+    do {
+      let output = try await runControl(arguments: ["chatgpt-account-pool", "usage", "cached"])
+      let next = try JSONDecoder().decode(ChatGptAccountPoolUsage.self, from: output)
+      if chatGptAccountUsage != next { chatGptAccountUsage = next }
+      if chatGptAccountUsageError != nil { chatGptAccountUsageError = nil }
+      // Once the snapshot reports the account this tray selected, the local
+      // override has nothing left to say.
+      if let override = chatGptPreferredOverride,
+         next.accounts.first(where: { $0.preferred })?.id == override {
+        chatGptPreferredOverride = nil
+      }
+    } catch {
+      let nextError = error.localizedDescription
+      if chatGptAccountUsageError != nextError { chatGptAccountUsageError = nextError }
+    }
+  }
+
+  /// Switches the pool's selected account. `select` is the only pool verb that
+  /// changes which subscription is switched in; there is no pause/enable verb,
+  /// which is why the island's per-row switch is read-only state rather than a
+  /// control. The router refuses a paused or inactive account here, so the
+  /// failure is surfaced instead of being swallowed.
+  func preferChatGptAccount(_ accountId: String) async {
+    guard chatGptAccountOperation == nil else { return }
+    chatGptAccountOperation = accountId
+    defer { chatGptAccountOperation = nil }
+    do {
+      _ = try await runControl(arguments: ["chatgpt-account-pool", "select", accountId])
+      chatGptPreferredOverride = accountId
+      if chatGptAccountUsageError != nil { chatGptAccountUsageError = nil }
+    } catch {
+      chatGptPreferredOverride = nil
+      chatGptAccountUsageError = error.localizedDescription
+    }
+    await refreshChatGptAccountUsage()
   }
 
   func refreshProviderUsage() async {
@@ -4423,6 +4479,155 @@ enum TokenDisplayUnit: String, CaseIterable, Identifiable {
     case .millions:
       return "\(String(format: "%.1f", normalized / 1_000_000))M"
     }
+  }
+}
+
+/// One row of `control chatgpt-account-pool usage cached`.
+///
+/// `primaryRemainingPercent` is the short rolling window -- what the island's
+/// `5h` column has always shown -- and `secondaryRemainingPercent` is the long
+/// weekly one. Either is null when the probe could not read that window, which
+/// is not the same as zero and must not render as `0%`.
+struct ChatGptAccountPoolRow: Decodable, Equatable, Identifiable {
+  let id: String
+  let label: String
+  let preferred: Bool
+  let planType: String?
+  let health: ChatGptAccountHealth
+  let primaryRemainingPercent: Double?
+  let secondaryRemainingPercent: Double?
+  let resetsAt: TimeInterval?
+  let error: String?
+
+  enum CodingKeys: String, CodingKey {
+    case id, label, preferred, planType, health
+    case primaryRemainingPercent, secondaryRemainingPercent, resetsAt, error
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decode(String.self, forKey: .id)
+    label = (try container.decodeIfPresent(String.self, forKey: .label)) ?? ""
+    preferred = (try container.decodeIfPresent(Bool.self, forKey: .preferred)) ?? false
+    planType = try container.decodeIfPresent(String.self, forKey: .planType)
+    health = (try container.decodeIfPresent(ChatGptAccountHealth.self, forKey: .health)) ?? .unknown
+    primaryRemainingPercent = try container.decodeIfPresent(
+      Double.self, forKey: .primaryRemainingPercent)
+    secondaryRemainingPercent = try container.decodeIfPresent(
+      Double.self, forKey: .secondaryRemainingPercent)
+    resetsAt = try container.decodeIfPresent(TimeInterval.self, forKey: .resetsAt)
+    error = try container.decodeIfPresent(String.self, forKey: .error)
+  }
+
+  init(
+    id: String,
+    label: String,
+    preferred: Bool = false,
+    planType: String? = nil,
+    health: ChatGptAccountHealth = .unknown,
+    primaryRemainingPercent: Double? = nil,
+    secondaryRemainingPercent: Double? = nil,
+    resetsAt: TimeInterval? = nil,
+    error: String? = nil
+  ) {
+    self.id = id
+    self.label = label
+    self.preferred = preferred
+    self.planType = planType
+    self.health = health
+    self.primaryRemainingPercent = primaryRemainingPercent
+    self.secondaryRemainingPercent = secondaryRemainingPercent
+    self.resetsAt = resetsAt
+    self.error = error
+  }
+
+  /// A label is not guaranteed; a bare account id is still better than a blank
+  /// row, and the id's tail is what distinguishes two unlabeled accounts.
+  var displayLabel: String {
+    let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !trimmed.isEmpty { return trimmed }
+    return String(id.suffix(8))
+  }
+
+  /// `resetsAt` is the weekly reset when a weekly window was read and the
+  /// short-window reset otherwise, so the countdown cannot be labelled as
+  /// belonging to one fixed window.
+  var resetWindowIsWeekly: Bool { secondaryRemainingPercent != nil }
+}
+
+/// Rotation's own verdict on an account's leftover quota, derived by the router
+/// rather than stored: `drained` is what makes rotation skip it, and a healthy
+/// probe admits it again with no operator action.
+enum ChatGptAccountHealth: String, Decodable, Equatable {
+  case healthy
+  case soft
+  case drained
+  case unknown
+
+  init(from decoder: Decoder) throws {
+    let raw = try decoder.singleValueContainer().decode(String.self)
+    // An unfamiliar verdict from a newer router must not fail the whole
+    // snapshot and blank the table.
+    self = ChatGptAccountHealth(rawValue: raw) ?? .unknown
+  }
+}
+
+struct ChatGptAccountPoolUsage: Decodable, Equatable {
+  let fetchedAt: String?
+  /// Ordered best-first, and it is the real thing rotation will use: accounts
+  /// it has excluded are absent entirely rather than ranked last.
+  let rotation: [String]
+  let accounts: [ChatGptAccountPoolRow]
+
+  enum CodingKeys: String, CodingKey {
+    case fetchedAt, rotation, accounts
+  }
+
+  init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    fetchedAt = try container.decodeIfPresent(String.self, forKey: .fetchedAt)
+    rotation = (try container.decodeIfPresent([String].self, forKey: .rotation)) ?? []
+    accounts = (try container.decodeIfPresent([ChatGptAccountPoolRow].self, forKey: .accounts)) ?? []
+  }
+
+  init(fetchedAt: String?, rotation: [String], accounts: [ChatGptAccountPoolRow]) {
+    self.fetchedAt = fetchedAt
+    self.rotation = rotation
+    self.accounts = accounts
+  }
+
+  /// 1-based position in rotation, or nil when rotation excluded the account.
+  /// Built defensively: a duplicate id in `rotation` must not trap.
+  var rotationRanks: [String: Int] {
+    var ranks: [String: Int] = [:]
+    for (index, id) in rotation.enumerated() where ranks[id] == nil {
+      ranks[id] = index + 1
+    }
+    return ranks
+  }
+
+  /// The account the next turn will actually use.
+  var nextAccountId: String? { rotation.first }
+
+  /// Rotation order first, then everything rotation left out. The order is the
+  /// message: the top row is the next turn's account.
+  func orderedRows() -> [ChatGptAccountPoolRow] {
+    let ranks = rotationRanks
+    return accounts.enumerated().sorted { left, right in
+      let leftRank = ranks[left.element.id]
+      let rightRank = ranks[right.element.id]
+      switch (leftRank, rightRank) {
+      case let (lhs?, rhs?): return lhs == rhs ? left.offset < right.offset : lhs < rhs
+      case (nil, _?): return false
+      case (_?, nil): return true
+      case (nil, nil): return left.offset < right.offset
+      }
+    }.map(\.element)
+  }
+
+  func isPreferred(_ row: ChatGptAccountPoolRow, override: String?) -> Bool {
+    if let override { return row.id == override }
+    return row.preferred
   }
 }
 
@@ -9281,6 +9486,7 @@ private struct TrayView: View {
         Task {
           await store.refresh()
           await store.refreshAccountUsage()
+          await store.refreshChatGptAccountUsage()
           await store.refreshProviderUsage()
           await store.refreshProviderSetup()
         }

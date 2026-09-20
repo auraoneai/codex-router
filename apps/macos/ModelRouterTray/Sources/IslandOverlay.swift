@@ -41,14 +41,24 @@ final class IslandDisplayModel: ObservableObject {
 
   @Published private(set) var state: State = .compact
   @Published private(set) var activeRequestCount = 0
+  @Published private(set) var accountRowCount = 0
 
   var size: CGSize {
+    // The per-account quota table grows the island rather than being clipped by
+    // it: a row the user cannot see is worse than a taller island.
+    let quotaHeight = IslandAccountQuotaPresentation.tableHeight(rows: accountRowCount)
     switch state {
     case .compact: return CGSize(width: 320, height: 40)
     case .peek:
-      let activityHeight = min(360, 126 + CGFloat(activeRequestCount) * 40)
-      return CGSize(width: 404, height: activeRequestCount > 0 ? activityHeight : 148)
-    case .expanded: return CGSize(width: 520, height: 372)
+      if activeRequestCount > 0 {
+        return CGSize(
+          width: 404,
+          height: min(430, 126 + CGFloat(activeRequestCount) * 40 + quotaHeight + 8)
+        )
+      }
+      return CGSize(width: 404, height: min(430, 148 + quotaHeight + 8))
+    case .expanded:
+      return CGSize(width: 520, height: min(500, 372 + quotaHeight + 8))
     }
   }
 
@@ -60,11 +70,18 @@ final class IslandDisplayModel: ObservableObject {
   func setActiveRequestCount(_ count: Int) {
     activeRequestCount = max(0, count)
   }
+
+  func setAccountRowCount(_ count: Int) {
+    accountRowCount = max(0, count)
+  }
 }
 
 @MainActor
 final class IslandWindowController {
-  static let windowSize = CGSize(width: 720, height: 400)
+  // Tall enough for the tallest state the island can reach, which the restored
+  // per-account quota table raises. The panel is transparent and top-anchored,
+  // so the unused remainder costs nothing and a short window would clip rows.
+  static let windowSize = CGSize(width: 720, height: 560)
 
   private let window: NSPanel
   private let store: RouterStore
@@ -265,10 +282,16 @@ private struct IslandOverlayView: View {
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .foregroundStyle(.white)
-    .onAppear { display.setActiveRequestCount(activeSessions.count) }
+    .onAppear {
+      display.setActiveRequestCount(activeSessions.count)
+      display.setAccountRowCount(store.chatGptAccountUsage?.accounts.count ?? 0)
+    }
     .onChange(of: store.activeRequests.count) { count in
       display.setActiveRequestCount(activeSessions.count)
       if count == 0 { selectedSessionID = nil }
+    }
+    .onChange(of: store.chatGptAccountUsage?.accounts.count) { count in
+      display.setAccountRowCount(count ?? 0)
     }
   }
 
@@ -364,6 +387,7 @@ private struct IslandOverlayView: View {
           }
         }
       }
+      IslandAccountQuotaTable(store: store)
       IslandUsageLineChart(points: dailyGraphPoints, tint: graphTint, showsAxis: false)
         .id("\(store.selectedUsageProviderID)-daily-peek")
         .frame(height: 43)
@@ -400,6 +424,8 @@ private struct IslandOverlayView: View {
       }
       .scrollIndicators(.hidden)
       .frame(maxHeight: CGFloat(max(1, activeSessions.count)) * 40)
+
+      IslandAccountQuotaTable(store: store)
 
       HStack {
         Text(routerLocalized("DAILY USAGE"))
@@ -462,6 +488,8 @@ private struct IslandOverlayView: View {
           tint: routerAccent
         )
       }
+
+      IslandAccountQuotaTable(store: store)
 
       HStack(alignment: .firstTextBaseline) {
         Text(routerLocalized("DAILY TOKEN TREND"))
@@ -576,6 +604,9 @@ private struct IslandOverlayView: View {
           )
         }
         .scrollIndicators(.hidden)
+        .frame(maxHeight: 92)
+
+        IslandAccountQuotaTable(store: store)
       }
 
       Spacer(minLength: 0)
@@ -2081,6 +2112,324 @@ private struct DesktopQuotaBarRow: View {
     }
     .accessibilityElement(children: .ignore)
     .accessibilityLabel(DesktopWidgetPresentation.quotaAccessibilityLabel(row))
+  }
+}
+
+/// Layout constants and the pure text mapping for the per-account quota table.
+/// Kept `nonisolated` and free of view state so the island's height math and the
+/// tests can use them without a main-actor hop.
+enum IslandAccountQuotaPresentation {
+  static let rowHeight: CGFloat = 18
+  static let toggleWidth: CGFloat = 16
+  static let toggleHitWidth: CGFloat = 22
+  static let toggleHeight: CGFloat = 9
+  static let headerHeight: CGFloat = 16
+  static let rankWidth: CGFloat = 12
+  static let quotaWidth: CGFloat = 32
+  static let countdownWidth: CGFloat = 36
+
+  /// A null window is not a zero window: the probe could not read it, and
+  /// rendering `0%` there would claim the subscription is spent.
+  nonisolated static func percentText(_ remaining: Double?) -> String {
+    guard let remaining, remaining.isFinite else { return "—" }
+    return "\(Int(remaining.rounded()))%"
+  }
+
+  nonisolated static func resetBackText(
+    _ resetsAt: TimeInterval?,
+    now: Date = Date()
+  ) -> String {
+    guard let resetsAt, resetsAt.isFinite else { return "—" }
+    let remaining = Date(timeIntervalSince1970: resetsAt).timeIntervalSince(now)
+    if remaining <= 0 { return "now" }
+    let minutes = max(1, Int((remaining / 60).rounded(.up)))
+    if minutes < 60 { return "\(minutes)m" }
+    let hours = minutes / 60
+    let leftover = minutes % 60
+    if hours < 24 {
+      return leftover == 0 ? "\(hours)h" : "\(hours)h\(leftover)"
+    }
+    return "\(hours / 24)d\(hours % 24)h"
+  }
+
+  /// Rotation position, or an em dash when rotation left the account out.
+  nonisolated static func rankText(_ rank: Int?) -> String {
+    guard let rank else { return "—" }
+    return "\(rank)"
+  }
+
+  /// One trailing tag per row, because two would not fit. The reason an account
+  /// is unusable outranks its plan: a `pro` badge on a spent account tells the
+  /// user nothing they need.
+  nonisolated static func tagKey(
+    health: ChatGptAccountHealth,
+    planType: String?,
+    hasError: Bool,
+    inRotation: Bool
+  ) -> String? {
+    if hasError { return "probe failed" }
+    switch health {
+    case .drained: return "spent"
+    case .soft: return "low"
+    case .unknown: return inRotation ? planTag(planType) ?? "no data" : "no data"
+    case .healthy: return planTag(planType)
+    }
+  }
+
+  nonisolated static func planTag(_ planType: String?) -> String? {
+    guard let planType else { return nil }
+    let trimmed = planType.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed.lowercased()
+  }
+
+  nonisolated static func tableHeight(rows: Int) -> CGFloat {
+    guard rows > 0 else { return headerHeight + rowHeight }
+    return headerHeight + CGFloat(rows) * rowHeight
+  }
+}
+
+/// The user's dense on/off pill. It reports whether rotation will use an account
+/// and is deliberately not a control: the pool exposes `select` but no
+/// pause/enable verb, so a switch wired to a write would have nothing to call.
+private struct IslandDenseSwitch: View {
+  let isOn: Bool
+  var locked = false
+
+  var body: some View {
+    ZStack(alignment: isOn ? .trailing : .leading) {
+      Capsule()
+        .fill(trackColor)
+        .frame(
+          width: IslandAccountQuotaPresentation.toggleWidth,
+          height: IslandAccountQuotaPresentation.toggleHeight
+        )
+      Circle()
+        .fill(Color.white.opacity(locked ? 0.62 : 0.94))
+        .frame(width: 7, height: 7)
+        .padding(.horizontal, 1)
+    }
+    .animation(.easeInOut(duration: 0.12), value: isOn)
+  }
+
+  private var trackColor: Color {
+    // `locked` dims the track but must not erase the on/off reading: a locked
+    // pill that looks identical either way tells the user nothing.
+    if isOn { return routerAccent.opacity(locked ? 0.55 : 0.92) }
+    return Color.white.opacity(locked ? 0.12 : 0.16)
+  }
+}
+
+/// Per-account quota for every ChatGPT subscription in the pool, in the order
+/// rotation will use them. The top row is the account the next turn gets.
+private struct IslandAccountQuotaTable: View {
+  @ObservedObject var store: RouterStore
+
+  var body: some View {
+    TimelineView(.periodic(from: .now, by: 15)) { timeline in
+      VStack(alignment: .leading, spacing: 2) {
+        header
+        if let snapshot = store.chatGptAccountUsage, !snapshot.accounts.isEmpty {
+          let ranks = snapshot.rotationRanks
+          ForEach(snapshot.orderedRows()) { account in
+            row(
+              account,
+              rank: ranks[account.id],
+              preferred: snapshot.isPreferred(account, override: store.chatGptPreferredOverride),
+              now: timeline.date
+            )
+          }
+        } else {
+          Text(routerLocalized("Loading native Codex usage…"))
+            .font(.system(size: 9, weight: .medium, design: .rounded))
+            .foregroundStyle(routerMuted)
+            .frame(height: IslandAccountQuotaPresentation.rowHeight, alignment: .leading)
+        }
+      }
+    }
+    .accessibilityElement(children: .contain)
+    .accessibilityLabel(routerLocalized("All usage"))
+  }
+
+  private var header: some View {
+    HStack(spacing: 5) {
+      Color.clear
+        .frame(width: IslandAccountQuotaPresentation.toggleHitWidth)
+      Text(headerTitle)
+        .font(.system(size: 8, weight: .semibold, design: .monospaced))
+        .foregroundStyle(routerMuted)
+        .lineLimit(1)
+      Spacer()
+      Text("5h")
+        .frame(width: IslandAccountQuotaPresentation.quotaWidth, alignment: .trailing)
+      Text("in")
+        .frame(width: IslandAccountQuotaPresentation.countdownWidth, alignment: .trailing)
+      Text("Wk")
+        .frame(width: IslandAccountQuotaPresentation.quotaWidth, alignment: .trailing)
+    }
+    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+    .foregroundStyle(routerMuted)
+    .frame(height: IslandAccountQuotaPresentation.headerHeight)
+  }
+
+  /// Names how many subscriptions rotation can actually reach, which is the
+  /// number that matters when one has drained out of the set.
+  private var headerTitle: String {
+    guard let snapshot = store.chatGptAccountUsage, !snapshot.accounts.isEmpty else {
+      return routerLocalized("All usage")
+    }
+    let usable = snapshot.rotation.count
+    guard usable > 0 else {
+      return "\(routerLocalized("All usage")) · \(routerLocalized("no rotation"))"
+    }
+    return "\(routerLocalized("All usage")) · \(usable)/\(snapshot.accounts.count) \(routerLocalized("in rotation"))"
+  }
+
+  @ViewBuilder
+  private func row(
+    _ account: ChatGptAccountPoolRow,
+    rank: Int?,
+    preferred: Bool,
+    now: Date
+  ) -> some View {
+    let excluded = rank == nil
+    HStack(spacing: 5) {
+      IslandDenseSwitch(isOn: !excluded, locked: true)
+        .frame(
+          width: IslandAccountQuotaPresentation.toggleHitWidth,
+          height: IslandAccountQuotaPresentation.rowHeight
+        )
+        .help(rotationHelp(account, rank: rank))
+        .accessibilityHidden(true)
+
+      Button {
+        Task { await store.preferChatGptAccount(account.id) }
+      } label: {
+        HStack(spacing: 5) {
+          Text(IslandAccountQuotaPresentation.rankText(rank))
+            .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+            .foregroundStyle(rank == 1 ? routerAccent : routerMuted)
+            .frame(width: IslandAccountQuotaPresentation.rankWidth, alignment: .trailing)
+          if preferred {
+            Text("●")
+              .font(.system(size: 7, weight: .bold))
+              .foregroundStyle(routerAccent)
+          }
+          Text(account.displayLabel)
+            .font(.system(size: 10, weight: preferred ? .semibold : .medium, design: .rounded))
+            .foregroundStyle(excluded ? routerMuted : .white.opacity(0.92))
+            .lineLimit(1)
+            .truncationMode(.middle)
+          if let tag = IslandAccountQuotaPresentation.tagKey(
+            health: account.health,
+            planType: account.planType,
+            hasError: account.error != nil,
+            inRotation: !excluded
+          ) {
+            Text(routerLocalized(tag).uppercased())
+              .font(.system(size: 7, weight: .semibold, design: .monospaced))
+              .foregroundStyle(tagTint(account))
+              .lineLimit(1)
+              .fixedSize()
+          }
+          Spacer(minLength: 4)
+          quotaValue(account.primaryRemainingPercent)
+          countdownValue(account, now: now)
+          quotaValue(account.secondaryRemainingPercent)
+        }
+        .frame(height: IslandAccountQuotaPresentation.rowHeight)
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      .disabled(preferred || store.chatGptAccountOperation != nil)
+      .help(
+        preferred
+          ? routerLocalized("Preferred subscription")
+          : routerLocalized("Click to prefer this subscription")
+      )
+      .accessibilityLabel(accessibilityLabel(for: account, rank: rank, now: now))
+      .accessibilityHint(
+        preferred ? "" : routerLocalized("Double-click to prefer this subscription")
+      )
+    }
+    .frame(height: IslandAccountQuotaPresentation.rowHeight)
+    .opacity(excluded ? 0.55 : 1)
+  }
+
+  /// Rotation excludes an account for reasons the snapshot does not always
+  /// report -- a paused account, an expired session, or a duplicate identity are
+  /// simply absent -- so an unexplained exclusion says only that, rather than
+  /// guessing at a cause.
+  private func rotationHelp(_ account: ChatGptAccountPoolRow, rank: Int?) -> String {
+    if let rank {
+      return rank == 1
+        ? routerLocalized("Next turn uses this subscription")
+        : routerFormat("In rotation, position %d", rank)
+    }
+    if account.error != nil { return routerLocalized("Usage probe failed for this subscription") }
+    if account.health == .drained { return routerLocalized("Out of rotation: quota is spent") }
+    return routerLocalized("Out of rotation")
+  }
+
+  private func quotaValue(_ remaining: Double?) -> some View {
+    Text(IslandAccountQuotaPresentation.percentText(remaining))
+      .font(.system(size: 10.5, weight: .semibold, design: .rounded))
+      .monospacedDigit()
+      .foregroundStyle(quotaTint(remaining))
+      .frame(width: IslandAccountQuotaPresentation.quotaWidth, alignment: .trailing)
+  }
+
+  /// Held neutral on purpose. `resetsAt` is the weekly reset when a weekly
+  /// window was read and the short one otherwise, so tinting it by either
+  /// window's severity would colour it against a number it does not belong to.
+  private func countdownValue(_ account: ChatGptAccountPoolRow, now: Date) -> some View {
+    let text = IslandAccountQuotaPresentation.resetBackText(account.resetsAt, now: now)
+    return Text(text)
+      .font(.system(size: 10, weight: .semibold, design: .rounded))
+      .monospacedDigit()
+      .foregroundStyle(text == "—" ? routerMuted : .white.opacity(0.82))
+      .frame(width: IslandAccountQuotaPresentation.countdownWidth, alignment: .trailing)
+      .help(
+        account.resetWindowIsWeekly
+          ? routerLocalized("Weekly limit resets in")
+          : routerLocalized("5-hour limit resets in")
+      )
+  }
+
+  private func quotaTint(_ remaining: Double?) -> Color {
+    guard let remaining else { return routerMuted }
+    switch DesktopWidgetPresentation.quotaSeverity(remaining) {
+    case .critical: return routerRed
+    case .warning: return routerYellow
+    case .healthy: return .white.opacity(0.92)
+    }
+  }
+
+  private func tagTint(_ account: ChatGptAccountPoolRow) -> Color {
+    if account.error != nil { return routerRed }
+    switch account.health {
+    case .drained: return routerRed
+    case .soft: return routerYellow
+    case .unknown, .healthy: return routerMuted
+    }
+  }
+
+  private func accessibilityLabel(
+    for account: ChatGptAccountPoolRow,
+    rank: Int?,
+    now: Date
+  ) -> String {
+    let fiveHour = IslandAccountQuotaPresentation.percentText(account.primaryRemainingPercent)
+    let weekly = IslandAccountQuotaPresentation.percentText(account.secondaryRemainingPercent)
+    let back = IslandAccountQuotaPresentation.resetBackText(account.resetsAt, now: now)
+    let window = account.resetWindowIsWeekly
+      ? routerLocalized("weekly limit")
+      : routerLocalized("5-hour limit")
+    let position = rank
+      .map { routerFormat("rotation position %d", $0) }
+      ?? routerLocalized("out of rotation")
+    let plan = IslandAccountQuotaPresentation.planTag(account.planType).map { ", \($0)" } ?? ""
+    return "\(account.displayLabel)\(plan), \(position), 5-hour \(fiveHour), "
+      + "weekly \(weekly), \(window) back \(back)"
   }
 }
 
