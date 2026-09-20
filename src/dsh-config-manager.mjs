@@ -149,6 +149,7 @@ export function removeRouteFromSettings(contents) {
 //
 const CREDENTIAL_REFS_KEY = "refs";
 const CREDENTIAL_VERSION_KEY = "version";
+const CREDENTIAL_RECORDS_KEY = "records";
 
 /**
  * Decides which of the two shapes a credentials document is written in.
@@ -205,6 +206,10 @@ function assertCredentialDocument(document, refs) {
       }
       continue;
     }
+    // Current harness builds also keep non-reference secret records in this
+    // document. That subtree belongs to the harness and is preserved byte for
+    // byte; only `refs` is interpreted or edited by this integration.
+    if (node.key === CREDENTIAL_RECORDS_KEY) continue;
     if (node.children.size) nested(node.key);
   }
 }

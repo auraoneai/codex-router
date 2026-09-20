@@ -268,6 +268,30 @@ test("an envelope holding no references yet is filled in rather than duplicated"
   assert.equal(removeCredential(after, "CODEX_ROUTER_CALLER_KEY"), "version: 1\n");
 });
 
+test("harness-owned credential records are preserved byte-for-byte", () => {
+  const before = [
+    "version: 1",
+    "refs:",
+    "  DEEPSEEK_API_KEY: sk-aaa",
+    "records:",
+    "  client-connection/browser-session:",
+    "    kind: browser-session",
+    "    payload:",
+    "      version: 1",
+    "      secret: harness-owned",
+    "",
+  ].join("\n");
+  const after = applyCredential(before, "CODEX_ROUTER_CALLER_KEY", "secret-value");
+  assert.equal(
+    after,
+    before.replace(
+      "records:",
+      '  CODEX_ROUTER_CALLER_KEY: "secret-value"\nrecords:',
+    ),
+  );
+  assert.equal(removeCredential(after, "CODEX_ROUTER_CALLER_KEY"), before);
+});
+
 test("a legacy root-level credentials document is written in its own shape", () => {
   const before = "# keys\nDEEPSEEK_API_KEY: sk-aaa\n";
   const after = applyCredential(before, "CODEX_ROUTER_CALLER_KEY", "secret-value");
