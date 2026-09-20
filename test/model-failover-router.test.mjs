@@ -261,6 +261,12 @@ function run(
     encoding: "utf8",
     mode: 0o600,
   });
+  if (chain?.some((slug) => String(slug).startsWith("kiro-prism/"))) {
+    writeFileSync(path.join(stateDir, "kiro-prism-api-key.secret"), "test-prism-key\n", {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+  }
   if (userModels?.some((model) => model?.provider === "groq")) {
     writeFileSync(path.join(stateDir, "groq-api-key.secret"), "test-groq-key\n", {
       encoding: "utf8",
