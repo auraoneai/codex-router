@@ -10,6 +10,7 @@ export const REQUEST_PROFILES = Object.freeze([
   "dashscope-reasoning",
   "deepseek-nonthinking",
   "deepseek-thinking",
+  "free-prism",
   "glm-thinking",
   "hy4-reasoning",
   "kimi-k3",
