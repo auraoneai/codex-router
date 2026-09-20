@@ -983,6 +983,10 @@ final class RouterStore: ObservableObject {
   // and it is dropped as soon as a snapshot agrees with it.
   @Published private(set) var chatGptPreferredOverride: String?
   @Published private(set) var chatGptAccountOperation: String?
+  // The CLI projection drops each window's duration, and its two slots are
+  // positional rather than fixed windows. Read alongside the snapshot so the
+  // table's columns name the window they are actually showing.
+  @Published private(set) var chatGptAccountWindows = ChatGptAccountWindowDurations.empty
   @Published private(set) var providerUsage: ProviderUsageSnapshot?
   @Published private(set) var providerUsageError: String?
   @Published private(set) var providerSetup: [String: ProviderSetupState] = [:]
@@ -2156,6 +2160,13 @@ final class RouterStore: ObservableObject {
       let output = try await runControl(arguments: ["chatgpt-account-pool", "usage", "cached"])
       let next = try JSONDecoder().decode(ChatGptAccountPoolUsage.self, from: output)
       if chatGptAccountUsage != next { chatGptAccountUsage = next }
+      // Read the durations from the same document the CLI just projected. The
+      // probe rewrites that file on its own schedule, so a read that straddles a
+      // rewrite would pair one probe's window lengths with another's percentages.
+      // `matches` settles it at render time by comparing the probe timestamps;
+      // reading after the projection is what makes agreement the common case.
+      let windows = ChatGptAccountWindowDurations.read()
+      if chatGptAccountWindows != windows { chatGptAccountWindows = windows }
       if chatGptAccountUsageError != nil { chatGptAccountUsageError = nil }
       // Once the snapshot reports the account this tray selected, the local
       // override has nothing left to say.
@@ -3971,6 +3982,109 @@ private struct RouterServiceHealth: Decodable, Equatable {
 // paths.mjs: MODEL_ROUTER_STATE_DIR, then the managed aliases, then
 // `$CODEX_HOME/codex-router` with CODEX_HOME defaulting to `~/.codex`. An empty
 // value falls through exactly as `||` does in Node.
+/// One account's rate-limit windows, read with their durations intact.
+///
+/// `control chatgpt-account-pool usage cached` projects the two upstream slots
+/// as `primaryRemainingPercent`/`secondaryRemainingPercent` and drops
+/// `windowDurationMins`. Those slots are positional, not fixed windows: on a
+/// pool observed here, one account reported a 10080-minute (weekly) window in
+/// `primary` while every other account reported a 300-minute one there. Labelling
+/// the first slot "5h" therefore mislabels that account's weekly figure.
+///
+/// Every other classifier in the router keys off `windowDurationMins`
+/// (`codex-account-usage.mjs` picks its weekly/monthly window that way, and
+/// `CodexRateLimitWindow.durationLabel` does the same), so the tray does too.
+/// This reads the same document the CLI read, purely to recover the durations
+/// the projection dropped; rotation order and health still come from the CLI.
+struct ChatGptAccountWindowDurations: Equatable {
+  /// Keyed by account id: the short rolling window and the long weekly one,
+  /// each identified by its own duration.
+  let shortWindow: [String: ChatGptWindowFacts]
+  let longWindow: [String: ChatGptWindowFacts]
+  /// The document's own probe timestamp. The CLI reads this same file, so a
+  /// mismatch means the probe rewrote it between the two reads and these
+  /// durations describe different numbers than the snapshot's.
+  let fetchedAt: String?
+
+  static let empty = ChatGptAccountWindowDurations(
+    shortWindow: [:], longWindow: [:], fetchedAt: nil
+  )
+
+  /// True only when this document is the one the snapshot was projected from.
+  func matches(_ snapshot: ChatGptAccountPoolUsage?) -> Bool {
+    guard let snapshot, let fetchedAt, let theirs = snapshot.fetchedAt else { return false }
+    return fetchedAt == theirs
+  }
+
+  /// Reads `$STATE_DIR/chatgpt-account-usage.json`. An absent or unreadable
+  /// document degrades the labels to the projection's slot order rather than
+  /// failing the table, which is the same way rotation treats it.
+  static func read(
+    environment: [String: String] = ProcessInfo.processInfo.environment,
+    home: URL = FileManager.default.homeDirectoryForCurrentUser
+  ) -> ChatGptAccountWindowDurations {
+    let url = RouterStateDirectory.resolve(environment: environment, home: home)
+      .appendingPathComponent("chatgpt-account-usage.json")
+    guard let data = try? Data(contentsOf: url) else { return .empty }
+    return parse(data)
+  }
+
+  static func parse(_ data: Data) -> ChatGptAccountWindowDurations {
+    guard
+      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let accounts = root["accounts"] as? [[String: Any]]
+    else { return .empty }
+    let fetchedAt = root["fetchedAt"] as? String
+    var shortWindow: [String: ChatGptWindowFacts] = [:]
+    var longWindow: [String: ChatGptWindowFacts] = [:]
+    for account in accounts {
+      guard let id = account["id"] as? String else { continue }
+      let windows = ["primary", "secondary"].compactMap { key -> ChatGptWindowFacts? in
+        guard let window = account[key] as? [String: Any] else { return nil }
+        let minutes = (window["windowDurationMins"] as? NSNumber)?.intValue
+        let remaining = (window["remainingPercent"] as? NSNumber)?.doubleValue
+        let resetsAt = (window["resetsAt"] as? NSNumber)?.doubleValue
+        return ChatGptWindowFacts(
+          durationMinutes: minutes,
+          remainingPercent: remaining,
+          resetsAt: resetsAt
+        )
+      }
+      // A week or more is the long window; anything shorter is the rolling one.
+      // A window with no duration at all cannot be classified and is left out.
+      for window in windows {
+        guard let minutes = window.durationMinutes else { continue }
+        if minutes >= 7 * 24 * 60 {
+          if longWindow[id] == nil { longWindow[id] = window }
+        } else if shortWindow[id] == nil {
+          shortWindow[id] = window
+        }
+      }
+    }
+    return ChatGptAccountWindowDurations(
+      shortWindow: shortWindow, longWindow: longWindow, fetchedAt: fetchedAt
+    )
+  }
+}
+
+struct ChatGptWindowFacts: Equatable {
+  let durationMinutes: Int?
+  let remainingPercent: Double?
+  let resetsAt: TimeInterval?
+
+  /// "5h", "7d" -- the column label this window actually belongs under.
+  var shortLabel: String? {
+    guard let durationMinutes else { return nil }
+    if durationMinutes >= 1_440, durationMinutes.isMultiple(of: 1_440) {
+      return "\(durationMinutes / 1_440)d"
+    }
+    if durationMinutes >= 60, durationMinutes.isMultiple(of: 60) {
+      return "\(durationMinutes / 60)h"
+    }
+    return "\(durationMinutes)m"
+  }
+}
+
 enum RouterStateDirectory {
   static func resolve(environment: [String: String], home: URL) -> URL {
     let configured = ["MODEL_ROUTER_STATE_DIR", "CODEX_ROUTER_STATE_DIR", "KIMI_CODEX_STATE_DIR"]
@@ -4548,11 +4662,6 @@ struct ChatGptAccountPoolRow: Decodable, Equatable, Identifiable {
     if !trimmed.isEmpty { return trimmed }
     return String(id.suffix(8))
   }
-
-  /// `resetsAt` is the weekly reset when a weekly window was read and the
-  /// short-window reset otherwise, so the countdown cannot be labelled as
-  /// belonging to one fixed window.
-  var resetWindowIsWeekly: Bool { secondaryRemainingPercent != nil }
 }
 
 /// Rotation's own verdict on an account's leftover quota, derived by the router

@@ -2259,16 +2259,42 @@ private struct IslandAccountQuotaTable: View {
         .foregroundStyle(routerMuted)
         .lineLimit(1)
       Spacer()
-      Text("5h")
+      Text(shortColumnTitle)
         .frame(width: IslandAccountQuotaPresentation.quotaWidth, alignment: .trailing)
       Text("in")
         .frame(width: IslandAccountQuotaPresentation.countdownWidth, alignment: .trailing)
-      Text("Wk")
+      Text(longColumnTitle)
         .frame(width: IslandAccountQuotaPresentation.quotaWidth, alignment: .trailing)
     }
     .font(.system(size: 8, weight: .semibold, design: .monospaced))
     .foregroundStyle(routerMuted)
     .frame(height: IslandAccountQuotaPresentation.headerHeight)
+  }
+
+  /// The columns name the window they are actually showing, taken from the pool
+  /// rather than assumed: an account can report a 5-hour short window while
+  /// another reports none at all. The fallbacks apply only when no account
+  /// contributed a duration.
+  private var shortColumnTitle: String {
+    dominantLabel(store.chatGptAccountWindows.shortWindow) ?? "5h"
+  }
+
+  private var longColumnTitle: String {
+    dominantLabel(store.chatGptAccountWindows.longWindow) ?? "7d"
+  }
+
+  /// The label shared by the most accounts. A pool whose accounts disagree about
+  /// a window's length has no single honest header, so the most common one wins
+  /// and the per-row tooltip carries the exact window.
+  private func dominantLabel(_ windows: [String: ChatGptWindowFacts]) -> String? {
+    var counts: [String: Int] = [:]
+    for window in windows.values {
+      guard let label = window.shortLabel else { continue }
+      counts[label, default: 0] += 1
+    }
+    return counts.max { left, right in
+      left.value == right.value ? left.key > right.key : left.value < right.value
+    }?.key
   }
 
   /// Names how many subscriptions rotation can actually reach, which is the
@@ -2292,6 +2318,7 @@ private struct IslandAccountQuotaTable: View {
     now: Date
   ) -> some View {
     let excluded = rank == nil
+    let windows = resolvedWindows(for: account)
     HStack(spacing: 5) {
       IslandDenseSwitch(isOn: !excluded, locked: true)
         .frame(
@@ -2332,9 +2359,9 @@ private struct IslandAccountQuotaTable: View {
               .fixedSize()
           }
           Spacer(minLength: 4)
-          quotaValue(account.primaryRemainingPercent)
-          countdownValue(account, now: now)
-          quotaValue(account.secondaryRemainingPercent)
+          quotaValue(windows.short?.remainingPercent)
+          countdownValue(windows: windows, now: now)
+          quotaValue(windows.long?.remainingPercent)
         }
         .frame(height: IslandAccountQuotaPresentation.rowHeight)
         .contentShape(Rectangle())
@@ -2370,6 +2397,24 @@ private struct IslandAccountQuotaTable: View {
     return routerLocalized("Out of rotation")
   }
 
+  /// Classifies an account's windows by duration rather than by the slot they
+  /// arrived in. The slots are positional: an account whose only window is
+  /// weekly reports it in `primary`, so reading the first slot as the short
+  /// window shows a weekly percentage under a 5-hour heading.
+  ///
+  /// Deliberately no fallback to the projection's slots. Guessing a window's
+  /// identity from its position is the error this exists to avoid, and a dash is
+  /// honest where a confidently mislabelled number is not. The cache must also be
+  /// the same probe the snapshot came from, or the two describe different
+  /// moments -- the probe rewrites that file on its own schedule.
+  private func resolvedWindows(
+    for account: ChatGptAccountPoolRow
+  ) -> (short: ChatGptWindowFacts?, long: ChatGptWindowFacts?) {
+    let durations = store.chatGptAccountWindows
+    guard durations.matches(store.chatGptAccountUsage) else { return (nil, nil) }
+    return (durations.shortWindow[account.id], durations.longWindow[account.id])
+  }
+
   private func quotaValue(_ remaining: Double?) -> some View {
     Text(IslandAccountQuotaPresentation.percentText(remaining))
       .font(.system(size: 10.5, weight: .semibold, design: .rounded))
@@ -2378,20 +2423,25 @@ private struct IslandAccountQuotaTable: View {
       .frame(width: IslandAccountQuotaPresentation.quotaWidth, alignment: .trailing)
   }
 
-  /// Held neutral on purpose. `resetsAt` is the weekly reset when a weekly
-  /// window was read and the short one otherwise, so tinting it by either
-  /// window's severity would colour it against a number it does not belong to.
-  private func countdownValue(_ account: ChatGptAccountPoolRow, now: Date) -> some View {
-    let text = IslandAccountQuotaPresentation.resetBackText(account.resetsAt, now: now)
+  /// Counts down the short window when one was read, since that is the limit a
+  /// turn hits first. Held colour-neutral: the reset belongs to a window, not to
+  /// a severity, and tinting it by a percentage it does not describe would read
+  /// as a warning about the wrong number.
+  private func countdownValue(
+    windows: (short: ChatGptWindowFacts?, long: ChatGptWindowFacts?),
+    now: Date
+  ) -> some View {
+    let window = windows.short ?? windows.long
+    let text = IslandAccountQuotaPresentation.resetBackText(window?.resetsAt, now: now)
+    let label = window?.shortLabel
     return Text(text)
       .font(.system(size: 10, weight: .semibold, design: .rounded))
       .monospacedDigit()
       .foregroundStyle(text == "—" ? routerMuted : .white.opacity(0.82))
       .frame(width: IslandAccountQuotaPresentation.countdownWidth, alignment: .trailing)
       .help(
-        account.resetWindowIsWeekly
-          ? routerLocalized("Weekly limit resets in")
-          : routerLocalized("5-hour limit resets in")
+        label.map { routerFormat("%@ limit resets in", $0) }
+          ?? routerLocalized("Limit resets in")
       )
   }
 
@@ -2418,18 +2468,19 @@ private struct IslandAccountQuotaTable: View {
     rank: Int?,
     now: Date
   ) -> String {
-    let fiveHour = IslandAccountQuotaPresentation.percentText(account.primaryRemainingPercent)
-    let weekly = IslandAccountQuotaPresentation.percentText(account.secondaryRemainingPercent)
-    let back = IslandAccountQuotaPresentation.resetBackText(account.resetsAt, now: now)
-    let window = account.resetWindowIsWeekly
-      ? routerLocalized("weekly limit")
-      : routerLocalized("5-hour limit")
+    let windows = resolvedWindows(for: account)
+    let short = IslandAccountQuotaPresentation.percentText(windows.short?.remainingPercent)
+    let long = IslandAccountQuotaPresentation.percentText(windows.long?.remainingPercent)
+    let back = IslandAccountQuotaPresentation.resetBackText(
+      (windows.short ?? windows.long)?.resetsAt, now: now)
     let position = rank
       .map { routerFormat("rotation position %d", $0) }
       ?? routerLocalized("out of rotation")
     let plan = IslandAccountQuotaPresentation.planTag(account.planType).map { ", \($0)" } ?? ""
-    return "\(account.displayLabel)\(plan), \(position), 5-hour \(fiveHour), "
-      + "weekly \(weekly), \(window) back \(back)"
+    let shortName = windows.short?.shortLabel ?? shortColumnTitle
+    let longName = windows.long?.shortLabel ?? longColumnTitle
+    return "\(account.displayLabel)\(plan), \(position), \(shortName) \(short), "
+      + "\(longName) \(long), resets in \(back)"
   }
 }
 
