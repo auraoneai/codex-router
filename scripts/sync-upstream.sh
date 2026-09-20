@@ -5,6 +5,10 @@
 #   scripts/sync-upstream.sh            merge upstream/main and install it
 #   scripts/sync-upstream.sh --check    report what would change, write nothing
 #
+# Both the merge and the finished installation are gated on
+# scripts/verify-custom-features.mjs, which asserts each customization is still
+# wired rather than merely present. See docs/MAINTAINED-FORK.md.
+#
 # Why this exists: `bin/update` fast-forwards the installed checkout from
 # `origin/main`, and for this machine `origin` is the fork that carries the
 # custom commits. Upstream is therefore merged here first, so the fork's main
@@ -58,6 +62,17 @@ if [ "$behind" -gt 0 ]; then
   # merge that reaches the fork's main becomes what the installer pulls.
   npm run check
   node --test --test-timeout=600000 test/*.test.mjs
+  # The suite proves upstream still works; this proves the customizations
+  # survived. A merge can leave every test green while silently disconnecting
+  # custom code -- a header nothing sends any more, a guard wired for one
+  # provider -- which is how an upgrade lost work quietly enough to reach the
+  # installation before anyone noticed.
+  if ! node "$dev_dir/scripts/verify-custom-features.mjs"; then
+    printf '\n%s\n' "The merge dropped or disconnected custom work. Nothing was published." >&2
+    printf '%s\n' "Fix the failing checks, then re-run. See docs/MAINTAINED-FORK.md." >&2
+    printf '%s\n' "To abandon the merge entirely: git merge --abort" >&2
+    exit 1
+  fi
 fi
 
 # The fork's main is what the installed checkout pulls, so publish there.
@@ -66,3 +81,10 @@ git push origin "HEAD:main"
 cd "$INSTALL_ROOT"
 CODEX_ROUTER_REPOSITORY_URL="$FORK_URL" ./bin/update
 CODEX_ROUTER_REPOSITORY_URL="$FORK_URL" ./bin/codex-router doctor
+# Re-run against the installed tree, not just the development one: this is the
+# checkout that actually serves turns, and `bin/update` fast-forwards it from a
+# separate remote ref.
+node "$INSTALL_ROOT/scripts/verify-custom-features.mjs" || {
+  printf '\n%s\n' "The installed checkout is missing custom behavior. Roll back with: codex-router rollback" >&2
+  exit 1
+}
