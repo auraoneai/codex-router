@@ -50,6 +50,17 @@ export const SOURCE_ROOT = configuredSourceRoot
 export const CODEX_HOME =
   process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
 
+// Two documents the Codex desktop app owns and this router only ever reads.
+// The Electron atom store records the model the user last chose in the picker,
+// and the thread database records which model each window and scheduled task is
+// running. Reading them is how global model defaults can follow a choice made
+// in the app's own UI instead of asking the user to restate it here.
+export const CODEX_GLOBAL_STATE_PATH =
+  process.env.MODEL_ROUTER_CODEX_GLOBAL_STATE ||
+  path.join(CODEX_HOME, ".codex-global-state.json");
+export const CODEX_STATE_DATABASE_PATH =
+  process.env.MODEL_ROUTER_CODEX_STATE_DATABASE || path.join(CODEX_HOME, "state_5.sqlite");
+
 // DeepSeek Harness reads its own home from `$DSH_HOME`, defaulting to `~/.dsh`
 // (`dsh-settings-file` and `dsh-credentials-local` both resolve it that way).
 // Match that resolution exactly rather than hardcoding the default, or a user
@@ -216,6 +227,16 @@ export const SIGNED_PROVIDER_MODE_PATH = path.join(STATE_DIR, "signed-provider-m
 // An opt-in routed default for signed-in Codex. The router owns this small
 // state file, while Codex continues to own the actual config document.
 export const CODEX_DEFAULT_MODEL_PATH = path.join(STATE_DIR, "codex-default-model.json");
+// Opt-in global model defaults, which are a different claim from the one above:
+// that file owns Codex's stored `model` setting, while this one records defaults
+// the router applies to a turn in flight, plus the threads whose own picker the
+// user moved and which therefore stop following those defaults.
+export const MODEL_SYNC_PATH =
+  process.env.MODEL_ROUTER_MODEL_SYNC_STATE || path.join(STATE_DIR, "model-sync.json");
+// The last routed model the user actually ran, so a turn the router generates
+// on their behalf can inherit it rather than falling back to native GPT.
+export const OPERATOR_MODEL_PATH =
+  process.env.MODEL_ROUTER_OPERATOR_MODEL || path.join(STATE_DIR, "operator-model.json");
 export const PROVIDER_SELECTION_PATH = path.join(STATE_DIR, "enabled-providers.json");
 export const DISCOVERY_MODE_PATH = path.join(STATE_DIR, "discovery-mode.json");
 // Explicit, shared-plane consent for letting router-authenticated local clients
@@ -256,6 +277,13 @@ export const CHATGPT_ACCOUNT_HOMES_DIR =
   process.env.MODEL_ROUTER_CHATGPT_ACCOUNT_HOMES ||
   path.join(STATE_DIR, "chatgpt-accounts");
 export const CHATGPT_PROFILE_SWITCH_PATH = path.join(STATE_DIR, "chatgpt-profile-switch.json");
+// Last per-account quota probe. Rotation reads it to rank accounts and to drop
+// spent ones; it holds remaining-percent windows and reset times, never a
+// credential. A stale or absent document degrades rotation rather than
+// breaking it, so nothing here is load-bearing for a turn.
+export const CHATGPT_ACCOUNT_USAGE_CACHE_PATH =
+  process.env.MODEL_ROUTER_CHATGPT_ACCOUNT_USAGE ||
+  path.join(STATE_DIR, "chatgpt-account-usage.json");
 // User-defined OpenAI-compatible provider descriptors. The document contains
 // no raw credentials; credentialRef values point to the provider-neutral store.
 export const GENERIC_PROVIDERS_PATH =

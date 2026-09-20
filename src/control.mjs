@@ -3520,6 +3520,45 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
     process.stdout.write(`${JSON.stringify({ ...pool, profile })}\n`);
     return;
   }
+  if (action === "usage") {
+    // Refreshes the per-account quota snapshot rotation ranks on, and reports
+    // the resulting order. This is the only place that probe is driven: the
+    // request path reads the snapshot and never spawns an app-server itself.
+    const { probeChatGPTAccountUsage } = await import("./chatgpt-usage-probe.mjs");
+    const { rotationCandidates, leftoverHealth } = await import("./chatgpt-rotation.mjs");
+    // `cached` reports what rotation is deciding on right now without spending
+    // a probe; the default refreshes first. Reading the file in both cases is
+    // what makes the two agree about the ranking.
+    let snapshot;
+    if (value === "cached") {
+      const { CHATGPT_ACCOUNT_USAGE_CACHE_PATH } = await import("./paths.mjs");
+      try {
+        snapshot = JSON.parse(readFileSync(CHATGPT_ACCOUNT_USAGE_CACHE_PATH, "utf8"));
+      } catch {
+        snapshot = { accounts: [] };
+      }
+    } else {
+      snapshot = await probeChatGPTAccountUsage();
+    }
+    const usageById = new Map((snapshot?.accounts || []).map((entry) => [entry.id, entry]));
+    const order = rotationCandidates({ usageById }).map((entry) => entry.id);
+    process.stdout.write(`${JSON.stringify({
+      fetchedAt: snapshot?.fetchedAt,
+      rotation: order,
+      accounts: (snapshot?.accounts || []).map((entry) => ({
+        id: entry.id,
+        label: entry.label,
+        preferred: entry.preferred,
+        planType: entry.planType,
+        health: leftoverHealth(entry),
+        primaryRemainingPercent: entry.primary?.remainingPercent ?? null,
+        secondaryRemainingPercent: entry.secondary?.remainingPercent ?? null,
+        resetsAt: entry.secondary?.resetsAt ?? entry.primary?.resetsAt ?? null,
+        ...(entry.error ? { error: entry.error } : {}),
+      })),
+    })}\n`);
+    return;
+  }
   if (action === "profile") {
     if (value === "reconcile") {
       process.stdout.write(`${JSON.stringify(await reconcileChatGPTProfileSwitch())}\n`);
@@ -3530,7 +3569,7 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
       return;
     }
   }
-  throw new Error("Usage: control chatgpt-account-pool status|add [label]|home <acct_id>|login-finalize <acct_id> <lease>|remove <acct_id>|select <acct_id>|profile status|profile reconcile");
+  throw new Error("Usage: control chatgpt-account-pool status|add [label]|home <acct_id>|login-finalize <acct_id> <lease>|remove <acct_id>|select <acct_id>|usage [cached]|profile status|profile reconcile");
 }
 
 // The public `/health` leaf intentionally contains only the router summary and
