@@ -239,8 +239,22 @@ test("provider registry exposes configured API and OAuth model families", () => 
     ],
   );
   assert.equal(PROVIDERS.get("deepseek").baseUrl, "https://api.deepseek.com");
-  assert.equal(MODELS.filter((model) => model.provider === "kiro-prism").length, 29);
-  assert.equal(MODEL_BY_SLUG.get("kiro-prism/grok-4.6")?.upstreamModel, "grok-4.6");
+  assert.equal(MODELS.filter((model) => model.provider === "kiro-prism").length, 10);
+  // Fable 5.1 is defined and routable by explicit slug, but stays out of the
+  // picker until Kiro model governance approves it for the organization.
+  assert.equal(
+    MODEL_BY_SLUG.get("kiro-prism/claude-fable-5.1")?.upstreamModel,
+    "claude-fable-5.1",
+  );
+  assert.equal(MODEL_BY_SLUG.get("kiro-prism/claude-fable-5.1")?.listed, false);
+  // Prism dropped the Grok lane from its catalogue, so no grok-* route resolves.
+  assert.equal(MODEL_BY_SLUG.get("kiro-prism/grok-4.6"), undefined);
+  assert.equal(
+    MODELS.filter(
+      (model) => model.provider === "kiro-prism" && /grok/i.test(model.slug),
+    ).length,
+    0,
+  );
   assert.equal(MODEL_BY_SLUG.get("kiro-prism/kimi-k3")?.upstreamModel, "kimi-k3");
   assert.equal(
     MODEL_BY_SLUG.get("kiro-prism/deepseek-v4.1-flash")?.upstreamModel,
