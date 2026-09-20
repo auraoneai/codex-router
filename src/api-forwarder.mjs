@@ -67,6 +67,10 @@ import {
   normalizeOpenAIRequest,
 } from "./openai-adapters.mjs";
 import { threadIdFromHeaders } from "./codex-session-names.mjs";
+import {
+  createProviderLatencyTrace,
+  validRouterCorrelationId,
+} from "./provider-latency-trace.mjs";
 import { applyOpenCodeSessionHeaders, isOpenCodeProvider } from "./opencode-session.mjs";
 import {
   clampOpenCodeMessageContent,
@@ -1571,6 +1575,34 @@ async function relayUpstreamResponse(
   }
 }
 
+// Latency tracing is diagnostic and must never fail a forwarded request, so the
+// whole surface goes through one guard. Mirrors `guardedLatencyTrace` in
+// router.mjs; kept local rather than shared because each module wraps only the
+// calls it actually makes.
+function guardedForwarderTrace(options) {
+  let trace;
+  try {
+    trace = createProviderLatencyTrace(options);
+  } catch {
+    trace = undefined;
+  }
+  const call = (name, ...args) => {
+    try {
+      return trace?.[name]?.(...args);
+    } catch {
+      return undefined;
+    }
+  };
+  return {
+    setPayloadClass: (value) => call("setPayloadClass", value),
+    setRequestedModel: (model) => call("setRequestedModel", model),
+    setResolvedModel: (model) => call("setResolvedModel", model),
+    beginAttempt: (metadata) => call("beginAttempt", metadata),
+    finishAttemptRecord: (attempt, outcome) => call("finishAttemptRecord", attempt, outcome),
+    finish: (outcome) => call("finish", outcome),
+  };
+}
+
 // Prism uses this opaque router conversation id as its prompt-cache key. Keep
 // the metadata provider-scoped so no other upstream receives router affinity.
 function prismAffinityHeaders(provider, conversationId) {
@@ -1717,9 +1749,49 @@ async function handleRequest(request, response) {
     return;
   }
 
+  // Inherit the router's correlation id when it forwarded one, so the gateway
+  // hop and this upstream hop appear under a single logical request instead of
+  // two unrelated records. A caller-supplied value is accepted only in the
+  // router's own format.
+  const parentRequestId = request.headers["x-codex-router-request-id"];
+  const latencyTrace = guardedForwarderTrace({
+    logicalRequestId: validRouterCorrelationId(parentRequestId) ? parentRequestId : undefined,
+    routeClass: "api-forwarder",
+  });
+  // Finished from the response lifecycle rather than inline: this handler has
+  // many relay paths and early returns, and a client that disconnects mid-stream
+  // never reaches any of them. `close` without `writableFinished` is that
+  // cancellation, which is status 0 -- neither the router's failure nor the
+  // provider's.
+  response.once("finish", () => latencyTrace.finish({ statusCode: response.statusCode }));
+  response.once("close", () => {
+    if (!response.writableFinished) latencyTrace.finish({ statusCode: 0 });
+  });
+
   const original = await readRequestBody(request);
   const normalized = normalizeBody(original, request.headers["content-type"], route);
-  const conversationId = threadIdFromHeaders(request.headers);
+  latencyTrace.setPayloadClass(
+    normalized.body.length < 4_096
+      ? "tiny"
+      : normalized.body.length < 65_536
+        ? "small"
+        : normalized.body.length < 524_288
+          ? "ordinary"
+          : "large",
+  );
+  latencyTrace.setRequestedModel(normalized.payload?.model);
+  latencyTrace.setResolvedModel(normalized.model?.upstreamModel);
+  // The router forwards a hashed conversation id on its own hop, which is what
+  // Prism keys its prompt cache on. Reading that header first is what makes
+  // `prismAffinityHeaders` reachable for routed traffic at all: a router-built
+  // request carries no `thread-id`/`session-id`, so the thread lookup alone
+  // always came back empty and the affinity headers were never sent. A direct
+  // caller that does send a thread header still gets affinity through the
+  // fallback.
+  const routerConversationId = typeof request.headers["x-codex-router-conversation"] === "string"
+    ? request.headers["x-codex-router-conversation"].slice(0, 128)
+    : "";
+  const conversationId = routerConversationId || threadIdFromHeaders(request.headers);
   const affinityHeaders = prismAffinityHeaders(normalized.provider, conversationId);
   const controller = new AbortController();
   request.once("aborted", () => controller.abort());
@@ -2026,20 +2098,30 @@ async function handleRequest(request, response) {
       normalized.endpoint,
     );
     target = upstreamTarget(session, normalized, route, requestUrl.search);
-    upstream = await fetch(target, {
-      method: request.method,
-      headers: upstreamHeaders(
-        request.headers,
-        upstreamBody,
-        session.apiKey,
-        normalized.provider,
-        { ...session.headers, ...affinityHeaders },
-        normalized.endpoint,
-      ),
-      body: upstreamBody,
-      signal: controller.signal,
-      redirect: route === "/embeddings" ? "error" : "follow",
+    const attemptRecord = latencyTrace.beginAttempt({
+      provider: canonicalProviderId(normalized.provider.id),
+      model: normalized.model?.upstreamModel,
     });
+    try {
+      upstream = await fetch(target, {
+        method: request.method,
+        headers: upstreamHeaders(
+          request.headers,
+          upstreamBody,
+          session.apiKey,
+          normalized.provider,
+          { ...session.headers, ...affinityHeaders },
+          normalized.endpoint,
+        ),
+        body: upstreamBody,
+        signal: controller.signal,
+        redirect: route === "/embeddings" ? "error" : "follow",
+      });
+    } catch (error) {
+      latencyTrace.finishAttemptRecord(attemptRecord, { error });
+      throw error;
+    }
+    latencyTrace.finishAttemptRecord(attemptRecord, { response: upstream });
     // Embeddings can be billed even when the response never reaches the
     // caller. Select one pool credential above and record its outcome, but do
     // not replay the same input through another credential after a 401, 429,
@@ -2073,19 +2155,30 @@ async function handleRequest(request, response) {
       normalized.endpoint,
     );
     target = upstreamTarget(session, normalized, route, requestUrl.search);
-    upstream = await fetch(target, {
-      method: request.method,
-      headers: upstreamHeaders(
-        request.headers,
-        upstreamBody,
-        session.apiKey,
-        normalized.provider,
-        { ...session.headers, ...affinityHeaders },
-        normalized.endpoint,
-      ),
-      body: upstreamBody,
-      signal: controller.signal,
+    const replayRecord = latencyTrace.beginAttempt({
+      provider: canonicalProviderId(normalized.provider.id),
+      model: normalized.model?.upstreamModel,
+      kind: "credential_refresh_replay",
     });
+    try {
+      upstream = await fetch(target, {
+        method: request.method,
+        headers: upstreamHeaders(
+          request.headers,
+          upstreamBody,
+          session.apiKey,
+          normalized.provider,
+          { ...session.headers, ...affinityHeaders },
+          normalized.endpoint,
+        ),
+        body: upstreamBody,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      latencyTrace.finishAttemptRecord(replayRecord, { error });
+      throw error;
+    }
+    latencyTrace.finishAttemptRecord(replayRecord, { response: upstream });
   }
   // Falling back here is legal for the same reason the Copilot replay above
   // is: nothing has been relayed yet. The refusal is read rather than piped
@@ -2144,8 +2237,19 @@ const server = http.createServer((request, response) => {
     // Names and codes only: a forwarder failure can wrap upstream response
     // text in its message, and bodies never belong in the log. The code chain
     // is what distinguishes a dead socket from a refused connect (#171).
+    //
+    // `safeMessage` marks an error whose own message is a fixed string written in
+    // this repository -- the Responses adapter's field-level rejections. Append
+    // just that one message rather than passing `messages: true`, because that
+    // option applies to the whole cause chain and a deeper link may wrap a
+    // provider body. Without it a rejected request logs only
+    // `Error (invalid_responses_request)` and never says which field was wrong.
+    const safeReason =
+      error?.safeMessage === true && typeof error?.message === "string" && error.message
+        ? ` reason: ${error.message}`
+        : "";
     console.error(
-      `[api-forwarder] request failed: ${formatErrorChain(error, { messages: false })}`,
+      `[api-forwarder] request failed: ${formatErrorChain(error, { messages: false })}${safeReason}`,
     );
     if (!response.headersSent) {
       writeJson(response, status, {

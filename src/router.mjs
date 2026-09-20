@@ -88,6 +88,7 @@ import {
   usesDeepSeekResponses,
 } from "./deepseek-responses.mjs";
 import { exactRouteProbeRequested } from "./exact-route-probe.mjs";
+import { createProviderLatencyTrace } from "./provider-latency-trace.mjs";
 import {
   MERGED_CATALOG_PATH,
   NATIVE_CATALOG_PATH,
@@ -252,11 +253,26 @@ import {
   nativeSessionTokenMatches,
 } from "./codex-native-session.mjs";
 import {
+  followOperatorModel,
+  isNativeOpenAIRoute,
+  rememberOperatorModel,
+} from "./operator-model.mjs";
+import {
+  coolAccount,
+  forgetAccountAffinities,
+  rememberAccount,
+  rotationCandidates,
+  COOLDOWN_MS,
+  USAGE_CACHE_MAX_AGE_MS,
+} from "./chatgpt-rotation.mjs";
+import { CHATGPT_ACCOUNT_USAGE_CACHE_PATH } from "./paths.mjs";
+import {
   installStableFetchTransport,
   longIdleStreamFetch,
   loopbackProbeFetch,
 } from "./fetch-transport.mjs";
 import { grokStreamStallMs, grokTransportIdleTimeoutMs } from "./grok-stream-timeouts.mjs";
+import { providerStreamStallMs } from "./stream-stall-policy.mjs";
 import { handleResponsesWebSocketUpgrade } from "./responses-websocket.mjs";
 
 installStableFetchTransport();
@@ -365,6 +381,81 @@ function isGrokOauthRoute(route) {
 
 // A Grok hop uses a pool whose body idle bound outlasts the stall guard. Every
 // other route keeps the shared pool and Undici's default bound.
+// Latency tracing is diagnostic, and it sits on the hot request path. Nothing
+// it does may fail a turn, change a route, or alter what goes upstream, so the
+// whole surface is funnelled through one guard rather than trusting ~15 call
+// sites to each remember a try/catch. A trace that cannot even be created
+// degrades to a no-op with the same shape, so callers never branch on it.
+//
+// `startLocalhostParse`/`startRouteSelection` return a stop function and
+// `fetchCallbacks` returns two callbacks, so those returned values are wrapped
+// too -- an unguarded stop function called inside a `finally` would be exactly
+// the failure this indirection exists to prevent.
+function guardedLatencyTrace(options) {
+  let trace;
+  try {
+    trace = createProviderLatencyTrace(options);
+  } catch {
+    trace = undefined;
+  }
+  const call = (name, ...args) => {
+    try {
+      return trace?.[name]?.(...args);
+    } catch {
+      return undefined;
+    }
+  };
+  const guardedStop = (name) => {
+    const stop = call(name);
+    return () => {
+      try {
+        stop?.();
+      } catch {
+        // A phase that cannot be measured is not a reason to fail the turn.
+      }
+    };
+  };
+  let logicalRequestId;
+  try {
+    logicalRequestId = trace?.logicalRequestId;
+  } catch {
+    logicalRequestId = undefined;
+  }
+  return {
+    logicalRequestId,
+    setPayloadClass: (value) => call("setPayloadClass", value),
+    setRequestedModel: (model) => call("setRequestedModel", model),
+    setResolvedModel: (model) => call("setResolvedModel", model),
+    setReturnedModel: (model) => call("setReturnedModel", model),
+    markFirstFrame: (at) => call("markFirstFrame", at),
+    markSemantic: (at) => call("markSemantic", at),
+    finish: (outcome) => call("finish", outcome),
+    startLocalhostParse: () => guardedStop("startLocalhostParse"),
+    startRouteSelection: () => guardedStop("startRouteSelection"),
+    beginAttempt: (metadata) => call("beginAttempt", metadata),
+    finishAttemptRecord: (attempt, outcome) => call("finishAttemptRecord", attempt, outcome),
+    fetchCallbacks: (metadata) => {
+      const callbacks = call("fetchCallbacks", metadata);
+      return {
+        onAttemptStart: (event) => {
+          try {
+            callbacks?.onAttemptStart?.(event);
+          } catch {
+            // Observation only.
+          }
+        },
+        onAttemptFinish: (event) => {
+          try {
+            callbacks?.onAttemptFinish?.(event);
+          } catch {
+            // Observation only.
+          }
+        },
+      };
+    },
+  };
+}
+
 function fetchForRoute(route, url, init) {
   return isGrokOauthRoute(route)
     ? longIdleStreamFetch(url, init, { bodyTimeoutMs: GROK_TRANSPORT_IDLE_TIMEOUT_MS })
@@ -822,7 +913,101 @@ function nativeHeaders(request) {
       delete headers.authorization;
     }
   }
+  // Rotation runs only once a native credential is already established above.
+  // It chooses *which* registered account spends the turn; it never creates
+  // permission to spend one, so a caller that reached here with no session
+  // still gets none. The switched-in account stays the preferred choice, and
+  // rotation only moves off it when its quota is spent or it is cooling down
+  // after a 429.
+  if (hasNativeSession(headers)) {
+    const rotated = rotatedNativeHeaders(headers, conversationKey(request));
+    if (rotated) Object.assign(headers, rotated);
+  }
   return headers;
+}
+
+// The turn's conversation identity, used to keep one task on one account.
+// Codex forwards these already, so nothing new is asked of any client.
+function conversationKey(request) {
+  for (const name of ["session_id", "session-id", "thread-id"]) {
+    const value = request?.headers?.[name];
+    const text = Array.isArray(value) ? value[0] : value;
+    if (typeof text === "string" && text) return text;
+  }
+  return undefined;
+}
+
+// Per-account quota, as last probed. Read from disk rather than probed inline:
+// a probe spawns the Codex app-server, which must never sit in front of a turn.
+// A missing or stale cache simply means rotation ranks on order and cooldown
+// instead of quota, which is still better than not rotating.
+let usageCache = { at: 0, byId: new Map() };
+
+function cachedAccountUsageById({ now = Date.now() } = {}) {
+  if (now - usageCache.at < 30_000) return usageCache.byId;
+  const byId = new Map();
+  try {
+    const parsed = JSON.parse(readFileSync(CHATGPT_ACCOUNT_USAGE_CACHE_PATH, "utf8"));
+    const fetchedAt = Date.parse(parsed?.fetchedAt);
+    const fresh =
+      Number.isFinite(fetchedAt) && now - fetchedAt <= USAGE_CACHE_MAX_AGE_MS;
+    if (fresh) {
+      for (const account of parsed?.accounts || []) {
+        if (account?.id) byId.set(account.id, account);
+      }
+    }
+  } catch {
+    // No cache yet, or an unreadable one. Rotation degrades to order-only.
+  }
+  usageCache = { at: now, byId };
+  return byId;
+}
+
+// Called when upstream refuses a native turn for quota. Passing the account over
+// for a cooldown window is what turns a hard 429 into a switch to another
+// subscription on the next turn.
+export function coolNativeAccountAfterRateLimit(headers, { now = Date.now() } = {}) {
+  const account = nativeAccountKey(headers);
+  if (!account) return;
+  try {
+    for (const candidate of rotationCandidates({ usageById: cachedAccountUsageById({ now }) })) {
+      if (candidate.headers?.["chatgpt-account-id"] === account) {
+        coolAccount(candidate.id, now + COOLDOWN_MS);
+        forgetAccountAffinities(candidate.id);
+        return;
+      }
+    }
+  } catch {
+    // A cooldown that cannot be recorded is not worth failing anything over.
+  }
+}
+
+// Picks the account for this turn and returns its headers, or undefined to keep
+// the ones already resolved. A failure here must never fail a turn: rotation is
+// an optimization over a working single-account path, so every error falls back
+// to the credential the router had without it.
+function rotatedNativeHeaders(headers, conversationId) {
+  try {
+    const candidates = rotationCandidates({
+      conversationId,
+      usageById: cachedAccountUsageById(),
+    });
+    if (candidates.length < 2) return undefined;
+    const current = nativeAccountKey(headers);
+    const chosen = candidates[0];
+    if (!chosen?.headers) return undefined;
+    const chosenAccount = chosen.headers["chatgpt-account-id"] || "";
+    if (current && chosenAccount && current === chosenAccount) {
+      // Already on the account rotation would pick. Recording the affinity
+      // still matters: it is what keeps the rest of this conversation here.
+      rememberAccount(conversationId, chosen.id);
+      return undefined;
+    }
+    rememberAccount(conversationId, chosen.id);
+    return chosen.headers;
+  } catch {
+    return undefined;
+  }
 }
 
 // The token out of an `Authorization: Bearer <token>` header, or undefined for
@@ -944,12 +1129,47 @@ function normalizeNativePromptCacheCompatibility(payload) {
   return payload;
 }
 
-function routedHeaders() {
+// Prism keys its prompt cache on this opaque id, so a conversation that keeps
+// hitting the same cache has to present the same value on every hop. The thread
+// id is hashed rather than forwarded: `upstreamHeaders` in the API forwarder
+// strips `x-codex-*` before talking to a provider, so this stays on the
+// router-to-forwarder hop, and hashing means even a misconfigured upstream
+// never receives the user's actual thread identifier.
+function routedConversationId(request) {
+  const threadId = request ? threadIdFromHeaders(request.headers) : undefined;
+  if (!threadId) return undefined;
+  return createHash("sha256")
+    .update(`codex-router-conversation:${threadId}`)
+    .digest("base64url")
+    .slice(0, 43);
+}
+
+// `request` is optional so an internal hop with no originating turn -- vision
+// evidence, a discovery probe -- still gets working headers, just without the
+// conversation and correlation metadata it has no way to know.
+function routedHeaders(request, { jobType } = {}) {
+  // Diagnostics must never be able to fail a turn, so a trace that is missing
+  // or damaged only costs the correlation header.
+  let logicalRequestId;
+  try {
+    logicalRequestId = request?.providerLatencyTrace?.logicalRequestId;
+  } catch {
+    logicalRequestId = undefined;
+  }
+  let conversationId;
+  try {
+    conversationId = routedConversationId(request);
+  } catch {
+    conversationId = undefined;
+  }
   return {
     Authorization: `Bearer ${INTERNAL_KEY}`,
     "Content-Type": "application/json",
     "Accept-Encoding": "identity",
     "User-Agent": `codex-router/${VERSION}`,
+    ...(conversationId ? { "X-Codex-Router-Conversation": conversationId } : {}),
+    ...(logicalRequestId ? { "X-Codex-Router-Request-Id": logicalRequestId } : {}),
+    ...(jobType ? { "X-Prism-Job-Type": jobType } : {}),
   };
 }
 
@@ -2864,7 +3084,7 @@ async function summarizeWith(
   // reason for as long as a turn, so it uses the same long-idle pool.
   const upstream = await fetchForRoute(route, routedResponsesTarget(route), {
     method: "POST",
-    headers: routedHeaders(),
+    headers: routedHeaders(request),
     body: serialized,
     signal,
   });
@@ -3133,6 +3353,20 @@ function writeCompactionSse(response, model, checkpoint) {
 
 // Returns what the request path needs to meter and log the compaction, so a
 // routed compaction leaves the same telemetry trail as any other routed turn.
+// A compaction that never answers would otherwise hang for as long as the client
+// waits. Overridable because the honest bound depends on transcript size and
+// provider, and an operator on a slow summarizer must be able to raise it.
+const DEFAULT_COMPACTION_DEADLINE_MS = 170_000;
+
+function compactionDeadlineMs(environment = process.env) {
+  const configured = Number(
+    environment.CODEX_ROUTER_COMPACTION_DEADLINE_MS ?? DEFAULT_COMPACTION_DEADLINE_MS,
+  );
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_COMPACTION_DEADLINE_MS;
+}
+
 async function handleRoutedCompaction(
   request,
   response,
@@ -3142,7 +3376,37 @@ async function handleRoutedCompaction(
   v2,
   { allowFailover = true } = {},
 ) {
-  const result = await summarize(request, payload, route, signal, { allowFailover });
+  // Compaction is bounded independently of the client's own patience.
+  //
+  // An ordinary turn streams, so a stalled provider is visible and the stall
+  // guard ends it. A compaction is buffered: nothing reaches the client until
+  // the whole summary exists, so a provider that accepts the request and then
+  // goes quiet leaves the session unable to continue and unable to fail, for as
+  // long as the client is willing to wait. This deadline converts that hang into
+  // an ordinary compaction failure the existing error translation below already
+  // knows how to report.
+  //
+  // Generous on purpose: a compaction summarizes an entire conversation and is
+  // legitimately among the slowest requests the router makes. It only has to be
+  // shorter than a client giving up, not competitive with a turn.
+  const deadlineController = new AbortController();
+  const deadline = setTimeout(
+    () => deadlineController.abort(new Error("Compaction exceeded its deadline.")),
+    compactionDeadlineMs(),
+  );
+  deadline.unref?.();
+  let result;
+  try {
+    result = await summarize(
+      request,
+      payload,
+      route,
+      AbortSignal.any([signal, deadlineController.signal]),
+      { allowFailover },
+    );
+  } finally {
+    clearTimeout(deadline);
+  }
   // A compaction moved to another model is metered against the model that
   // actually produced the summary, the same as any other turn.
   const served = {
@@ -3708,7 +3972,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   return {
     body: Buffer.from(JSON.stringify(routed), "utf8"),
     target: routedResponsesTarget(route),
-    headers: routedHeaders(),
+    headers: routedHeaders(request),
     // The exact mode used while constructing this body. Failover compares it
     // with the immutable source contract as well as live state immediately
     // before send, so transient sidecar changes cannot validate stale bytes.
@@ -4007,9 +4271,30 @@ async function handleResponses(request, response, requestUrl) {
   const startedAt = Date.now();
   const controller = new AbortController();
   const activity = beginRequestActivity({ request, response, controller });
+  const latencyTrace = guardedLatencyTrace();
+  // Published on the request so `routedHeaders` can attach the correlation id
+  // without every intermediate function having to thread the trace through.
+  request.providerLatencyTrace = latencyTrace;
+  // Every upstream attempt on this handler -- first try, retry, and the
+  // empty-completion retry -- goes through here, so it is the one place that
+  // sees them all. HEAD's `fetchWithRetry` no longer takes attempt callbacks,
+  // so the trace observes attempts here instead of through its options.
   const fetchObservedUpstream = async (url, init) => {
     activity.progress.attempt();
-    const upstream = await fetchForRoute(route, url, init);
+    const traceCallbacks = latencyTrace.fetchCallbacks({
+      provider: route?.provider || "openai",
+      model: route?.slug || requestedModel,
+    });
+    const traceAttempt = {};
+    traceCallbacks.onAttemptStart({ attempt: traceAttempt });
+    let upstream;
+    try {
+      upstream = await fetchForRoute(route, url, init);
+    } catch (error) {
+      traceCallbacks.onAttemptFinish({ attempt: traceAttempt, error });
+      throw error;
+    }
+    traceCallbacks.onAttemptFinish({ attempt: traceAttempt, response: upstream });
     activity.progress.headers();
     return upstream;
   };
@@ -4057,9 +4342,16 @@ async function handleResponses(request, response, requestUrl) {
     const exactRouteProbe = exactRouteProbeRequested(request.headers);
     const encoded = await readRequestBody(request, { signal: controller.signal });
     const body = await decodeBody(encoded, request.headers["content-encoding"]);
+    latencyTrace.setPayloadClass(
+      body.length < 4_096 ? "tiny" : body.length < 65_536 ? "small" : body.length < 524_288 ? "ordinary" : "large",
+    );
+    const finishLocalhostParse = latencyTrace.startLocalhostParse();
     let payload = await parseBodyAsync(body);
+    finishLocalhostParse();
+    const finishRouteSelection = latencyTrace.startRouteSelection();
     controller.signal.throwIfAborted();
     requestedModel = typeof payload.model === "string" ? payload.model : "";
+    latencyTrace.setRequestedModel(requestedModel);
     let registeredRoute =
       MODEL_BY_SLUG.get(requestedModel) ??
       MODEL_BY_SLUG.get(readNativeAliases()[requestedModel]);
@@ -4096,9 +4388,40 @@ async function handleResponses(request, response, requestUrl) {
         registeredRoute = redirect;
       }
     }
+    // A compaction turn is not a model choice the operator made, so it must not
+    // overwrite the remembered model, and it is the case that most needs to
+    // inherit one. Both tests are pure reads of the path and the payload, so
+    // deriving them here rather than after dispatch changes nothing except
+    // making them available to the decision below.
+    const compactingTurn =
+      /\/responses\/compact$/.test(requestUrl.pathname) ||
+      (Array.isArray(payload.input) && payload.input.at(-1)?.type === "compaction_trigger");
+    // A real turn on a routed model records what the operator is actually
+    // using. A threadless compaction later inherits it instead of falling back
+    // to native GPT, which is what used to strand such a turn on an account
+    // holding no native quota.
+    if (registeredRoute && !isNativeOpenAIRoute(registeredRoute) && !compactingTurn) {
+      try {
+        rememberOperatorModel(registeredRoute);
+      } catch {
+        // Following a remembered model still works if the hint cannot be written.
+      }
+    }
+    if (compactingTurn) {
+      const followed = followOperatorModel(registeredRoute, {
+        modelsBySlug: MODEL_BY_SLUG,
+        fallbackSlug: readNativeRedirect(),
+      });
+      if (followed && followed !== registeredRoute) registeredRoute = followed;
+    }
     route = registeredRoute && routeProviderEnabled(registeredRoute.provider)
       ? registeredRoute
       : undefined;
+    // Route selection is over: the phase is closed here, before any of the
+    // refusals below return, so a rejected turn still records what selecting
+    // its route cost rather than reporting no phase at all.
+    latencyTrace.setResolvedModel(route?.slug || requestedModel);
+    finishRouteSelection();
     if (route) {
       const invalidHistoryCall = findUnusableFunctionCallArguments(payload.input);
       if (invalidHistoryCall) {
@@ -4150,6 +4473,9 @@ async function handleResponses(request, response, requestUrl) {
     // Codex remote compaction V2 uses the ordinary Responses endpoint with a
     // terminal trigger. Detect the protocol shape before route dispatch so the
     // native path can also preserve the full tool results being summarized.
+    // `compactingTurn` above is the union of these two, computed earlier so
+    // route selection can consult it; both spellings stay because the paths
+    // downstream distinguish the two protocols.
     const compactV2 =
       Array.isArray(payload.input) &&
       payload.input.at(-1)?.type === "compaction_trigger";
@@ -4207,6 +4533,9 @@ async function handleResponses(request, response, requestUrl) {
     const adoptRoute = (nextRoute, built) => {
       failoverFrom ??= route.slug;
       route = nextRoute;
+      // The trace follows the failover, so the record names the model that
+      // actually answered rather than the one first selected.
+      latencyTrace.setResolvedModel(route.slug);
       namespacesFlattened = built.namespacesFlattened;
       flattenedNamespaces = built.flattenedNamespaces;
       diagnostics.grokStructuredPatch = built.grokStructuredPatch;
@@ -4413,6 +4742,13 @@ async function handleResponses(request, response, requestUrl) {
     );
     upstreamRetries = retries;
     upstreamStatus = upstream.status;
+    // A native 429 is a spent subscription, not a transient fault: the same
+    // credential will keep refusing until its window resets. Cooling the
+    // account here is what lets the next turn pick a different one instead of
+    // returning the operator to the same wall.
+    if (upstream.status === 429 && !route) {
+      coolNativeAccountAfterRateLimit(headers);
+    }
     // Time until the upstream chain answered the request. Everything before
     // this is router-side work (body read, normalization, flattening, vision
     // bridge) plus the upstream's own time to produce response headers. For a
@@ -4679,9 +5015,14 @@ async function handleResponses(request, response, requestUrl) {
           ? new EmptyCompletionGuard(contentType, {
               maxPreludeBytes: EMPTY_COMPLETION_PRELUDE_BYTES,
               maxPreludeMs: EMPTY_COMPLETION_PRELUDE_MS,
+              // Grok keeps its own much larger allowance. Other families that
+              // reason between events get one from the shared policy; anything
+              // else keeps the prologue budget as before.
               maxStreamStallMs: canonicalProviderId(route.provider) === "grok-oauth"
                 ? GROK_STREAM_STALL_MS
-                : EMPTY_COMPLETION_PRELUDE_MS,
+                : providerStreamStallMs(canonicalProviderId(route.provider), {
+                    preludeMs: EMPTY_COMPLETION_PRELUDE_MS,
+                  }) ?? EMPTY_COMPLETION_PRELUDE_MS,
             })
           : undefined;
       if (guard) {
@@ -5330,6 +5671,17 @@ async function handleResponses(request, response, requestUrl) {
   } finally {
     const status = activityStatus ?? finalStatus ?? response.statusCode;
     activity.finish(status);
+    // The first visible or reasoning delta -- the model actually saying
+    // something, as opposed to the response headers arriving. HEAD's transform
+    // exposes no separate first-frame timestamp, so only the semantic mark is
+    // recorded; `markFirstFrame` stays unused here rather than being fed the
+    // same value under a second name, which would make the two look measured
+    // independently when they are not.
+    const semanticAt = usageTransform?.firstTokenAt?.() ?? retryUsageTransform?.firstTokenAt?.();
+    if (semanticAt !== undefined) latencyTrace.markSemantic(semanticAt);
+    // `route` already follows a failover, so it names the model that answered.
+    latencyTrace.setReturnedModel(route?.slug || requestedModel);
+    latencyTrace.finish({ statusCode: status });
     // Timestamped per-request timing for latency diagnosis. Never gated on
     // QUIET: the production LaunchAgent hard-sets CODEX_ROUTER_QUIET=1. A
     // missing provider count is logged as unknown, not zero; an explicit zero
@@ -5668,7 +6020,7 @@ async function handleEmbeddings(request, response, requestUrl) {
       });
       return;
     }
-    const headers = routedHeaders();
+    const headers = routedHeaders(request);
     const requestId = safeForwardedRequestId(request.headers["x-request-id"]);
     if (requestId) headers["X-Request-Id"] = requestId;
     const upstream = await fetch(
