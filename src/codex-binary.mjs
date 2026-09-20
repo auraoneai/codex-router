@@ -51,6 +51,26 @@ export function codexCandidatePaths({
   home = os.homedir(),
   linuxDesktopRoots,
 } = {}) {
+  // On macOS, prefer a separately maintained CLI over a desktop-bundled copy.
+  // Desktop releases can lag Homebrew, and the bundled binary is what the
+  // catalog asks for the native model list: capture once selected ChatGPT.app's
+  // 0.146 CLI ahead of Homebrew's 0.154 and silently dropped native models the
+  // newer build knows about, which reads to the user as models vanishing from
+  // the picker. An explicit CODEX_BIN or CODEX_INSTALL_DIR still wins, so an
+  // operator who needs an exact build is unaffected.
+  //
+  // macOS only. Linux deliberately prefers its desktop bundle (see
+  // linuxDesktopAppBundledCodex), and Windows resolves through its own
+  // version-hashed scan below.
+  const macStandalone = platform === "darwin"
+    ? ["/opt/homebrew/bin/codex", "/usr/local/bin/codex"]
+    : [];
+  const macDesktop = platform === "darwin"
+    ? [
+        "/Applications/ChatGPT.app/Contents/Resources/codex",
+        "/Applications/Codex.app/Contents/Resources/codex",
+      ]
+    : [];
   return [
     process.env.CODEX_BIN,
     process.env.CODEX_INSTALL_DIR &&
@@ -58,11 +78,18 @@ export function codexCandidatePaths({
         process.env.CODEX_INSTALL_DIR,
         platform === "win32" ? "codex.exe" : "codex",
       ),
-    "/Applications/ChatGPT.app/Contents/Resources/codex",
-    "/Applications/Codex.app/Contents/Resources/codex",
-    "/opt/homebrew/bin/codex",
+    ...macStandalone,
+    ...macDesktop,
+    // Reached on every non-darwin platform; on darwin both are already above.
+    ...(platform === "darwin"
+      ? []
+      : [
+          "/Applications/ChatGPT.app/Contents/Resources/codex",
+          "/Applications/Codex.app/Contents/Resources/codex",
+          "/opt/homebrew/bin/codex",
+        ]),
     linuxDesktopAppBundledCodex({ platform, roots: linuxDesktopRoots }),
-    "/usr/local/bin/codex",
+    ...(platform === "darwin" ? [] : ["/usr/local/bin/codex"]),
     localAppData && path.join(localAppData, "Programs", "OpenAI", "Codex", "bin", "codex.exe"),
     localAppData && path.join(localAppData, "Programs", "Codex", "resources", "codex.exe"),
     localAppData && path.join(localAppData, "Programs", "Codex", "resources", "app", "bin", "codex.exe"),

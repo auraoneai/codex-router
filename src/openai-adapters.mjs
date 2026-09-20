@@ -99,6 +99,12 @@ function adapterError(message, code = "invalid_responses_request") {
   const error = new Error(message);
   error.status = 400;
   error.code = code;
+  // Every message raised here is a fixed string written in this file, so it can
+  // never carry upstream response text. The forwarder logs names and codes only,
+  // to keep bodies out of the log; without this opt-in a rejected request
+  // records `Error (invalid_responses_request)` and never says which field was
+  // wrong, which is the one thing an operator needs from that line.
+  error.safeMessage = true;
   return error;
 }
 
@@ -206,6 +212,54 @@ function normalizeToolChoice(value) {
   return { type: "function", name };
 }
 
+// Presence and type of the keys that decide whether an input item is usable.
+// Deliberately never values: an item can hold tool output, arguments, or message
+// text, and none of that belongs in an error message a client may log.
+function describeItemKeys(item) {
+  const keys = Object.keys(item || {}).sort();
+  const detail = ["call_id", "name", "output", "id"]
+    .filter((key) => key in (item || {}))
+    .map((key) => `${key}=${item[key] === undefined ? "undefined" : typeof item[key]}`);
+  return `keys [${keys.join(", ")}]${detail.length ? ` (${detail.join(", ")})` : ""}`;
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+// Correlation ids of every function_call in this request, under both spellings
+// the client may have stored them with.
+//
+// Codex records a namespaced tool result as `{ id, name, namespace, output }` --
+// its own client shape, where the correlation lives in `id` rather than in the
+// `call_id` the Responses API names. Those items replay verbatim through
+// compaction, so a boundary that requires `call_id` rejects the whole history of
+// any conversation that used an MCP or namespace tool.
+//
+// Adopting `id` is safe only when it names a call this same request also carries:
+// then the value is one the client already used to pair the two items, and
+// nothing is invented. An `id` matching no call stays unusable, because guessing
+// a correlation would hand the provider a result belonging to no call.
+function requestCallCorrelations(input) {
+  const ids = new Set();
+  for (const item of Array.isArray(input) ? input : []) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    if (item.type !== "function_call" && item.type !== "custom_tool_call") continue;
+    for (const key of ["call_id", "id"]) {
+      if (typeof item[key] === "string" && item[key]) ids.add(item[key]);
+    }
+  }
+  return ids;
+}
+
+// The correlation a function_call_output should travel upstream under, or
+// undefined when this request gives no usable one.
+function outputCorrelationId(item, callIds) {
+  if (typeof item.call_id === "string" && item.call_id) return item.call_id;
+  if (typeof item.id === "string" && item.id && callIds.has(item.id)) return item.id;
+  return undefined;
+}
+
 function normalizeResponseFormat(payload) {
   if (payload.response_format === undefined) return;
   if (payload.text !== undefined) throw adapterError("Use either response_format or text.format, not both.");
@@ -243,7 +297,8 @@ function normalizeResponsesRequest(payload) {
     throw adapterError("Responses input must be a string or array.");
   }
   if (Array.isArray(next.input)) {
-    next.input = next.input.map((item) => {
+    const callIds = requestCallCorrelations(next.input);
+    next.input = next.input.map((item, index) => {
       object(item, "input item");
       if (item.type === "message" && item.content !== undefined) {
         return { ...item, content: contentToResponses(item.content) };
@@ -252,13 +307,35 @@ function normalizeResponsesRequest(payload) {
         item.type === "function_call" &&
         (typeof item.call_id !== "string" || !item.call_id || typeof item.name !== "string" || !item.name)
       ) {
-        throw adapterError("A function_call input item requires call_id and name.");
+        throw adapterError(
+          "A function_call input item requires call_id and name. " +
+            `Item ${index} has ${describeItemKeys(item)}.`,
+        );
       }
-      if (
-        item.type === "function_call_output" &&
-        (typeof item.call_id !== "string" || !item.call_id || item.output === undefined)
-      ) {
-        throw adapterError("A function_call_output input item requires call_id and output.");
+      if (item.type === "function_call_output") {
+        const correlation = outputCorrelationId(item, callIds);
+        if (correlation === undefined || item.output === undefined) {
+          throw adapterError(
+            "A function_call_output input item requires call_id and output. " +
+              `Item ${index} has ${describeItemKeys(item)}.`,
+          );
+        }
+        // `namespace` and the client passthrough are Codex-internal bookkeeping.
+        // A strict provider rejects unknown members on an input item, so they
+        // are dropped here rather than relayed. `id` is kept only when it is
+        // already the correlation, so the item never carries two spellings of
+        // the same identity upstream.
+        const {
+          namespace: _namespace,
+          internal_chat_message_metadata_passthrough: _passthrough,
+          id: itemId,
+          ...rest
+        } = item;
+        return {
+          ...rest,
+          ...(typeof itemId === "string" && itemId && itemId !== correlation ? { id: itemId } : {}),
+          call_id: correlation,
+        };
       }
       return clone(item);
     });
@@ -269,8 +346,28 @@ function normalizeResponsesRequest(payload) {
   if (Array.isArray(next.tools)) next.tools = next.tools.map(normalizeTool);
   if (next.tool_choice !== undefined) next.tool_choice = normalizeToolChoice(next.tool_choice);
   if (next.reasoning_effort !== undefined) {
-    if (next.reasoning !== undefined) throw adapterError("Use either reasoning or reasoning_effort, not both.");
-    next.reasoning = { effort: next.reasoning_effort };
+    // Both spellings legitimately arrive together. The router sets the nested
+    // `reasoning.effort` and the flat `reasoning_effort` on the same subagent
+    // turn on purpose -- LiteLLM's Responses bridge derives its own flat value
+    // from the nested object whenever the client sent one, so a flat-only
+    // override never survives -- and the forwarder strips the flat field ahead
+    // of this boundary only for DeepSeek Responses routes. Rejecting the pair
+    // failed such a turn over a duplicate this function was about to collapse.
+    //
+    // Reconcile instead: the nested Responses field wins because it is the one
+    // the caller set. A real disagreement is still refused, and names both
+    // values, because silently choosing one would change the depth of a turn.
+    const nestedEffort = isPlainObject(next.reasoning) ? next.reasoning.effort : undefined;
+    if (nestedEffort !== undefined && nestedEffort !== next.reasoning_effort) {
+      throw adapterError(
+        `reasoning.effort (${String(nestedEffort)}) and reasoning_effort ` +
+          `(${String(next.reasoning_effort)}) must not disagree.`,
+      );
+    }
+    if (next.reasoning === undefined) next.reasoning = { effort: next.reasoning_effort };
+    else if (nestedEffort === undefined) {
+      next.reasoning = { ...next.reasoning, effort: next.reasoning_effort };
+    }
     delete next.reasoning_effort;
   }
   if (next.max_tokens !== undefined) {

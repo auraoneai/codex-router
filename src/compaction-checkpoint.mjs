@@ -934,6 +934,20 @@ function modelContractErrors(value) {
   return errors;
 }
 
+// Whether the model actually produced a checkpoint that satisfies the contract.
+//
+// `finalizeCheckpoint` never fails: when model output is unusable it builds a
+// safe deterministic checkpoint from the prepared sources instead, which is the
+// right answer for the client -- continuity is preserved -- but is a recovery
+// fallback rather than a successful generation. A caller that wants to decide
+// whether to try a different model, or to record that a turn fell back, cannot
+// tell the two apart from the returned checkpoint alone, because both are
+// well-formed by construction. This reports on the raw model text, before that
+// substitution happens.
+export function validCompactionModelOutput(rawModelText) {
+  return modelContractErrors(modelObject(rawModelText)).length === 0;
+}
+
 function validRefs(value, prefix, sources, catalogSourceIds, invalid, remaining) {
   const accepted = [];
   for (const id of uniqueStrings(Array.isArray(value) ? value : [], MAX_REFERENCED_SOURCES)) {
