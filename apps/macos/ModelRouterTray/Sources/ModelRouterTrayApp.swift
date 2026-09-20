@@ -2110,7 +2110,9 @@ final class RouterStore: ObservableObject {
       await refreshAccountUsage()
       await refreshProviderUsage()
       do {
-        try await Task.sleep(nanoseconds: 30 * 1_000_000_000)
+        // Provider usage probes fan out across every configured account and can
+        // briefly consume a full core. Quotas do not need sub-minute polling.
+        try await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
       } catch {
         return
       }

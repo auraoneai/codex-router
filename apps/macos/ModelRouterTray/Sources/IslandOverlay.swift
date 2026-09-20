@@ -3,6 +3,17 @@ import SwiftUI
 
 private let islandBezel = Color(red: 0.004, green: 0.005, blue: 0.007)
 
+private struct RouterReduceMotionKey: EnvironmentKey {
+  static let defaultValue = false
+}
+
+private extension EnvironmentValues {
+  var routerReduceMotion: Bool {
+    get { self[RouterReduceMotionKey.self] }
+    set { self[RouterReduceMotionKey.self] = newValue }
+  }
+}
+
 private struct IslandActivitySession: Identifiable {
   let id: String
   let name: String
@@ -140,6 +151,7 @@ final class IslandWindowController {
       rootView: IslandOverlayView(store: store, display: display)
         .frame(width: Self.windowSize.width, height: Self.windowSize.height, alignment: .top)
         .preferredColorScheme(.dark)
+        .environment(\.routerReduceMotion, true)
     )
   }
 
@@ -217,7 +229,7 @@ final class IslandWindowController {
 }
 
 private struct IslandOverlayView: View {
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.routerReduceMotion) private var reduceMotion
   @ObservedObject var store: RouterStore
   @ObservedObject var display: IslandDisplayModel
   @State private var selectedSessionID: String?
@@ -751,7 +763,7 @@ private struct IslandHeaderMetric: View {
 }
 
 private struct IslandUsageLineChart: View {
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.routerReduceMotion) private var reduceMotion
   let points: [DailyUsagePoint]
   let tint: Color
   var showsAxis = true
@@ -1149,7 +1161,7 @@ private struct SessionTextWidthKey: PreferenceKey {
 }
 
 private struct BouncingSessionName: View {
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.routerReduceMotion) private var reduceMotion
   let text: String
   let fontSize: CGFloat
   let weight: Font.Weight
@@ -1432,7 +1444,7 @@ private struct IslandSilhouette: InsettableShape {
 }
 
 private struct LiveOrb: View {
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.routerReduceMotion) private var reduceMotion
   let state: RouterActivityState
   var count: Int = 0
   @State private var pulsing = false
@@ -1549,7 +1561,7 @@ private struct LiveOrb: View {
 }
 
 private struct StatusGlow: View {
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.routerReduceMotion) private var reduceMotion
   let state: RouterActivityState
 
   @State private var sweepAngle = -120.0
@@ -1797,6 +1809,10 @@ final class DesktopPanelWindowController {
 private struct DesktopPanelView: View {
   @ObservedObject var store: RouterStore
   @State private var range: UsageRange = .week
+  // The island deliberately pins routerReduceMotion on, but this panel is
+  // summoned rather than always visible, so its charts and orb keep honouring
+  // the system Reduce Motion setting.
+  @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
@@ -1881,6 +1897,7 @@ private struct DesktopPanelView: View {
         .id("desktop-\(store.selectedUsageProviderID)-\(range.rawValue)")
         .frame(height: 52)
     }
+    .environment(\.routerReduceMotion, systemReduceMotion)
     .padding(17)
     .background(
       ZStack {
