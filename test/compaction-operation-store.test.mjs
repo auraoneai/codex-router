@@ -14,10 +14,11 @@ function store(filePath, now = () => 1_000) {
   return new CompactionOperationStore({ filePath, now });
 }
 
-test("operation identity is stable and sensitive to owner, root, boundary, model", () => {
+test("operation identity is stable and sensitive to owner, root, conversation, boundary, model", () => {
   const base = {
     owner: "owner-a",
     rootSession: "root-a",
+    conversationBoundary: "conversation-a",
     sourceBoundary: compactionSourceBoundary([{ type: "message", content: "one" }]),
     model: "kiro-prism/gpt-5.6-sol",
   };
@@ -25,6 +26,7 @@ test("operation identity is stable and sensitive to owner, root, boundary, model
   for (const changed of [
     { owner: "owner-b" },
     { rootSession: "root-b" },
+    { conversationBoundary: "conversation-b" },
     { sourceBoundary: "different" },
     { model: "other" },
   ]) {
@@ -70,10 +72,21 @@ test("begin is durable single-flight and completed results survive restart", () 
     storedResultsReattached: 0,
     resultsDelivered: 0,
     resultsInstalled: 0,
+    continuationsSubmitted: 0,
     sessionsAutoContinued: 0,
     deterministicFallbacks: 0,
     recoveryLatencyMs: { count: 1, max: 0, average: 0 },
     failuresByCode: {},
+    compaction_jobs_created: 1,
+    compaction_jobs_deduplicated: 1,
+    compaction_jobs_completed: 1,
+    compaction_sol_attempts: 0,
+    compaction_opus_fallbacks: 0,
+    compaction_results_validated: 1,
+    compaction_results_reattached: 0,
+    compaction_results_installed: 0,
+    compaction_sessions_auto_continued: 0,
+    compaction_sessions_manual_intervention: 0,
   });
 });
 
@@ -115,10 +128,21 @@ test("snapshot distinguishes in-flight duplicate prevention from fallback delive
     storedResultsReattached: 0,
     resultsDelivered: 0,
     resultsInstalled: 0,
+    continuationsSubmitted: 0,
     sessionsAutoContinued: 0,
     deterministicFallbacks: 1,
     recoveryLatencyMs: { count: 1, max: 75, average: 75 },
     failuresByCode: { compaction_transport_timeout: 1 },
+    compaction_jobs_created: 1,
+    compaction_jobs_deduplicated: 1,
+    compaction_jobs_completed: 0,
+    compaction_sol_attempts: 0,
+    compaction_opus_fallbacks: 0,
+    compaction_results_validated: 0,
+    compaction_results_reattached: 0,
+    compaction_results_installed: 0,
+    compaction_sessions_auto_continued: 0,
+    compaction_sessions_manual_intervention: 0,
   });
 });
 
@@ -182,10 +206,50 @@ test("delivery and accepted continuation are recorded separately", () => {
   assert.equal(current.installedAt, null);
   assert.equal(current.continuationAcceptedAt, null);
   now = 40;
+  operations.recordContinuationSubmitted(spec.owner, spec.rootSession);
+  current = operations.get(spec.id, spec.owner);
+  assert.equal(current.installedAt, 40);
+  assert.equal(current.continuationSubmittedAt, 40);
+  now = 50;
   operations.recordContinuationAccepted(spec.owner, spec.rootSession);
   current = operations.get(spec.id, spec.owner);
   assert.equal(current.installedAt, 40);
-  assert.equal(current.continuationAcceptedAt, 40);
+  assert.equal(current.continuationAcceptedAt, 50);
   assert.equal(operations.snapshot().storedResultsReattached, 1);
+  assert.equal(operations.snapshot().continuationsSubmitted, 1);
   assert.equal(operations.snapshot().sessionsAutoContinued, 1);
+});
+
+test("records model attempts and exposes the requested end-to-end metric names", () => {
+  const operations = new CompactionOperationStore({
+    filePath: path.join(mkdtempSync(path.join(tmpdir(), "compaction-attempts-")), "ops.json"),
+    now: () => 10,
+  });
+  const spec = {
+    id: "cmpop_attempts",
+    owner: "owner-a",
+    rootSession: "root-a",
+    sourceBoundary: "boundary-a",
+    model: "kiro-prism/gpt-5.6-sol",
+    fallbackCheckpoint: { safe: true },
+  };
+  operations.begin(spec);
+  operations.recordModelAttempts(spec.id, spec.owner, [
+    "kiro-prism/gpt-5.6-sol",
+    "kiro-prism/claude-opus-5",
+  ]);
+  operations.complete(spec.id, spec.owner, { complete: true });
+  operations.recordDelivered(spec.id, spec.owner, { reattached: true });
+  operations.recordContinuationSubmitted(spec.owner, spec.rootSession);
+  operations.recordContinuationAccepted(spec.owner, spec.rootSession);
+  const metrics = operations.snapshot();
+  assert.equal(metrics.compaction_jobs_created, 1);
+  assert.equal(metrics.compaction_jobs_completed, 1);
+  assert.equal(metrics.compaction_sol_attempts, 1);
+  assert.equal(metrics.compaction_opus_fallbacks, 1);
+  assert.equal(metrics.compaction_results_validated, 1);
+  assert.equal(metrics.compaction_results_reattached, 1);
+  assert.equal(metrics.compaction_results_installed, 1);
+  assert.equal(metrics.compaction_sessions_auto_continued, 1);
+  assert.equal(metrics.compaction_sessions_manual_intervention, 0);
 });

@@ -29,6 +29,7 @@ import {
   assertGitHubCopilotCredential,
   githubCopilotCredentialProblem,
 } from "./github-copilot-session.mjs";
+import { resolveAmbientProviderCredential } from "./shell-environment.mjs";
 
 export function apiProvider(providerId) {
   const provider = PROVIDERS.get(providerId);
@@ -265,6 +266,13 @@ export function resolveProviderCredential(providerOrId, options = {}) {
     const credential = resolvedCredential(provider, keychain.value, keychain.source, true);
     if (credential) return credential;
   }
+  if (!options.persistent) {
+    const ambient = resolveAmbientProviderCredential(provider, options);
+    if (ambient?.value) {
+      const credential = resolvedCredential(provider, ambient.value, ambient.source, false);
+      if (credential) return credential;
+    }
+  }
   return undefined;
 }
 
@@ -443,4 +451,41 @@ export function credentialFileMode(providerOrId) {
     typeof providerOrId === "string" ? apiProvider(providerOrId) : providerOrId;
   const target = primaryCredentialPath(provider);
   return existsSync(target) ? statSync(target).mode & 0o777 : undefined;
+}
+
+export function adoptProviderCredential(providerOrId, options = {}) {
+  const provider =
+    typeof providerOrId === "string" ? apiProvider(providerOrId) : providerOrId;
+  const ambient = resolveAmbientProviderCredential(provider, options);
+  if (!ambient?.value) {
+    const vars = (provider.credential?.environment || []).join(", ");
+    throw new Error(
+      `No API key found in environment or shell configuration for ${provider.displayName}${vars ? ` (${vars})` : ""}.`,
+    );
+  }
+  const target = writeProviderCredential(provider, ambient.value);
+  return {
+    provider: provider.id,
+    displayName: provider.displayName,
+    source: ambient.source,
+    target,
+  };
+}
+
+export function discoverAdoptableCredentials(options = {}) {
+  const adoptable = [];
+  for (const provider of PROVIDERS.values()) {
+    if (provider.kind !== "openai-compatible" || !provider.credential) continue;
+    if (provider.variantOf) continue;
+    const persistentStatus = credentialStatus(provider, { persistent: true });
+    if (persistentStatus.configured) continue;
+    const ambient = resolveAmbientProviderCredential(provider, options);
+    if (ambient?.value) {
+      adoptable.push({
+        provider,
+        ambient,
+      });
+    }
+  }
+  return adoptable;
 }

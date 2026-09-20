@@ -603,7 +603,7 @@ export async function readResponseBody(
         ? result.value
         : new Uint8Array(result.value || []);
       total += chunk.byteLength;
-      onChunk?.(chunk.byteLength, total);
+      onChunk?.(chunk.byteLength, total, chunk);
       if (total > limit) {
         await reader.cancel().catch(() => {});
         const error = new Error(`Upstream response exceeds ${limit} bytes.`);

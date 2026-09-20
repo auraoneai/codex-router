@@ -6160,7 +6160,7 @@ test("remote compaction survives caller disconnect and reattaches the completed 
   const headers = {
     Authorization: "Bearer CODEX_CALLER_SECRET",
     "Content-Type": "application/json",
-    "x-codex-thread-id": "thread-disconnect",
+    "session-id": "01a0998a-1704-7b11-b4af-501a0bb4330a",
   };
   const body = JSON.stringify({
     model: "deepseek/deepseek-v4-pro",
@@ -6202,6 +6202,25 @@ test("remote compaction survives caller disconnect and reattaches the completed 
     assert.equal(operation.state, "completed");
     assert.equal(operation.attemptCount, 1);
     assert.equal(operation.completedAfterDisconnect, true);
+
+    const continuation = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: "deepseek/deepseek-v4-pro",
+        stream: false,
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_text", text: "continue after compact" }] },
+        ],
+      }),
+    });
+    assert.equal(continuation.status, 200, await continuation.text());
+    const health = await fetch(`${routerBase(routerPort)}/health`).then((value) => value.json());
+    const metrics = health.resources.compactionOperations;
+    assert.equal(metrics.compaction_results_reattached, 1);
+    assert.equal(metrics.compaction_results_installed, 1, JSON.stringify(metrics));
+    assert.equal(metrics.compaction_sessions_auto_continued, 1);
+    assert.equal(metrics.continuationsSubmitted, 1);
   } finally {
     await stopChild(router);
     await closeServer(gateway.server);
@@ -6304,6 +6323,89 @@ test("remote compaction uses the dedicated Sol to Opus recovery chain", async ()
       "kiro-prism-gpt-5-6-sol",
       "kiro-prism-claude-opus-5",
     ]);
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("remote compaction treats semantic SSE deltas as progress", async () => {
+  const seen = [];
+  const checkpoint = JSON.stringify({
+    objective: "continue the streamed task",
+    requirement_refs: [],
+    attempt_refs: [],
+    observation_refs: [],
+    unverified: [],
+    unknowns: [],
+    blockers: [],
+    next_step: "continue",
+  });
+  const gateway = await mockServer(async (request, response) => {
+    const body = await bodyJson(request);
+    seen.push({ model: body.model, stream: body.stream });
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    const pieces = [checkpoint.slice(0, 40), checkpoint.slice(40, 100), checkpoint.slice(100)];
+    for (let index = 0; index < pieces.length; index += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      response.write(`data: ${JSON.stringify({
+        type: "response.output_text.delta",
+        delta: pieces[index],
+      })}\n\n`);
+    }
+    response.write(`data: ${JSON.stringify({
+      type: "response.completed",
+      response: {
+        id: "resp-streamed-compaction",
+        object: "response",
+        status: "completed",
+        output: [{
+          type: "message",
+          content: [{ type: "output_text", text: checkpoint }],
+        }],
+      },
+    })}\n\n`);
+    response.end("data: [DONE]\n\n");
+  });
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "routing-compaction-progress-"));
+  writeFileSync(
+    path.join(stateDir, "enabled-providers.json"),
+    `${JSON.stringify({ version: 1, providers: ["kiro-prism"] })}\n`,
+  );
+  writeFileSync(path.join(stateDir, "kiro-prism-api-key.secret"), "test-prism-key\n");
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_COMPACTION_DEADLINE_MS: "500",
+    CODEX_ROUTER_COMPACTION_ATTEMPT_DEADLINE_MS: "400",
+    CODEX_ROUTER_COMPACTION_FIRST_EVENT_DEADLINE_MS: "40",
+    CODEX_ROUTER_COMPACTION_PROGRESS_IDLE_DEADLINE_MS: "40",
+    MODEL_ROUTER_STATE_DIR: stateDir,
+    CODEX_ROUTER_QUIET: "1",
+  });
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/responses/compact`, {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer CODEX_CALLER_SECRET",
+        "Content-Type": "application/json",
+        "session-id": "01a0998a-1704-7b11-b4af-501a0bb4330b",
+      },
+      body: JSON.stringify({
+        model: "kiro-prism/gpt-5.6-sol",
+        stream: false,
+        input: [{
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "preserve streamed progress" }],
+        }],
+      }),
+    });
+    assert.equal(response.status, 200, await response.text());
+    assert.deepEqual(seen, [{ model: "kiro-prism-gpt-5-6-sol", stream: true }]);
   } finally {
     await stopChild(router);
     await closeServer(gateway.server);

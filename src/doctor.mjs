@@ -22,7 +22,7 @@ import {
   readMultiAgentSettings,
   subagentEligibleModels,
 } from "./multi-agent-state.mjs";
-import { readHiddenModels } from "./model-picker-state.mjs";
+import { effectiveVisibleModels, readHiddenModels } from "./model-picker-state.mjs";
 import { serviceFollowsHostApps } from "./presence-state.mjs";
 import { waitForRouterHealth } from "./router-health.mjs";
 import {
@@ -444,11 +444,13 @@ try {
 } catch {
   // Reported as a failed catalog check below.
 }
+const expectedCatalogSlugs = effectiveVisibleModels([...requiredModels]);
+const checkSlugs = expectedCatalogSlugs.size > 0 ? expectedCatalogSlugs : requiredModels;
 const catalogOk =
   catalogReadable &&
   (routedTransportActive && !idleInstall
-    ? requiredModels.size > 0 &&
-      [...requiredModels].every((slug) => catalogModels.some((model) => model.slug === slug))
+    ? checkSlugs.size > 0 &&
+      [...checkSlugs].every((slug) => catalogModels.some((model) => model.slug === slug))
     : !catalogModels.some((model) => MODEL_BY_SLUG.has(String(model.slug))));
 // The merged catalog is the file Codex reads. A harness install has no
 // equivalent: its offer is the settings route, checked by "Harness routing
@@ -462,7 +464,7 @@ if (codexTarget) add(
     ? idleInstall
       ? "idle install; no routed models"
       : routedTransportActive
-        ? `${requiredModels.size} routed models`
+        ? `${catalogModels.filter((m) => MODEL_BY_SLUG.has(String(m.slug))).length} routed models`
         : "native-only; routed transport is inactive"
     : MERGED_CATALOG_PATH,
   "Run ./bin/refresh-catalog, or ./bin/doctor --fix if files are missing.",

@@ -39,10 +39,17 @@ function digest(value) {
     .digest("hex");
 }
 
-export function compactionOperationId({ owner, rootSession, sourceBoundary, model }) {
+export function compactionOperationId({
+  owner,
+  rootSession,
+  conversationBoundary,
+  sourceBoundary,
+  model,
+}) {
   return `cmpop_${digest({
     owner: String(owner || "local"),
     rootSession: String(rootSession || "unscoped"),
+    conversationBoundary: String(conversationBoundary || rootSession || "unscoped"),
     sourceBoundary: String(sourceBoundary || ""),
     model: String(model || ""),
     policy: COMPACTION_POLICY_VERSION,
@@ -81,6 +88,7 @@ export class CompactionOperationStore {
     id,
     owner,
     rootSession,
+    conversationBoundary,
     sourceBoundary,
     model,
     fallbackCheckpoint,
@@ -121,6 +129,7 @@ export class CompactionOperationStore {
       id,
       owner,
       rootSession,
+      conversationBoundary: conversationBoundary || rootSession,
       sourceBoundary,
       model,
       policyVersion: COMPACTION_POLICY_VERSION,
@@ -131,6 +140,7 @@ export class CompactionOperationStore {
       reattachmentCount: 0,
       fallbackCheckpoint,
       checkpoint: null,
+      modelAttempts: [],
       leaseOwner,
       leaseExpiresAt: timestamp + leaseMs,
       deliveredAt: null,
@@ -154,6 +164,18 @@ export class CompactionOperationStore {
     });
   }
 
+  recordModelAttempts(id, owner, models = []) {
+    const current = this.get(id, owner);
+    if (!current) throw new Error(`unknown compaction operation: ${id}`);
+    const additions = models
+      .map((model) => String(model || "").trim())
+      .filter(Boolean);
+    if (!additions.length) return current;
+    return this.#transition(id, owner, current.state, {
+      modelAttempts: [...(current.modelAttempts || []), ...additions],
+    });
+  }
+
   fail(id, owner, { terminal = false, failureCode = "compaction_transport_timeout" } = {}) {
     return this.#transition(
       id,
@@ -173,6 +195,7 @@ export class CompactionOperationStore {
     const current = this.get(id, owner);
     if (!current?.checkpoint) return current;
     return this.#transition(id, owner, current.state, {
+      claimedAt: current.claimedAt || this.now(),
       deliveredAt: this.now(),
       deliveryCount: Number(current.deliveryCount || 0) + 1,
       reattachmentCount:
@@ -180,18 +203,25 @@ export class CompactionOperationStore {
     });
   }
 
-  recordContinuationAccepted(owner, rootSession) {
-    const candidate = Object.values(this.operations)
-      .filter((operation) =>
-        operation.owner === owner &&
-        operation.rootSession === rootSession &&
-        operation.state === "completed" &&
-        operation.deliveredAt &&
-        !operation.continuationAcceptedAt)
-      .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+  recordContinuationSubmitted(owner, rootSession) {
+    const candidate = this.#latestDelivered(owner, rootSession, {
+      requireUnsubmitted: true,
+    });
     if (!candidate) return undefined;
     return this.#transition(candidate.id, owner, candidate.state, {
-      installedAt: this.now(),
+      installedAt: candidate.installedAt || this.now(),
+      continuationSubmittedAt: this.now(),
+    });
+  }
+
+  recordContinuationAccepted(owner, rootSession) {
+    const candidate = this.#latestDelivered(owner, rootSession, {
+      requireUnaccepted: true,
+    });
+    if (!candidate) return undefined;
+    return this.#transition(candidate.id, owner, candidate.state, {
+      installedAt: candidate.installedAt || this.now(),
+      continuationSubmittedAt: candidate.continuationSubmittedAt || this.now(),
       continuationAcceptedAt: this.now(),
     });
   }
@@ -218,7 +248,27 @@ export class CompactionOperationStore {
       failuresByCode[operation.failureCode] =
         Number(failuresByCode[operation.failureCode] || 0) + 1;
     }
-    return {
+    const modelAttempts = operations.flatMap((operation) =>
+      Array.isArray(operation.modelAttempts) ? operation.modelAttempts : [],
+    );
+    const solAttempts = modelAttempts.filter((model) =>
+      String(model).includes("gpt-5.6-sol"),
+    ).length;
+    const opusFallbacks = operations.filter((operation) => {
+      const attempts = Array.isArray(operation.modelAttempts)
+        ? operation.modelAttempts
+        : [];
+      return attempts.some((model) => String(model).includes("gpt-5.6-sol")) &&
+        attempts.some((model) => String(model).includes("claude-opus-5"));
+    }).length;
+    const manualIntervention = operations.filter((operation) =>
+      operation.state === "failed_terminal" ||
+      (operation.state === "failed_retriable" && !operation.fallbackDeliveredAt),
+    ).length;
+    const submitted = operations.filter(
+      (operation) => operation.continuationSubmittedAt,
+    ).length;
+    const snapshot = {
       retainedOperations: operations.length,
       states,
       idempotentReuses: operations.reduce(
@@ -239,6 +289,7 @@ export class CompactionOperationStore {
       ),
       resultsDelivered: operations.filter((operation) => operation.deliveredAt).length,
       resultsInstalled: operations.filter((operation) => operation.installedAt).length,
+      continuationsSubmitted: submitted,
       sessionsAutoContinued: operations.filter(
         (operation) => operation.continuationAcceptedAt,
       ).length,
@@ -254,6 +305,34 @@ export class CompactionOperationStore {
       },
       failuresByCode,
     };
+    return {
+      ...snapshot,
+      compaction_jobs_created: snapshot.retainedOperations,
+      compaction_jobs_deduplicated: snapshot.idempotentReuses,
+      compaction_jobs_completed: snapshot.states.completed,
+      compaction_sol_attempts: solAttempts,
+      compaction_opus_fallbacks: opusFallbacks,
+      compaction_results_validated: snapshot.states.completed,
+      compaction_results_reattached: snapshot.storedResultsReattached,
+      compaction_results_installed: snapshot.resultsInstalled,
+      compaction_sessions_auto_continued: snapshot.sessionsAutoContinued,
+      compaction_sessions_manual_intervention: manualIntervention,
+    };
+  }
+
+  #latestDelivered(owner, rootSession, {
+    requireUnsubmitted = false,
+    requireUnaccepted = false,
+  } = {}) {
+    return Object.values(this.operations)
+      .filter((operation) =>
+        operation.owner === owner &&
+        operation.rootSession === rootSession &&
+        operation.state === "completed" &&
+        operation.deliveredAt &&
+        (!requireUnsubmitted || !operation.continuationSubmittedAt) &&
+        (!requireUnaccepted || !operation.continuationAcceptedAt))
+      .sort((left, right) => right.updatedAt - left.updatedAt)[0];
   }
 
   #transition(id, owner, state, changes) {

@@ -149,6 +149,7 @@ import { forgetChildSpawn, observeChildTurn } from "./subagent-turns.mjs";
 import { subagentEffort } from "./multi-agent-state.mjs";
 import {
   activityMetadataFromHeaders,
+  parentThreadIdFromHeaders,
   threadIdFromHeaders,
 } from "./codex-session-names.mjs";
 import { gatewayErrorStatus, translateGatewayError } from "./error-translation.mjs";
@@ -169,6 +170,7 @@ import {
   stripImages,
   substituteImages,
   supportsImageInput,
+  streamedResponseText,
 } from "./vision-bridge.mjs";
 import { readHiddenModels } from "./model-picker-state.mjs";
 import { readVisionBridgeSettings } from "./vision-bridge-state.mjs";
@@ -2405,6 +2407,63 @@ function compactionAttemptSignal(operationSignal) {
   };
 }
 
+function compactionProgressObserver(progress) {
+  const decoder = new TextDecoder();
+  let buffered = "";
+  return (_chunkBytes, _totalBytes, chunk) => {
+    buffered += decoder.decode(chunk, { stream: true }).replaceAll("\r\n", "\n");
+    const blocks = buffered.split("\n\n");
+    buffered = blocks.pop() || "";
+    for (const block of blocks) {
+      for (const line of block.split("\n")) {
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === "[DONE]") continue;
+        let event;
+        try {
+          event = JSON.parse(data);
+        } catch {
+          continue;
+        }
+        const type = String(event?.type || "");
+        if (
+          type === "response.completed" ||
+          type === "response.output_item.added" ||
+          type === "response.output_item.done" ||
+          type.includes(".delta")
+        ) {
+          progress();
+        }
+      }
+    }
+    if (buffered.length > 256 * 1024) buffered = buffered.slice(-256 * 1024);
+  };
+}
+
+function parseCompactionUpstream(bytes, contentType = "") {
+  const text = bytes.toString("utf8");
+  if (String(contentType).toLowerCase().includes("text/event-stream")) {
+    let terminal;
+    for (const block of text.replaceAll("\r\n", "\n").split("\n\n")) {
+      for (const line of block.split("\n")) {
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === "[DONE]") continue;
+        let event;
+        try {
+          event = JSON.parse(data);
+        } catch {
+          continue;
+        }
+        if (event?.type === "response.completed" && event.response) terminal = event.response;
+      }
+    }
+    return { parsed: terminal || {}, answer: streamedResponseText(text) };
+  }
+  const parsed = JSON.parse(text);
+  return { parsed, answer: extractResponseText(parsed) };
+}
+
 // One compaction attempt against one model. Everything route-dependent lives
 // here so a compaction can be moved to another model exactly like an ordinary
 // turn -- a compaction that fails ends the session just as hard, because the
@@ -2430,7 +2489,7 @@ async function summarizeWith(request, payload, route, aged, prepared, signal) {
   const body = {
     ...payload,
     model: route.gatewayModel,
-    stream: false,
+    stream: true,
     // An empty tool list already disables tool use on every forwarder, and
     // xAI rejects tool_choice "none" paired with it, so the field is omitted
     // rather than sent redundantly.
@@ -2531,7 +2590,7 @@ async function summarize(request, payload, route, signal, { allowFailover = true
       bytes = await readResponseBody(sent.upstream, {
         maxBytes: 32 * 1024 * 1024,
         signal: attempt.signal,
-        onChunk: () => attempt.progress(),
+        onChunk: compactionProgressObserver(() => attempt.progress()),
       });
     } catch (error) {
       attempt.dispose();
@@ -2565,7 +2624,32 @@ async function summarize(request, payload, route, signal, { allowFailover = true
         toolResultAging: aged.stats,
       };
     }
-    const parsed = JSON.parse(bytes.toString("utf8"));
+    let parsed;
+    let answer;
+    try {
+      ({ parsed, answer } = parseCompactionUpstream(
+        bytes,
+        sent.upstream.headers.get("content-type") || "",
+      ));
+    } catch {
+      failed.push({ route: attemptRoute, status: 502 });
+      last ??= {
+        ok: false,
+        status: 502,
+        payload: { error: { message: "Compaction model returned a malformed response." } },
+        toolResultAging: aged.stats,
+        route: attemptRoute,
+      };
+      if (!allowFailover || index + 1 >= attempts.length) return { ...last, failed };
+      logFailover(
+        attemptRoute,
+        attempts[index + 1],
+        "compaction/malformed_response",
+        502,
+        "retrying",
+      );
+      continue;
+    }
     // Compaction is a plain non-streaming call, so the usage block (when the
     // provider sends one) is already in hand. `tokenUsageFromPayload` returns
     // undefined when it is absent, and `recordUsageEvent` then omits the token
@@ -2573,7 +2657,6 @@ async function summarize(request, payload, route, signal, { allowFailover = true
     const usage = tokenUsageFromPayload(parsed);
     if (sent.upstream.ok) {
       clearProviderCooldown(attemptRoute.provider);
-      const answer = extractResponseText(parsed);
       // finalizeCheckpoint turns empty model output into a structurally valid
       // checkpoint, so an upstream whose answer this router cannot read would
       // otherwise report ok with nothing in it. Say so where an operator sees
@@ -2726,7 +2809,8 @@ async function handleRoutedCompaction(
   { allowFailover = true } = {},
 ) {
   const owner = String(request.headers["x-codex-router-caller"] || "local");
-  const rootSession = threadIdFromHeaders(request.headers) || "unscoped";
+  const conversationBoundary = threadIdFromHeaders(request.headers) || "unscoped";
+  const rootSession = parentThreadIdFromHeaders(request.headers) || conversationBoundary;
   const sourceBoundary = compactionSourceBoundary([
     { type: "router_compaction_protocol", version: v2 ? 2 : 1, exact: !allowFailover },
     ...(Array.isArray(payload.input) ? payload.input : []),
@@ -2734,6 +2818,7 @@ async function handleRoutedCompaction(
   const operationId = compactionOperationId({
     owner,
     rootSession,
+    conversationBoundary,
     sourceBoundary,
     model: route.slug,
   });
@@ -2745,6 +2830,7 @@ async function handleRoutedCompaction(
     id: operationId,
     owner,
     rootSession,
+    conversationBoundary,
     sourceBoundary,
     model: route.slug,
     fallbackCheckpoint,
@@ -2809,6 +2895,7 @@ async function handleRoutedCompaction(
   try {
     result = await summarize(request, payload, route, operationSignal, { allowFailover });
   } catch (error) {
+    compactionOperationStore.recordModelAttempts(operationId, owner, [route.slug]);
     clearTimeout(deadline);
     if (!allowFailover) {
       compactionOperationStore.fail(operationId, owner, {
@@ -2851,6 +2938,10 @@ async function handleRoutedCompaction(
   } finally {
     clearTimeout(deadline);
   }
+  compactionOperationStore.recordModelAttempts(operationId, owner, [
+    ...(result?.failed || []).map((entry) => entry?.route?.slug),
+    result?.route?.slug,
+  ]);
   // A compaction moved to another model is metered against the model that
   // actually produced the summary, the same as any other turn.
   const served = {
@@ -4034,6 +4125,12 @@ async function handleResponses(request, response, requestUrl) {
       if (!upstream) throw lastTransportError || new Error("No ChatGPT account could serve the request.");
     }
     upstreamStatus = upstream.status;
+    if (continuationEvidence) {
+      compactionOperationStore.recordContinuationSubmitted(
+        continuationEvidence.owner,
+        continuationEvidence.rootSession,
+      );
+    }
     // Time until the upstream chain answered the request. Everything before
     // this is router-side work (body read, normalization, flattening, vision
     // bridge) plus the upstream's own time to produce response headers. For a

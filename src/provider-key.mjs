@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { closeSync, openSync, readSync, writeSync } from "node:fs";
 
 import {
+  adoptProviderCredential,
   apiProvider,
   credentialLabel,
   credentialStatus,
@@ -24,8 +25,8 @@ import {
 const providerId = process.argv[2];
 const command = process.argv[3] || "status";
 
-if (!providerId || !new Set(["status", "set", "remove"]).has(command)) {
-  console.error("Usage: provider-key.mjs PROVIDER status|set|remove");
+if (!providerId || !new Set(["status", "set", "remove", "adopt-env"]).has(command)) {
+  console.error("Usage: provider-key.mjs PROVIDER status|set|remove|adopt-env");
   process.exit(2);
 }
 
@@ -254,6 +255,27 @@ if (command === "status") {
   });
   process.stdout.write(
     `${provider.displayName} ${credentialNoun} saved to protected local storage at ${target}. The provider is enabled.${
+      refreshed ? ` ${targetRestartHint()}` : ""
+    }\n`,
+  );
+  if (providerNeedsCuration(provider.id)) {
+    process.stdout.write(
+      `${provider.displayName} ships no preselected models. Run \`${targetCli(`curate-models ${provider.id}`)}\` ` +
+        `in an interactive terminal to choose which of its models appear in the picker.\n`,
+    );
+  }
+} else if (command === "adopt-env") {
+  const adoption = adoptProviderCredential(provider);
+  let refreshed;
+  await withModelOverlayLock(async () => {
+    await withProviderCatalogCacheTransaction((catalog) => {
+      catalog.forget(providerCatalogFamilyCacheIds(provider.id));
+    });
+    enableProvider(provider.id);
+    refreshed = refreshTargetPickerIfInstalled();
+  });
+  process.stdout.write(
+    `${provider.displayName} ${credentialNoun} adopted from ${adoption.source} and saved to protected local storage at ${adoption.target}. The provider is enabled.${
       refreshed ? ` ${targetRestartHint()}` : ""
     }\n`,
   );

@@ -6,7 +6,12 @@ import { devinCliStatus } from "./devin-cli-status.mjs";
 import { grokOAuthStatus } from "./grok-oauth-status.mjs";
 import { antigravityOAuthStatus } from "./antigravity-oauth-status.mjs";
 import { kimiOAuthStatus } from "./oauth-status.mjs";
-import { credentialStatus } from "./provider-credentials.mjs";
+import {
+  adoptProviderCredential,
+  credentialStatus,
+  discoverAdoptableCredentials,
+} from "./provider-credentials.mjs";
+import { resolveAmbientProviderCredential } from "./shell-environment.mjs";
 import {
   loginOauthProvider,
   providerNeedsCuration,
@@ -114,17 +119,70 @@ async function main() {
     );
     return;
   }
+  if (command === "adopt-env") {
+    if (providerId) {
+      const canonical = canonicalProviderId(providerId);
+      const targetProvider = PROVIDERS.get(canonical);
+      if (!targetProvider) {
+        throw new Error(`Unknown provider: ${providerId}`);
+      }
+      const adoption = adoptProviderCredential(targetProvider);
+      let providers;
+      let refreshed;
+      await withModelOverlayLock(async () => {
+        providers = enableProvider(canonical);
+        refreshed = refreshTargetPickerIfInstalled();
+      });
+      process.stdout.write(
+        `Adopted ${targetProvider.displayName} API key from ${adoption.source} into protected storage. The provider is now enabled.${refreshed ? ` ${targetRestartHint()}` : ""}\n`,
+      );
+      if (providerNeedsCuration(canonical)) {
+        process.stdout.write(
+          `${targetProvider.displayName} ships no preselected models. Run \`${targetCli(`curate-models ${canonical}`)}\` ` +
+            `in an interactive terminal to choose which of its models appear in the picker.\n`,
+        );
+      }
+    } else {
+      const adoptable = discoverAdoptableCredentials();
+      if (!adoptable.length) {
+        process.stdout.write("No unconfigured API providers found with credentials in environment or shell configuration.\n");
+        return;
+      }
+      for (const { provider: p, ambient } of adoptable) {
+        const adoption = adoptProviderCredential(p);
+        await withModelOverlayLock(async () => {
+          enableProvider(p.id);
+        });
+        process.stdout.write(
+          `Adopted ${p.displayName} API key from ${ambient.source} into protected storage and enabled the provider.\n`,
+        );
+      }
+      const refreshed = refreshTargetPickerIfInstalled();
+      if (refreshed) {
+        process.stdout.write(`${targetRestartHint()}\n`);
+      }
+    }
+    return;
+  }
   if (!provider || !["enable", "disable"].includes(command)) {
     throw new Error(
-      "Usage: providers [list [--json]|login antigravity-oauth|enable ID|disable ID|generic ...]",
+      "Usage: providers [list [--json]|login antigravity-oauth|adopt-env [ID]|enable ID|disable ID|generic ...]",
     );
   }
   if (command === "enable" && !configured(provider)) {
-    const keySetup = `run \`${targetCli(`provider-key ${provider.id} set`)}\``;
-    const setup = provider.kind === "oauth"
-      ? SIGN_IN_STATUS[provider.id]?.setup || "sign in with the provider CLI"
-      : keySetup;
-    throw new Error(`${provider.displayName} is not configured; ${setup} first.`);
+    const ambient = resolveAmbientProviderCredential(provider);
+    if (ambient?.value) {
+      const adoption = adoptProviderCredential(provider);
+      process.stdout.write(
+        `Adopted ${provider.displayName} API key from ${adoption.source} into protected storage.\n`,
+      );
+    } else {
+      const keySetup = `run \`${targetCli(`provider-key ${provider.id} set`)}\``;
+      const setup = provider.kind === "oauth"
+        ? SIGN_IN_STATUS[provider.id]?.setup || "sign in with the provider CLI"
+        : keySetup;
+      throw new Error(`${provider.displayName} is not configured; ${setup} first.`);
+    }
   }
   let providers;
   let refreshed;
