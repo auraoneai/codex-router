@@ -880,6 +880,31 @@ Support bundles include sanitized mode metadata only. Disable, refresh and
 uninstall preserve provider selection, credentials, user agents and skills, and
 retained engineering state/evidence; uninstall removes only the managed skill.
 
+### 11.2 Verification record for this implementation
+
+The repository evidence for the implementation is deliberately separate from
+provider availability. The engineering suite passes 135 of 135 checks, the
+Cloudflare registry suite passes 43 of 43 checks, the deterministic
+verification/controller lane passes 55 of 55 adjacent checks, and the focused
+Prism Jev/fallback suite passes 154 checks with one intentional skip. Static
+checks, owner-only state tests, secret-pattern scans, route/effort isolation,
+process-tree cleanup, install/refresh/disable/uninstall preservation, and doctor
+all pass. The installed Codex plane reports engineering revision `0`, preset
+`balanced`, `enabled: false`, `healthy: true`, 117 routed models and 31 routed
+agents. This is the intended clean-install state: the workflow is available but
+does not replace ordinary Codex behavior until explicitly enabled.
+
+The bounded live pass on 2026-09-22 did not certify any of the newly selected
+worker routes. OpenRouter returned HTTP 402 for Gemini 3.8 Flash, both
+Cloudflare GLM 5.3 routes returned HTTP 401 from the stored Cloudflare
+credential, and the deployed Kiro Prism model surface returned HTTP 502 for
+DeepSeek V4.1 Flash, Kimi K3, Opus 5, Sonnet 5, GPT-5.6 Sol and GPT-5.6 Luna.
+Those routes remain explicitly unavailable in the rollout checklist. Catalog
+presence, unit tests and an installed healthy Router are not treated as a live
+model proof. DeepSeek assignments still carry their mandatory ordered
+non-Modal recovery policy, so a Modal capacity failure can select a healthy
+full GLM route, Sol or Sonnet once one of those providers is live.
+
 ### 12. Required test and rollout evidence
 
 Extend existing relevant suites rather than duplicating their fixtures:
