@@ -140,6 +140,42 @@ test("creation state can be reconciled after a crash boundary", async () => {
   }
 });
 
+test("reconciliation and cleanup accept line-oriented Git for Windows worktree output", async () => {
+  const { root, repo, safeRoot } = fixture();
+  try {
+    const state = createMemoryWorktreeState();
+    const runGit = async (args, { cwd }) => {
+      const output = git(cwd, ...args);
+      if (args.join("\0") === ["worktree", "list", "--porcelain", "-z"].join("\0")) {
+        return output.replaceAll("\0", "\r\n");
+      }
+      return output;
+    };
+    const manager = new EngineeringWorktrees({ repoRoot: repo, safeRoot, state, runGit });
+    const record = await manager.create({
+      runId: "run", taskId: "windows-lines", attemptId: "attempt", ownedPaths: [],
+      ownershipToken: "owner", fence: 1,
+    });
+    await state.putWorktree(
+      { ...record, lifecycle: "creating" },
+      { expectedRevision: record.stateRevision },
+    );
+
+    const recovered = await manager.reconcile(record.worktreeId);
+    assert.equal(recovered.status, "creation_completed");
+    const recorded = await state.putWorktree(
+      { ...recovered.record, resultRecorded: true, reconciled: true },
+      { expectedRevision: recovered.record.stateRevision },
+    );
+    assert.deepEqual(await manager.cleanup(record.worktreeId, {
+      ownershipToken: recorded.ownershipToken,
+      fence: recorded.fence,
+    }), { removed: true, worktreeId: record.worktreeId });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("only the integration owner can integrate the selected clean candidate from the same repository", async () => {
   const { root, repo, safeRoot, baseOid } = fixture();
   try {

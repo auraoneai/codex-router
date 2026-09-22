@@ -90,6 +90,7 @@ test("sanitized policy and usage reconstruct allowlisted fields", () => {
     apiKey: "secret",
   });
   assert.equal(policy.enabled, false);
+  assert.equal(policy.executionSelectionMode, "pinned");
   assert.equal(Object.hasOwn(policy, "apiKey"), false);
 
   const usage = engineeringUsageSnapshot([usageEvent()]);
@@ -247,6 +248,7 @@ test("CLI policy export and CAS replacement interchange models and efforts witho
     const exported = run("policy");
     assert.equal(exported.status, 0, exported.stderr);
     const policy = JSON.parse(exported.stdout);
+    assert.equal(policy.executionSelectionMode, "pinned");
     policy.presets.balanced.roles.general_coder.candidates[0] = {
       model: "cloudflare-workers-ai/glm-5.3",
       effort: "high",
@@ -265,6 +267,135 @@ test("CLI policy export and CAS replacement interchange models and efforts witho
     const stale = run("policy", "replace", "--file", replacementPath, "--revision", "0");
     assert.notEqual(stale.status, 0);
     assert.match(stale.stderr, /revision conflict/u);
+  } finally {
+    temp.dispose();
+  }
+});
+
+test("CLI run refuses disabled mode before loading or dispatching the production runtime", {
+  skip: process.platform === "win32" ? "POSIX bin launchers are not Windows entry points" : false,
+}, () => {
+  const temp = fixture();
+  const requestPath = path.join(temp.stateDir, "run-request.json");
+  writeFileSync(requestPath, '{"runId":"disabled-run"}\n', { mode: 0o600 });
+  try {
+    const result = spawnSync(path.join(root, "bin", "engineering"), [
+      "run", "--file", requestPath, "--revision", "0",
+    ], {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CODEX_HOME: temp.stateDir,
+        MODEL_ROUTER_STATE_DIR: temp.stateDir,
+        MODEL_ROUTER_TARGET: "codex",
+      },
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Engineering mode is disabled/u);
+    assert.doesNotMatch(result.stderr, /runtime\.mjs/u);
+  } finally {
+    temp.dispose();
+  }
+});
+
+test("CLI run revision-binds strict JSON to the runtime and run-status reads retained state", {
+  skip: process.platform === "win32" ? "POSIX bin launchers are not Windows entry points" : false,
+}, () => {
+  const temp = fixture();
+  const requestPath = path.join(temp.stateDir, "run-request.json");
+  const secretPath = path.join(temp.stateDir, "secret-request.json");
+  const loaderPath = path.join(temp.stateDir, "runtime-loader.mjs");
+  writeFileSync(requestPath, JSON.stringify({
+    runId: "run-cli-contract",
+    strategy: "single",
+    tasks: [{ taskId: "task-1", objective: "prove dispatch" }],
+  }), { mode: 0o600 });
+  writeFileSync(secretPath, JSON.stringify({
+    runId: "must-refuse",
+    apiKey: "do-not-forward",
+  }), { mode: 0o600 });
+  writeFileSync(loaderPath, `
+const source = ${JSON.stringify(`
+export function createEngineeringRuntime() { return { marker: "runtime-created", status: async (runId) => ({ runId, state: "retained" }) }; }
+export async function runEngineeringWorkflow(runtime, request) { return { runtime: runtime.marker, request }; }
+`)};
+const replacement = \`data:text/javascript,\${encodeURIComponent(source)}\`;
+export async function resolve(specifier, context, nextResolve) {
+  if (specifier.endsWith("/engineering/runtime.mjs")) return { url: replacement, shortCircuit: true };
+  return nextResolve(specifier, context);
+}
+`, { mode: 0o600 });
+  const environment = {
+    ...process.env,
+    CODEX_HOME: temp.stateDir,
+    MODEL_ROUTER_STATE_DIR: temp.stateDir,
+    MODEL_ROUTER_TARGET: "codex",
+    NODE_OPTIONS: `${process.env.NODE_OPTIONS || ""} --experimental-loader=${loaderPath}`.trim(),
+  };
+  const run = (...arguments_) => spawnSync(path.join(root, "bin", "engineering"), arguments_, {
+    cwd: root,
+    encoding: "utf8",
+    env: environment,
+  });
+  try {
+    const enabled = run("on", "--revision", "0");
+    assert.equal(enabled.status, 0, enabled.stderr);
+
+    const stale = run("run", "--file", requestPath, "--revision", "0");
+    assert.notEqual(stale.status, 0);
+    assert.match(stale.stderr, /revision conflict: expected 0, current 1/u);
+
+    const refusedSecret = run("run", "--file", secretPath, "--revision", "1");
+    assert.notEqual(refusedSecret.status, 0);
+    assert.match(refusedSecret.stderr, /forbidden secret field request\.apiKey/u);
+
+    const dispatched = run("run", "--file", requestPath, "--revision", "1");
+    assert.equal(dispatched.status, 0, dispatched.stderr);
+    assert.deepEqual(JSON.parse(dispatched.stdout), {
+      runtime: "runtime-created",
+      request: {
+        runId: "run-cli-contract",
+        strategy: "single",
+        tasks: [{ taskId: "task-1", objective: "prove dispatch" }],
+        policyRevision: 1,
+      },
+    });
+
+    const disabled = run("off", "--revision", "1");
+    assert.equal(disabled.status, 0, disabled.stderr);
+    const retained = run("run-status", "--run-id", "run-cli-contract");
+    assert.equal(retained.status, 0, retained.stderr);
+    assert.deepEqual(JSON.parse(retained.stdout), {
+      runId: "run-cli-contract",
+      state: "retained",
+    });
+  } finally {
+    temp.dispose();
+  }
+});
+
+test("CLI run remains Codex-target-only", {
+  skip: process.platform === "win32" ? "POSIX bin launchers are not Windows entry points" : false,
+}, () => {
+  const temp = fixture();
+  const requestPath = path.join(temp.stateDir, "run-request.json");
+  writeFileSync(requestPath, '{"runId":"wrong-target"}\n', { mode: 0o600 });
+  try {
+    const result = spawnSync(path.join(root, "bin", "engineering"), [
+      "run", "--file", requestPath, "--revision", "0",
+    ], {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CODEX_HOME: temp.stateDir,
+        MODEL_ROUTER_STATE_DIR: temp.stateDir,
+        MODEL_ROUTER_TARGET: "dsh",
+      },
+    });
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /only for the Codex target/u);
   } finally {
     temp.dispose();
   }

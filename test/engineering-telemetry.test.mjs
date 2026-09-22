@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createLeadInvocationEvent,
   createEngineeringUsageEvent,
   deduplicateEngineeringUsage,
   engineeringUsageFromRouterEvent,
   normalizeEngineeringUsage,
+  normalizeLeadInvocationUsage,
+  summarizeLeadInvocations,
   summarizeEngineeringUsage,
   usageValue,
 } from "../src/engineering/telemetry.mjs";
@@ -90,4 +93,38 @@ test("events require immutable engineering identifiers and exact source revision
     taskId: "task-1", attemptId: "attempt-1", role: "worker", sourceRevision: "abc",
     model: "model", provider: "provider", family: "family",
   }), /runId/);
+});
+
+test("native lead telemetry counts invocations while preserving measured, estimated, and unknown fields", () => {
+  const first = createLeadInvocationEvent({
+    runId: "run-1",
+    taskId: "task-1",
+    invocationId: "lead-1",
+    operationId: "operation-1",
+    sourceRevision: "abc123",
+    outcome: "accepted",
+    usage: {
+      inputTokens: { kind: "measured", value: 20 },
+      outputTokens: { kind: "estimated", value: 4 },
+      contextBytes: { kind: "measured", value: 512 },
+    },
+    at: 1,
+  });
+  const second = createLeadInvocationEvent({
+    runId: "run-1",
+    taskId: "task-2",
+    invocationId: "lead-2",
+    operationId: "operation-2",
+    sourceRevision: "def456",
+    outcome: "failed",
+    at: 2,
+  });
+  assert.deepEqual(first.usage.contextTokens, { kind: "unknown" });
+  assert.deepEqual(second.usage.inputTokens, { kind: "unknown" });
+  const summary = summarizeLeadInvocations([first, second]);
+  assert.equal(summary.invocationCount, 2);
+  assert.deepEqual(summary.fields.inputTokens, { measured: 20, estimated: 0, unknown: 1 });
+  assert.deepEqual(summary.fields.outputTokens, { measured: 0, estimated: 4, unknown: 1 });
+  assert.deepEqual(summary.fields.contextBytes, { measured: 512, estimated: 0, unknown: 1 });
+  assert.deepEqual(normalizeLeadInvocationUsage().totalTokens, { kind: "unknown" });
 });

@@ -5,6 +5,7 @@ import {
   lstatSync,
   mkdirSync,
   realpathSync,
+  statSync,
 } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -134,19 +135,46 @@ export function createMemoryWorktreeState() {
 }
 
 function parseRegisteredWorktrees(output) {
-  return String(output || "")
-    .split("\0")
+  const text = String(output || "");
+  // `-z` is the unambiguous format and is what current Git emits. Keep the
+  // line-oriented fallback for Git for Windows builds that ignore `-z` when
+  // it is combined with `--porcelain`.
+  const fields = text.includes("\0") ? text.split("\0") : text.split(/\r?\n/u);
+  return fields
     .filter(Boolean)
     .filter((field) => field.startsWith("worktree "))
-    .map((field) => path.resolve(field.slice("worktree ".length)));
+    .map((field) => {
+      let worktreePath = field.slice("worktree ".length);
+      // Some MSYS-facing Git builds render a native drive path as /C:/... .
+      // Node's win32 path resolver treats that spelling as rooted on the
+      // current drive, so convert it back before resolving it.
+      if (process.platform === "win32" && /^\/[a-z]:[\\/]/iu.test(worktreePath)) {
+        worktreePath = worktreePath.slice(1);
+      }
+      return path.resolve(worktreePath);
+    });
 }
 
 function sameFilesystemPath(left, right) {
+  const resolvedLeft = path.resolve(left);
+  const resolvedRight = path.resolve(right);
+
+  // Git for Windows can report an expanded long path while Node retains an
+  // 8.3 component from os.tmpdir(). Compare the directory identities before
+  // comparing their spellings so those aliases still prove registration.
+  const leftStat = statSync(resolvedLeft, { bigint: true });
+  const rightStat = statSync(resolvedRight, { bigint: true });
+  if (leftStat.ino !== 0n && leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino) {
+    return true;
+  }
+
   const normalize = (value) => {
-    const resolved = realpathSync(path.resolve(value));
+    const resolved = realpathSync.native(path.resolve(value))
+      .replace(/^\\\\\?\\/u, "")
+      .replaceAll("\\", "/");
     return process.platform === "win32" ? resolved.toLocaleLowerCase("en-US") : resolved;
   };
-  return normalize(left) === normalize(right);
+  return normalize(resolvedLeft) === normalize(resolvedRight);
 }
 
 function isOwnedChange(file, ownedPaths) {

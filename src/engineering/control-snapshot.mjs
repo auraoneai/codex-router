@@ -56,6 +56,7 @@ export function sanitizeEngineeringPolicy(policy) {
     schemaVersion: policy.schemaVersion,
     enabled: policy.enabled === true,
     activePreset: policy.activePreset,
+    executionSelectionMode: policy.executionSelectionMode,
     lead: object(policy.lead)
       ? {
           executionMode: policy.lead.executionMode,

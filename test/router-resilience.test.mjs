@@ -304,23 +304,24 @@ test("the execution deadline aborts before releasing the in-flight slot", async 
       response.end(JSON.stringify({ ok: true }));
       return;
     }
-    request.once("aborted", () => {
+    let releaseUpstream;
+    const upstreamReleased = new Promise((resolve) => {
+      releaseUpstream = resolve;
+    });
+    const observeUpstreamAbort = () => {
       upstreamAborted = true;
+      releaseUpstream();
+    };
+    request.once("aborted", () => {
+      observeUpstreamAbort();
     });
     request.once("close", () => {
-      if (!request.complete) upstreamAborted = true;
+      if (!request.complete) observeUpstreamAbort();
     });
     response.once("close", () => {
-      if (!response.writableEnded) upstreamAborted = true;
+      if (!response.writableEnded) observeUpstreamAbort();
     });
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
-    if (!response.writableEnded) {
-      response.writeHead(200, {
-        "Content-Type": "application/json",
-        Connection: "close",
-      });
-      response.end(JSON.stringify({ id: "late", object: "response", output: [] }));
-    }
+    await upstreamReleased;
   });
   const routerPort = await openPort();
   const router = run({
@@ -351,7 +352,10 @@ test("the execution deadline aborts before releasing the in-flight slot", async 
     const events = await waitForUsageEvents(router.stateDir, 1, router);
     assert.equal(events[0].status, 504);
     assert.equal(events[0].requestDeadlineExceeded, true);
-    const abortDeadline = Date.now() + 1_000;
+    // The router has already observed its fetch abort before returning the 504.
+    // Give Windows' server-side socket event loop a separate bounded window to
+    // report that close without racing a mock response timer at the same edge.
+    const abortDeadline = Date.now() + 5_000;
     while (!upstreamAborted && Date.now() < abortDeadline) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }

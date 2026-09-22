@@ -64,7 +64,99 @@ test("disabled policy preserves ordinary Codex behavior without requiring child 
     role: "complex_coder",
   });
   assert.equal(result.status, "disabled");
+  assert.equal(result.executionSelectionMode, "pinned");
   assert.equal(result.rejectedCandidates.length, 0);
+});
+
+test("pinned selection stays stable even when optional models are enabled", () => {
+  const sonnet = "kiro-prism/claude-sonnet-5";
+  const kimi = "kiro-prism/kimi-k3";
+  const policy = enabledPolicy((value) => {
+    value.enabledOptionalModels = [kimi];
+  });
+  assert.equal(policy.executionSelectionMode, "pinned");
+  const result = resolveEngineeringAssignment({
+    policy,
+    role: "complex_coder",
+    configuredModels: [sonnet, kimi],
+    offeredBindings: [offered(sonnet), offered(kimi)],
+  });
+  assert.equal(result.selected.model, sonnet);
+  assert.equal(result.executionSelectionMode, "pinned");
+  assert.equal(result.eligibleCandidates.some(({ model }) => model === kimi), false);
+});
+
+test("adaptive selection is opt-in and may use only explicitly enabled optional candidates", () => {
+  const kimi = "kiro-prism/kimi-k3";
+  const policy = enabledPolicy((value) => {
+    value.executionSelectionMode = "adaptive";
+    value.enabledOptionalModels = [kimi];
+  });
+  const result = resolveEngineeringAssignment({
+    policy,
+    role: "complex_coder",
+    configuredModels: [kimi],
+    offeredBindings: [offered(kimi)],
+  });
+  assert.equal(result.status, "resolved");
+  assert.equal(result.selected.model, kimi);
+  assert.equal(result.executionSelectionMode, "adaptive");
+
+  policy.enabledOptionalModels = [];
+  const gated = resolveEngineeringAssignment({
+    policy,
+    role: "complex_coder",
+    taskOverride: { model: kimi, effort: "high" },
+    configuredModels: [kimi],
+    offeredBindings: [offered(kimi)],
+  });
+  assert.equal(gated.status, "exhausted");
+  assert.match(gated.rejectedCandidates[0].reason, /not enabled/u);
+});
+
+test("unknown execution selection modes are rejected", () => {
+  const policy = enabledPolicy((value) => {
+    value.executionSelectionMode = "automatic";
+  });
+  assert.throws(() => validateEngineeringPolicy(policy), /executionSelectionMode must be pinned or adaptive/u);
+});
+
+test("Kimi remains sparse and optional in every preset", () => {
+  const policy = readEngineeringPolicyDefaults();
+  for (const preset of Object.values(policy.presets)) {
+    const primaryKimi = Object.values(preset.roles)
+      .flatMap((role) => role.candidates)
+      .filter(({ model }) => model.includes("kimi"));
+    const optionalKimiRoles = Object.entries(preset.roles)
+      .filter(([, role]) => (role.optionalCandidates || []).some(({ model }) => model === "kiro-prism/kimi-k3"))
+      .map(([roleName]) => roleName)
+      .sort();
+    assert.deepEqual(primaryKimi, []);
+    assert.deepEqual(optionalKimiRoles, ["complex_coder", "reviewer"]);
+  }
+});
+
+test("adaptive child selection cannot replace the native Astra lead", () => {
+  const policy = enabledPolicy((value) => {
+    value.executionSelectionMode = "adaptive";
+    value.enabledOptionalModels = ["kiro-prism/kimi-k3"];
+  });
+  const result = resolveEngineeringLead({
+    policy,
+    offeredBindings: [{
+      model: "gpt-6-astra",
+      provider: "native-codex",
+      nativeParent: true,
+      executionMode: "native-parent",
+      eligible: true,
+      healthy: true,
+      defaultEffort: "high",
+      supportedEfforts: ["high"],
+    }],
+  });
+  assert.equal(result.selected.model, "gpt-6-astra");
+  assert.equal(result.selected.executionMode, "native-parent");
+  assert.equal(result.executionSelectionMode, "adaptive");
 });
 
 test("task and attempt effort overrides are isolated and fallbacks retain their own effort", () => {
@@ -99,6 +191,7 @@ test("task and attempt effort overrides are isolated and fallbacks retain their 
 
   const snapshot = createEngineeringAssignmentSnapshot(low);
   assert.equal(snapshot.policyRevision, 7);
+  assert.equal(snapshot.executionSelectionMode, "pinned");
   assert.equal(snapshot.selected.effectiveEffort, "low");
   assert.equal(Object.isFrozen(snapshot.fallbacks), true);
 });

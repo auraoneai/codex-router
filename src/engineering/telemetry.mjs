@@ -2,6 +2,7 @@ import { immutableSnapshot } from "./contracts.mjs";
 
 const USAGE_KINDS = new Set(["measured", "estimated", "unknown"]);
 const MAX_TEXT = 160;
+const LEAD_OUTCOMES = new Set(["running", "accepted", "rejected", "failed"]);
 
 function safeText(value, name, { optional = false } = {}) {
   if (value === undefined || value === null || value === "") {
@@ -45,6 +46,65 @@ export function normalizeEngineeringUsage(usage = {}) {
     totalTokens: normalizeUsageField(usage.totalTokens, "totalTokens"),
     costMicros: normalizeUsageField(usage.costMicros, "costMicros"),
   });
+}
+
+export function normalizeLeadInvocationUsage(usage = {}) {
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) {
+    throw new TypeError("lead invocation usage must be an object.");
+  }
+  return immutableSnapshot({
+    inputTokens: normalizeUsageField(usage.inputTokens, "inputTokens"),
+    outputTokens: normalizeUsageField(usage.outputTokens, "outputTokens"),
+    totalTokens: normalizeUsageField(usage.totalTokens, "totalTokens"),
+    contextTokens: normalizeUsageField(usage.contextTokens, "contextTokens"),
+    contextBytes: normalizeUsageField(usage.contextBytes, "contextBytes"),
+  });
+}
+
+/**
+ * Records one actual native lead call. Token fields remain explicitly unknown
+ * when Codex does not expose them; callers may still record the locally
+ * measurable serialized evidence-packet size as contextBytes.
+ */
+export function createLeadInvocationEvent({
+  runId,
+  taskId,
+  invocationId,
+  operationId,
+  sourceRevision,
+  model = "gpt-6-astra",
+  outcome = "running",
+  usage,
+  at = Date.now(),
+} = {}) {
+  if (!LEAD_OUTCOMES.has(outcome)) throw new TypeError(`Unsupported lead invocation outcome ${JSON.stringify(outcome)}.`);
+  return immutableSnapshot({
+    schemaVersion: 1,
+    type: "native-lead-invocation",
+    at: new Date(at).toISOString(),
+    runId: safeText(runId, "runId"),
+    taskId: safeText(taskId, "taskId"),
+    invocationId: safeText(invocationId, "invocationId"),
+    operationId: safeText(operationId, "operationId"),
+    sourceRevision: safeText(sourceRevision, "sourceRevision"),
+    model: safeText(model, "model"),
+    outcome,
+    usage: normalizeLeadInvocationUsage(usage),
+  });
+}
+
+export function summarizeLeadInvocations(events = []) {
+  if (!Array.isArray(events)) throw new TypeError("lead invocation events must be an array.");
+  const fields = {};
+  for (const field of ["inputTokens", "outputTokens", "totalTokens", "contextTokens", "contextBytes"]) {
+    const values = events.map((event) => normalizeLeadInvocationUsage(event?.usage)[field]);
+    fields[field] = {
+      measured: values.filter(({ kind }) => kind === "measured").reduce((sum, item) => sum + item.value, 0),
+      estimated: values.filter(({ kind }) => kind === "estimated").reduce((sum, item) => sum + item.value, 0),
+      unknown: values.filter(({ kind }) => kind === "unknown").length,
+    };
+  }
+  return immutableSnapshot({ invocationCount: events.length, fields });
 }
 
 export function createEngineeringUsageEvent({

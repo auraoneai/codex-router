@@ -5,6 +5,7 @@
   "schemaVersion": 1,
   "enabled": false,
   "activePreset": "balanced",
+  "executionSelectionMode": "pinned",
   "lead": { "executionMode": "native-parent", "model": "gpt-6-astra", "effort": "default" },
   "deepSeekRecovery": [
     { "model": "cloudflare-workers-ai/glm-5.3", "effort": "high" },

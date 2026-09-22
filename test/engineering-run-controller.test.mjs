@@ -101,6 +101,7 @@ test("passing deterministic gates, independent review, and exact Astra decision 
   await controller.recordWorkerResult("task-1", workerResult(running), { notify: false });
   const accepted = await controller.finalizeTask("task-1", {
     sourceRevision: "source-rev",
+    requireLeadAcceptance: true,
     verificationGates: [{ id: "unit", command: "node", arguments: ["--test"], cwd: "/repo" }],
   });
   assert.equal(accepted.state, "accepted");
@@ -317,6 +318,7 @@ test("persisted multi-worker strategy requires integration and reruns gates and 
   await baseController.recordWorkerResult("task-1", workerResult(running), { notify: false });
   const accepted = await baseController.finalizeTask("task-1", {
     sourceRevision: "source-rev",
+    requireLeadAcceptance: true,
     verificationGates: [{ id: "unit", command: "node", cwd: "/repo" }],
   });
   assert.equal(accepted.state, "accepted");
@@ -326,6 +328,73 @@ test("persisted multi-worker strategy requires integration and reruns gates and 
     ["review", "integrated-rev"],
     ["lead", "integrated-rev"],
   ]);
+});
+
+test("routine tasks complete through deterministic gates without invoking Astra", async () => {
+  let leadCalls = 0;
+  const { state, controller } = await setup({
+    astraLead: async ({ sourceRevision }) => {
+      leadCalls += 1;
+      return { decision: "accept", revision: sourceRevision };
+    },
+  });
+  const running = await state.getTask("task-1");
+  await controller.recordWorkerResult("task-1", workerResult(running), { notify: false });
+  const accepted = await controller.finalizeTask("task-1", {
+    sourceRevision: "source-rev",
+    verificationGates: [{ id: "unit", command: "node", cwd: "/repo" }],
+  });
+  assert.equal(accepted.state, "accepted");
+  assert.equal(leadCalls, 0);
+  assert.equal(accepted.composition.requireLeadAcceptance, false);
+  assert.deepEqual(accepted.composition.leadEscalation, { required: false, reason: "routine", risk: "routine" });
+  assert.equal(accepted.composition.leadInvocations.length, 0);
+  assert.equal(accepted.composition.leadUsageSummary.invocationCount, 0);
+  assert.equal(accepted.evidencePacket.usageSummary.lead.invocationCount, 0);
+});
+
+test("high-risk tasks force one judgment-only Astra invocation with explicit unknown token accounting", async () => {
+  const calls = [];
+  const { state, controller } = await setup({
+    taskSpec: { routingDecision: { risk: "high" } },
+    astraLead: async (request) => {
+      calls.push(request);
+      return { decision: "accept", revision: request.sourceRevision };
+    },
+  });
+  const running = await state.getTask("task-1");
+  await controller.recordWorkerResult("task-1", workerResult(running), { notify: false });
+  const accepted = await controller.finalizeTask("task-1", {
+    sourceRevision: "source-rev",
+    requireLeadAcceptance: false,
+    verificationGates: [{ id: "unit", command: "node", cwd: "/repo" }],
+  });
+  assert.equal(accepted.state, "accepted");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].mode, "judgment-only");
+  assert.equal(calls[0].mayEdit, false);
+  assert.deepEqual(accepted.composition.leadEscalation, { required: true, reason: "high-risk", risk: "high" });
+  assert.equal(accepted.composition.leadUsageSummary.invocationCount, 1);
+  assert.deepEqual(accepted.composition.leadInvocations[0].usage.inputTokens, { kind: "unknown" });
+  assert.equal(accepted.composition.leadInvocations[0].usage.contextBytes.kind, "measured");
+  assert.equal(accepted.evidencePacket.usageSummary.lead.invocationCount, 1);
+});
+
+test("stale Astra decisions are rejected and the attempted invocation remains accounted", async () => {
+  const { state, controller } = await setup({
+    astraLead: async () => ({ decision: "accept", revision: "stale-revision" }),
+  });
+  const running = await state.getTask("task-1");
+  await controller.recordWorkerResult("task-1", workerResult(running), { notify: false });
+  const rejected = await controller.finalizeTask("task-1", {
+    sourceRevision: "source-rev",
+    requireLeadAcceptance: true,
+    verificationGates: [{ id: "unit", command: "node", cwd: "/repo" }],
+  });
+  assert.equal(rejected.state, "needs_remediation");
+  assert.match(rejected.composition.failure.message, /stale or missing the exact source revision/u);
+  assert.equal(rejected.composition.leadUsageSummary.invocationCount, 1);
+  assert.equal(rejected.composition.leadInvocations[0].outcome, "failed");
 });
 
 test("failed composition can be remediated only through a new fenced worker attempt", async () => {

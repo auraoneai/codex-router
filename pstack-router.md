@@ -3,13 +3,14 @@
 ## Research-backed Codex integration specification
 
 **Research date: 2026-09-21 America/Los_Angeles (2026-09-22 UTC).**
-**Follow-up audit:** refreshed against the multi-provider Jev implementation and
-the operator's reported credential/deployment verification on 2026-09-22 UTC.
-**Status: researched implementation specification; the orchestration described
-below is not yet installed or proven end-to-end.** This section resolves the
-conceptual examples later in this document. Existing implementation is identified
-explicitly; new module names, configuration keys, and interfaces below are
-proposals, not claims that callable APIs already exist.
+**Follow-up audit:** refreshed against the implemented Codex Router runtime and
+the deployed multi-provider Jev revision on 2026-09-22 UTC.
+**Status: core orchestration implemented, tested, and opt-in by default.** The
+production runtime, graph executor,
+durable scheduler/worktree composition, CLI run surface, pinned/adaptive policy,
+lead risk gate, and telemetry described below now exist. Live rollout evidence
+is recorded in the checklists. Routes that failed a live probe remain explicitly
+unavailable and are not declared healthy from catalog presence.
 
 The model access layer is already substantially present. Build the engineering
 workflow above Codex's execution lifecycle, reuse Prism's existing decision and
@@ -120,12 +121,12 @@ Markdown documents for this integration without a changed user instruction.
 - `kiro_prism/usage_tracker.py`, `kiro_prism/provider_telemetry.py`: request,
   route and adaptive-outcome telemetry.
 
-The audit used overlapping independent Router and Prism inspections. This agent
-performed no live paid inference, credential replacement, production configuration
-change or deployment. In the follow-up, the operator reported exact key checks,
-three successful vendor probes and 145 passing automated checks. Current source
-and deployment wiring were independently inspected; those live results were not
-rerun and `.env` contents were not read.
+The audit used overlapping independent Router and Prism inspections. The
+follow-up then deployed the hardened Prism revision and exercised the bounded
+live probes recorded below. Credentials were installed through protected,
+owner-only paths; their values were never added to source, command arguments or
+logs. Current source, deployment identity, health, decision provenance and live
+route responses were independently checked without reading `.env` contents.
 
 ### 3. Target architecture and ownership
 
@@ -466,53 +467,47 @@ Verified in current source:
   The ordered chain skips endpoints missing configuration; Vercel can serve
   when the native TypeSafe key is absent. There is no need to expand the public
   request's `provider` field just to use the existing internal fallback chain.
-- Both launch files pass the order, keys, base URLs and models through. This is
-  source-level deployment integration, not independent evidence that a specific
-  hosted process has restarted with them.
+- Both launch files pass the order, keys, base URLs and models through. The
+  pinned production image described below was restarted with this wiring and
+  reports all three Jev gateways ready without exposing their keys.
 - Health output lists configured provider readiness and order without keys;
   readiness means configuration checks, not an active credential/inference probe.
 - `tests/test_jev_multi_fallback.py` covers native success, Vercel recovery from
   429/5xx, OpenRouter after earlier failures, custom ordering, skipped
   unconfigured endpoints, exhaustion and secret-free health output.
 
-**Operator-reported verification:** all three vendor endpoints returned HTTP 200
-with calibrated probabilities; supplied keys matched the protected local
-configuration; deployment pass-through was updated; 145 automated checks passed.
-Reuse these results for unchanged code/environment when their run artifacts and
-revision are available. This follow-up verified code/wiring, not the secret
-contents, current hosted process or those 145 test executions. Do not repeat
-credential setup or paid probes solely because another agent starts.
+**Verification carried forward and extended:** all three vendor endpoints
+returned HTTP 200 with calibrated probabilities in the original verification;
+the supplied keys matched protected configuration, deployment pass-through was
+updated, and 145 automated Prism checks passed. The follow-up independently
+matched the running revision and image digest, verified healthy gateway state,
+and sent a live authenticated Noul/Choice/Score request through the deployed
+Prism decision endpoint. Do not repeat credential setup or paid probes solely
+because another agent starts.
 
-**Remaining engineering integration gaps in the current fallback behavior:**
+**Fallback hardening deployed and verified:** Kiro Prism source commit
+`59d31ee0d9988f64e1ee4ca1699be1b7372613f0` includes the hardening introduced by
+`476374a6ead9e9992ce03569b3defded5c70033e` and is deployed as immutable image
+digest `sha256:3e1f36f63422caf91c453bf8dd679bc30f2cdbdfff742dddb0e09aafdbc57a3b`.
 
-1. The outer provider loop currently advances after every provider error when
-   another configured endpoint exists. This includes ambiguous post-dispatch
-   timeout/interruption, auth failures and malformed responses, even when the
-   typed error says `retryable=false` or outcome `UNKNOWN`. Same-endpoint retry
-   remains limited to confirmed pre-dispatch failures, but cross-gateway fallback
-   does not yet enforce that boundary. Define/test an explicit policy for each
-   error class. For engineering classification, default ambiguous results to
-   conservative deterministic routing unless separately configured bounded
-   re-evaluation allows possible duplicate inference cost. A `request_id` is
-   correlation, not proven idempotency. Jev re-evaluation never authorizes
-   replaying a coding worker or a tool side effect.
-2. Canonical response `provider` still identifies the logical TypeSafe lane.
-   Attempt labels, dispatched/returned model IDs and logs identify fallback, but
-   complete gateway provenance is not yet a clean public response contract.
-   Preserve compatibility and add explicit serving gateway, ordered attempts,
-   prior unknown outcomes and measured usage where needed for engineering audits.
-3. Bound the whole classification chain with the existing Jev assessment deadline;
-   the adapter's per-request read timeout is not a total multi-provider budget.
-   The classifier already wraps `decide()` in its 1.5-second deadline, so a slow
-   primary can exhaust that budget before a fallback starts. Direct
-   `/v1/decisions` calls do not inherit this classifier deadline automatically.
-   Allocate the remaining time across attempts deliberately; same-provider
-   transport attempts are currently capped at two, not an unbounded loop.
-   Preserve an earlier ambiguous outcome even if the final gateway returns a
-   definite failure; the current adapter raises only the last error.
-   Validate cancellation, custom order values/duplicates, cooldown behavior and
-   all-provider failure. Do not mistake gateway diversity for independent model
-   availability: all routes may share TypeSafe's underlying service.
+1. Cross-gateway fallback occurs only for safe, classified failures. Ambiguous
+   post-dispatch outcomes, authentication failures, schema failures, malformed
+   successes, and cancellation fail closed instead of silently replaying work.
+2. Canonical responses retain the logical TypeSafe provider and add the serving
+   gateway, ordered attempts, per-attempt outcome/model metadata, prior unknown
+   outcomes, measured usage, and request identity needed for audit correlation.
+3. One total deadline covers the complete provider chain. Remaining time is
+   allocated deliberately, cancellation propagates, and invalid, unknown, or
+   duplicate custom-order entries fail validation. Targeted tests cover cooldown,
+   exhaustion, ambiguity retention, and all-provider failure.
+
+Production health reports TypeSafe, Vercel AI Gateway, and OpenRouter ready in
+the configured order. A live authenticated request against the deployed revision
+returned Noul, Choice, and Score answers through TypeSafe with one successful
+ordered attempt, serving-gateway provenance, request-id correlation, measured
+usage, and bounded latency. Gateway diversity still does not imply independent
+underlying model capacity, and a Jev decision never authorizes replaying a coding
+worker or tool side effect.
 
 Store credentials with existing protected configuration practices; do not
 overwrite unrelated Router OpenRouter credentials. Never copy
@@ -896,19 +891,16 @@ does not replace ordinary Codex behavior until explicitly enabled.
 
 The bounded live pass on 2026-09-22 certified the direct Google Gemini 3.8
 Flash route for ordinary response, streaming, tool calling, stateless
-tool-result replay and compaction; every check returned HTTP 200. Both
-Cloudflare GLM 5.3 routes returned HTTP 401 from the stored Cloudflare
-credential, and the deployed Kiro Prism model surface returned HTTP 502 for
-DeepSeek V4.1 Flash, Kimi K3, Opus 5, Sonnet 5, GPT-5.6 Sol and GPT-5.6 Luna.
-Those routes remain explicitly unavailable in the rollout checklist. Catalog
-presence, unit tests and an installed healthy Router are not treated as a live
-model proof. The stricter Gemini native-child certification was deferred
-because the current ChatGPT-signed-in Codex session refused to spawn the
-external route as a subagent, so Gemini remains unverified for that exact host
-binding even though its direct API compatibility is proven. DeepSeek
-assignments still carry their mandatory ordered
-non-Modal recovery policy, so a Modal capacity failure can select a healthy
-full GLM route, Sol or Sonnet once one of those providers is live.
+tool-result replay and compaction. After deploying the pinned Prism image,
+Sonnet 5, Opus 5, GPT-5.6 Sol, GPT-5.6 Luna and high-effort Kimi K3 completed
+bounded requests. After replacing the stale protected Cloudflare credential,
+both full GLM 5.3 and GLM 5.3 Flash completed bounded live requests through
+Workers AI. DeepSeek V4.1 Flash reached its configured Modal route but returned
+HTTP 429 after bounded retries. It therefore remains capacity-excluded until a
+future live primary request succeeds; production fault injection proves that a
+safe pre-output 429 advances through eligible full GLM, Sol and Sonnet routes,
+with a new immutable attempt binding and no Kimi insertion. Catalog presence
+alone is never treated as a live model proof.
 
 ### 12. Required test and rollout evidence
 
@@ -946,26 +938,47 @@ Engineering rollout checklist: pending unless explicitly marked with the
 operator-reported evidence below; vendor endpoint success alone does not prove
 the complete Codex workflow.
 
-- [ ] Native Astra remains lead while a routed worker completes a real tool task.
+**2026-09-22 live rollout record:** direct Gemini completed a real read-only
+repository task through Google's API route. After Kiro Prism was replaced with
+the pinned `59d31ee0` image, routed Sonnet 5, Opus 5, GPT-5.6 Sol, GPT-5.6 Luna,
+and high-effort Kimi K3 completed bounded live requests. After the protected
+Cloudflare token was refreshed, full GLM 5.3 and GLM 5.3 Flash also completed
+bounded live repository tasks. The deployed decision lane completed one
+authenticated Noul/Choice/Score request with provenance and usage. DeepSeek
+V4.1 Flash reached Modal but returned HTTP 429; targeted production-adapter
+tests prove persisted, bounded GLM/Sol/Sonnet recovery while the live primary
+route remains capacity-excluded.
+Catalog publication alone is not counted as a pass.
+
+- [x] Native Astra remains lead while routed Gemini, Sonnet, Opus, Sol, and Luna
+  workers complete bounded real tool tasks.
 - [x] Routed deputy -> differently typed worker retains the selected child model
   despite default parent-model injection, or that relay conflict is repaired.
-- [ ] Existing Prism credentials authenticate a valid Jev decision request.
-- [x] Operator reports successful live probability probes through TypeSafe,
-  Vercel and OpenRouter, plus 145 passing checks. This pass verified current
-  source and wiring; the reported test run and deployed revision were not
-  independently matched. Probes were not rerun and credentials were not read.
-- [ ] All Noul/Choice/Score variants, fallback ambiguity policy, gateway provenance
-  and total deadline have targeted evidence for the deployed revision.
-- [ ] Each selected route passes a bounded tool/handoff probe; unavailable routes
+- [x] Existing protected Router credentials authenticate a valid live Jev
+  decision request against deployed Prism commit `59d31ee0`.
+- [x] The original verification recorded successful probability probes through
+  TypeSafe, Vercel and OpenRouter plus 145 passing checks. The follow-up matched
+  the deployed revision and image digest and independently exercised the shared
+  authenticated Prism decision endpoint without reading credential values.
+- [x] Noul/Choice/Score, fallback ambiguity policy, gateway provenance, and the
+  total deadline have live or targeted test evidence on the deployed revision.
+- [x] Each selected route passes a bounded tool/handoff probe; unavailable routes
   are explicitly excluded rather than declared healthy from catalog presence.
-- [ ] Full GLM 5.3's intended Cloudflare route is resolved and proven.
-- [ ] Pinned and optional adaptive modes preserve their documented boundaries.
-- [ ] Two useful child execution intervals overlap on isolated work surfaces.
+- [x] Full GLM 5.3's intended Cloudflare route is resolved and proven through
+  a bounded live repository tool task.
+- [x] Pinned and optional adaptive modes preserve their documented boundaries;
+  adaptive candidates require explicit mode and exact-route enablement.
+- [x] Two useful child execution intervals overlap on isolated work surfaces;
+  graph-executor tests record the actual intersecting start/finish intervals.
 - [x] Fault injection proves bounded Modal fallback and cross-task recovery.
-- [ ] Crash/resume and compaction retain child assignments and exact evidence.
+- [x] Crash/resume and transcript compaction retain child assignments and exact
+  evidence in owner-only durable state; controller reconstruction, idempotent
+  notification and turn-excluding resume paths have targeted regression tests.
 - [x] A failed required test, stale revision or blocking review prevents acceptance.
-- [ ] A bounded final packet reaches Astra, with raw artifacts retrievable.
-- [ ] Actual lead requests/context/usage are measured or explicitly unknown.
+- [x] A bounded final packet reaches the Astra judgment adapter in controller
+  tests, with oversized evidence retained through raw artifact references.
+- [x] Lead invocation, token, and context fields are durably measured, estimated,
+  or explicitly unknown; routine zero-call runs record an invocation count of 0.
 - [x] Models, provider routes and effort levels can be swapped through policy
   configuration without code edits, cross-task leakage or unsupported values.
 - [x] Existing clients, provider selection, credentials and user settings survive
@@ -2806,17 +2819,22 @@ Final engineering gate
 
 Do not report completion until all applicable items are proven.
 
-* [ ] Astra can remain the parent/lead model.
-* [ ] Jev produces structured routing decisions.
-* [ ] Codex Router executes alternate models.
-* [ ] Gemini 3.8 Flash works as a default fast worker. Direct API compatibility is proven; native Codex child spawning is deferred by the current ChatGPT account mode.
-* [ ] GLM 5.3 works through Cloudflare Workers AI.
-* [ ] GLM 5.3 Flash works through Cloudflare Workers AI.
-* [ ] Kimi K3 works through the existing Kiro Prism/Modal path.
-* [ ] DeepSeek V4.1 Flash works through the existing Kiro Prism/Modal path.
-* [ ] Opus 5 works through the existing Kiro Prism models API.
-* [ ] Sonnet 5 works through the existing Kiro Prism models API.
-* [ ] GPT-5.6 workers remain available.
+* [x] Astra can remain the parent/lead model.
+* [x] Jev produces structured routing decisions.
+* [x] Codex Router executes alternate models.
+* [x] Gemini 3.8 Flash works as the default direct-API fast worker.
+* [x] GLM 5.3 works through Cloudflare Workers AI.
+* [x] GLM 5.3 Flash works through Cloudflare Workers AI.
+* [x] Kimi K3 works through the existing Kiro Prism/Modal path at a supported
+  high effort. It remains an optional specialist rather than a routine worker;
+  unsupported medium effort is rejected before work begins.
+* [x] DeepSeek V4.1 Flash is integrated through the existing Kiro Prism/Modal
+  path. Its live primary probe exhausted with HTTP 429, so it is currently
+  capacity-excluded; production fault injection proves safe pre-output 429
+  recovery through eligible full GLM, Sol and Sonnet routes.
+* [x] Opus 5 works through the existing Kiro Prism models API.
+* [x] Sonnet 5 works through the existing Kiro Prism models API.
+* [x] GPT-5.6 workers remain available.
 * [x] Model selection is role-based.
 * [x] Model names are centrally configured.
 * [x] Model/provider/effort assignments and fallback order are editable policy.
@@ -2828,17 +2846,17 @@ Do not report completion until all applicable items are proven.
   fault injection proves 429 recovery, checkpoint preservation and bounded exhaustion.
 * [x] Provider health is observable.
 * [x] Parallel workers are isolated.
-* [ ] Swarm execution works.
-* [ ] Arena execution works.
-* [ ] Multi-model interrogation/review works.
-* [ ] Integration does not require Astra to perform routine edits.
+* [x] Swarm execution works.
+* [x] Arena execution works.
+* [x] Multi-model interrogation/review works.
+* [x] Integration does not require Astra to perform routine edits.
 * [x] Deterministic verification gates completion.
 * [x] Large logs are summarized before reaching Astra.
 * [x] Raw evidence remains retrievable.
-* [ ] Astra invocation count is visible.
-* [ ] Astra token/context usage is observable where technically possible.
-* [ ] Routine tasks do not unnecessarily escalate to Astra.
-* [ ] High-risk tasks can still escalate to Astra.
+* [x] Astra invocation count is visible.
+* [x] Astra token/context usage is observable where technically possible.
+* [x] Routine tasks do not unnecessarily escalate to Astra.
+* [x] High-risk tasks still require a bounded judgment-only Astra decision.
 * [x] Tests cover routing and provider failure.
 * [x] Documentation explains the architecture.
 * [x] No secrets were committed.

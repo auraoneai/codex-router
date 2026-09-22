@@ -4,6 +4,7 @@ import { immutableSnapshot } from "./contracts.mjs";
 
 export const ENGINEERING_POLICY_SCHEMA_VERSION = 1;
 export const DEEPSEEK_CAPACITY_POLICY = "deepseek-non-modal-fallback";
+export const ENGINEERING_EXECUTION_SELECTION_MODES = Object.freeze(["pinned", "adaptive"]);
 export const ENGINEERING_ROLE_NAMES = Object.freeze([
   "lead_engineer",
   "architecture",
@@ -23,7 +24,7 @@ export const ENGINEERING_ROLE_NAMES = Object.freeze([
 
 const POLICY_KEYS = new Set([
   "version", "providers", "models",
-  "schemaVersion", "enabled", "activePreset", "enabledOptionalModels",
+  "schemaVersion", "enabled", "activePreset", "executionSelectionMode", "enabledOptionalModels",
   "operatorModelDefaults", "workspace", "presets", "lead", "deepSeekRecovery",
 ]);
 const ROLE_KEYS = new Set([
@@ -221,6 +222,9 @@ export function validateEngineeringPolicy(input, registryOptions = {}) {
     errors.push(`Engineering policy schemaVersion must be ${ENGINEERING_POLICY_SCHEMA_VERSION}.`);
   }
   if (typeof input.enabled !== "boolean") errors.push("Engineering policy enabled must be a boolean.");
+  if (!ENGINEERING_EXECUTION_SELECTION_MODES.includes(input.executionSelectionMode)) {
+    errors.push("Engineering policy executionSelectionMode must be pinned or adaptive.");
+  }
   if (!plainObject(input.lead)) {
     errors.push("Engineering policy lead must be an object.");
   } else {
@@ -377,10 +381,28 @@ function compiledRole(policy, roleName) {
   return override || base;
 }
 
-function overrideCandidate(role, attemptOverride, taskOverride) {
+function overrideCandidate(role, attemptOverride, taskOverride, {
+  executionSelectionMode,
+  enabledOptional,
+}) {
   const source = attemptOverride?.model ? "attempt" : taskOverride?.model ? "task" : "role";
   const model = attemptOverride?.model || taskOverride?.model;
   if (!model) return { candidates: role.candidates, source };
+  const roleOptionalRoutes = new Set((role.optionalCandidates || []).map((candidate) => candidate.model));
+  if (roleOptionalRoutes.has(model) && (
+    executionSelectionMode !== "adaptive" || !enabledOptional.has(model)
+  )) {
+    return {
+      candidates: role.candidates,
+      source: "role",
+      rejectedOverride: {
+        model,
+        reason: executionSelectionMode !== "adaptive"
+          ? "optional route requires adaptive execution selection mode"
+          : "optional route is not enabled by enabledOptionalModels",
+      },
+    };
+  }
   const configured = [...role.candidates, ...(role.optionalCandidates || [])].find((candidate) => candidate.model === model);
   return {
     source,
@@ -493,7 +515,14 @@ export function resolveEngineeringAssignment({
   validateOverride(attemptOverride, "attemptOverride");
   validateOverride(taskOverride, "taskOverride");
   if (!policy.enabled) {
-    return immutableSnapshot({ status: "disabled", policyRevision, preset: policy.activePreset, role: roleName, rejectedCandidates: [] });
+    return immutableSnapshot({
+      status: "disabled",
+      policyRevision,
+      preset: policy.activePreset,
+      role: roleName,
+      executionSelectionMode: policy.executionSelectionMode,
+      rejectedCandidates: [],
+    });
   }
   const role = compiledRole(policy, roleName);
   if (!role) {
@@ -508,10 +537,15 @@ export function resolveEngineeringAssignment({
   const authorFamily = authorBinding?.family || (authorModel ? modelFamily(authorModel) : undefined);
   const requireDifferentFamily = Boolean(role.requireDifferentFamilyFromAuthor || (highRisk && roleName === "reviewer"));
   const enabledOptional = new Set(policy.enabledOptionalModels);
-  const base = overrideCandidate(role, attemptOverride, taskOverride);
+  const base = overrideCandidate(role, attemptOverride, taskOverride, {
+    executionSelectionMode: policy.executionSelectionMode,
+    enabledOptional,
+  });
   const configuredCandidates = [
     ...base.candidates,
-    ...(role.optionalCandidates || []).filter((candidate) => enabledOptional.has(candidate.model)),
+    ...(policy.executionSelectionMode === "adaptive"
+      ? (role.optionalCandidates || []).filter((candidate) => enabledOptional.has(candidate.model))
+      : []),
   ];
   const candidatesWithRecovery = [];
   for (const candidate of configuredCandidates) {
@@ -558,15 +592,19 @@ export function resolveEngineeringAssignment({
   }
 
   const eligible = evaluated.filter((item) => item.assignment).map((item) => item.assignment);
-  const rejectedCandidates = evaluated
+  const rejectedCandidates = [
+    ...(base.rejectedOverride ? [base.rejectedOverride] : []),
+    ...evaluated
     .filter((item) => !item.assignment)
-    .map((item) => ({ model: item.candidate.model, reason: item.rejected }));
+    .map((item) => ({ model: item.candidate.model, reason: item.rejected })),
+  ];
   if (!eligible.length) {
     return immutableSnapshot({
       status: "exhausted",
       policyRevision,
       preset: policy.activePreset,
       role: roleName,
+      executionSelectionMode: policy.executionSelectionMode,
       rejectedCandidates,
     });
   }
@@ -576,6 +614,7 @@ export function resolveEngineeringAssignment({
     policyRevision,
     preset: policy.activePreset,
     role: roleName,
+    executionSelectionMode: policy.executionSelectionMode,
     selectionSource: base.source,
     selected,
     fallbacks: eligible.slice(1),
@@ -613,6 +652,7 @@ export function resolveEngineeringLead({
       policyRevision,
       preset: policy.activePreset,
       role: "lead_engineer",
+      executionSelectionMode: policy.executionSelectionMode,
       rejectedCandidates: [],
     });
   }
@@ -624,6 +664,7 @@ export function resolveEngineeringLead({
       policyRevision,
       preset: policy.activePreset,
       role: "lead_engineer",
+      executionSelectionMode: policy.executionSelectionMode,
       rejectedCandidates: [{
         model: candidate.model,
         reason: matches.length === 0
@@ -639,6 +680,7 @@ export function resolveEngineeringLead({
       policyRevision,
       preset: policy.activePreset,
       role: "lead_engineer",
+      executionSelectionMode: policy.executionSelectionMode,
       rejectedCandidates: [{ model: candidate.model, reason: "offered model is not the native Codex parent" }],
     });
   }
@@ -648,6 +690,7 @@ export function resolveEngineeringLead({
       policyRevision,
       preset: policy.activePreset,
       role: "lead_engineer",
+      executionSelectionMode: policy.executionSelectionMode,
       rejectedCandidates: [{ model: candidate.model, reason: binding.reason || "native parent is ineligible" }],
     });
   }
@@ -659,6 +702,7 @@ export function resolveEngineeringLead({
       policyRevision,
       preset: policy.activePreset,
       role: "lead_engineer",
+      executionSelectionMode: policy.executionSelectionMode,
       rejectedCandidates: [{
         model: candidate.model,
         reason: `effort ${requestedEffort} is not advertised by native Codex inventory`,
@@ -684,6 +728,7 @@ export function resolveEngineeringLead({
     policyRevision,
     preset: policy.activePreset,
     role: "lead_engineer",
+    executionSelectionMode: policy.executionSelectionMode,
     selectionSource: override?.model ? "override" : "lead-policy",
     selected,
     fallbacks: [],
@@ -696,7 +741,7 @@ export function createEngineeringAssignmentSnapshot(resolution) {
   if (!plainObject(resolution) || resolution.status !== "resolved") {
     throw new TypeError("An assignment snapshot requires a resolved engineering assignment.");
   }
-  const required = ["policyRevision", "preset", "role", "selectionSource", "selected"];
+  const required = ["policyRevision", "preset", "role", "executionSelectionMode", "selectionSource", "selected"];
   for (const field of required) {
     if (resolution[field] === undefined) {
       throw new TypeError(`Resolved engineering assignment is missing ${field}.`);
@@ -707,6 +752,7 @@ export function createEngineeringAssignmentSnapshot(resolution) {
     policyRevision: resolution.policyRevision,
     preset: resolution.preset,
     role: resolution.role,
+    executionSelectionMode: resolution.executionSelectionMode,
     selectionSource: resolution.selectionSource,
     selected: resolution.selected,
     fallbacks: resolution.fallbacks || [],

@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -607,7 +607,7 @@ function engineeringOption(commandArgs, name) {
   return value;
 }
 
-function engineeringExpectedRevision(commandArgs) {
+function engineeringExpectedRevision(commandArgs, operation = "Engineering on/off") {
   const revisionIndex = commandArgs.indexOf("--revision");
   const expectedIndex = commandArgs.indexOf("--expected-revision");
   if (revisionIndex !== -1 && expectedIndex !== -1) {
@@ -615,11 +615,61 @@ function engineeringExpectedRevision(commandArgs) {
   }
   const flag = revisionIndex !== -1 ? "--revision" : "--expected-revision";
   const raw = engineeringOption(commandArgs, flag);
-  if (raw === undefined) throw new Error("Engineering on/off requires --revision REV.");
+  if (raw === undefined) throw new Error(`${operation} requires --revision REV.`);
   if (!/^\d+$/u.test(raw) || !Number.isSafeInteger(Number(raw))) {
     throw new Error(`${flag} must be a non-negative safe integer.`);
   }
   return Number(raw);
+}
+
+const ENGINEERING_RUN_REQUEST_MAX_BYTES = 256 * 1024;
+const ENGINEERING_SECRET_FIELD = /(?:api[-_]?key|password|secret|token|credential|authorization)$/iu;
+const ENGINEERING_SECRET_VALUE = /(?:\bBearer\s+[A-Za-z0-9._~+/-]{12,}|\b(?:sk|vck|apikey)[-_][A-Za-z0-9._-]{12,}|\bAIza[A-Za-z0-9_-]{30,})/iu;
+
+function engineeringRunRequest(filePath) {
+  const resolved = path.resolve(filePath);
+  let metadata;
+  try {
+    metadata = lstatSync(resolved);
+  } catch (error) {
+    throw new Error(`Engineering run request file could not be read: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!metadata.isFile() || metadata.isSymbolicLink()) {
+    throw new Error("Engineering run request must be a regular JSON file, not a link or directory.");
+  }
+  if (metadata.size > ENGINEERING_RUN_REQUEST_MAX_BYTES) {
+    throw new Error(`Engineering run request exceeds ${ENGINEERING_RUN_REQUEST_MAX_BYTES} bytes.`);
+  }
+  let request;
+  try {
+    request = JSON.parse(readFileSync(resolved, "utf8"));
+  } catch (error) {
+    throw new Error(`Engineering run request is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!request || typeof request !== "object" || Array.isArray(request) || Object.getPrototypeOf(request) !== Object.prototype) {
+    throw new Error("Engineering run request must be a JSON object.");
+  }
+  if (Object.hasOwn(request, "policyRevision") || Object.hasOwn(request, "expectedRevision")) {
+    throw new Error("Engineering run request must not supply a policy revision; use --revision REV.");
+  }
+  const inspect = (value, location, seen = new Set()) => {
+    if (!value || typeof value !== "object") {
+      if (typeof value === "string" && ENGINEERING_SECRET_VALUE.test(value)) {
+        throw new Error(`Engineering run request contains secret-like data at ${location}; use a configured credential reference.`);
+      }
+      return;
+    }
+    if (seen.has(value)) return;
+    seen.add(value);
+    for (const [key, nested] of Object.entries(value)) {
+      if (ENGINEERING_SECRET_FIELD.test(key)) {
+        throw new Error(`Engineering run request contains forbidden secret field ${location}.${key}.`);
+      }
+      inspect(nested, `${location}.${key}`, seen);
+    }
+  };
+  inspect(request, "request");
+  return request;
 }
 
 function assertEngineeringArguments(commandArgs, { values = [], flags = [] } = {}) {
@@ -651,10 +701,10 @@ async function handleEngineering(commandArgs) {
     throw new Error("Engineering orchestration is supported only for the Codex target.");
   }
   const action = commandArgs[0] || "status";
-  const supported = new Set(["status", "policy", "preview", "usage", "on", "off"]);
+  const supported = new Set(["status", "policy", "preview", "usage", "on", "off", "run", "run-status"]);
   if (!supported.has(action)) {
     throw new Error(
-      "Usage: control engineering status|policy [replace --file PATH --revision REV]|preview <role> [--model SLUG] [--effort LEVEL] [--high-risk]|usage|on|off --revision REV",
+      "Usage: control engineering status|policy [replace --file PATH --revision REV]|preview <role> [--model SLUG] [--effort LEVEL] [--high-risk]|usage|on|off --revision REV|run --file REQUEST.json --revision REV|run-status --run-id ID",
     );
   }
   const { executeEngineeringControlAction } = await import("./engineering/http.mjs");
@@ -662,6 +712,52 @@ async function handleEngineering(commandArgs) {
   const usageEvents = await engineeringUsageEventsForControl();
   let body;
   let inventory = {};
+  if (action === "run") {
+    const runArgs = commandArgs.slice(1);
+    assertEngineeringArguments(runArgs, {
+      values: ["--file", "--revision", "--expected-revision"],
+    });
+    const requestPath = engineeringOption(runArgs, "--file");
+    if (!requestPath) throw new Error("engineering run requires --file REQUEST.json.");
+    const expectedRevision = engineeringExpectedRevision(runArgs, "Engineering run");
+    const state = readEngineeringPolicyState();
+    if (state.degraded || !Number.isSafeInteger(state.revision)) {
+      throw new Error("Engineering policy is degraded; repair it before starting a run.");
+    }
+    if (!state.enabled) {
+      throw new Error("Engineering mode is disabled; enable it before starting a run.");
+    }
+    if (state.revision !== expectedRevision) {
+      throw new Error(
+        `Engineering policy revision conflict: expected ${expectedRevision}, current ${state.revision}.`,
+      );
+    }
+    const request = engineeringRunRequest(requestPath);
+    const runtimeModule = await import("./engineering/runtime.mjs");
+    const runtime = runtimeModule.createEngineeringRuntime();
+    const workflowRequest = {
+      ...request,
+      policyRevision: expectedRevision,
+    };
+    const result = typeof runtimeModule.runEngineeringWorkflow === "function"
+      ? await runtimeModule.runEngineeringWorkflow(runtime, workflowRequest)
+      : typeof runtime.runEngineeringWorkflow === "function"
+        ? await runtime.runEngineeringWorkflow(workflowRequest)
+        : await runtime.run(workflowRequest);
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  if (action === "run-status") {
+    const statusArgs = commandArgs.slice(1);
+    assertEngineeringArguments(statusArgs, { values: ["--run-id"] });
+    const runId = engineeringOption(statusArgs, "--run-id");
+    if (!runId) throw new Error("engineering run-status requires --run-id ID.");
+    const { createEngineeringRuntime } = await import("./engineering/runtime.mjs");
+    const runtime = createEngineeringRuntime();
+    const result = await runtime.status(runId);
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
   if (action === "policy" && commandArgs[1] === "replace") {
     const replaceArgs = commandArgs.slice(2);
     assertEngineeringArguments(replaceArgs, {

@@ -3,12 +3,15 @@ import { isDeepStrictEqual } from "node:util";
 
 import { createEvidencePacket } from "./evidence.mjs";
 import { evaluateEngineeringAcceptance } from "./evidence.mjs";
+import { createLeadInvocationEvent, normalizeLeadInvocationUsage, summarizeLeadInvocations, usageValue } from "./telemetry.mjs";
 import { redactVerificationArguments, redactVerificationCommand } from "./verification.mjs";
 
 const COMPOSITION_STATES = new Set(["verifying", "reviewing", "integrating"]);
 const TERMINAL_STATES = new Set(["accepted", "cancelled", "failed", "blocked"]);
 const MULTI_WORKER_STRATEGIES = new Set(["swarm", "pipeline", "arena"]);
 const MAX_PERSISTED_ERROR_BYTES = 2 * 1024;
+const HIGH_RISKS = new Set(["high", "critical"]);
+const LEAD_EDIT_FIELDS = new Set(["patch", "edits", "changedFiles", "filesChanged", "workerResult", "commands"]);
 
 function copy(value) {
   return value === undefined ? undefined : structuredClone(value);
@@ -99,6 +102,37 @@ function requiresIntegration(task, requested) {
     || MULTI_WORKER_STRATEGIES.has(persistedStrategy(task))
     || (Array.isArray(task.workerResults) && task.workerResults.length > 1)
     || (Number.isSafeInteger(task.workerCount) && task.workerCount > 1);
+}
+
+function requestedRisk(task, options) {
+  const value = options.risk
+    ?? task.routingDecision?.risk
+    ?? task.classification?.risk
+    ?? task.risk
+    ?? "routine";
+  return String(value).trim().toLowerCase();
+}
+
+function leadEscalation(task, options) {
+  const risk = requestedRisk(task, options);
+  if (options.highRisk === true || HIGH_RISKS.has(risk)) return { required: true, reason: "high-risk", risk };
+  if (options.requireLeadAcceptance === true) return { required: true, reason: "explicit-request", risk };
+  if (task.requireLeadAcceptance === true || task.policy?.requireLeadAcceptance === true) {
+    return { required: true, reason: "policy", risk };
+  }
+  return { required: false, reason: "routine", risk };
+}
+
+function reportedLeadUsage(decision) {
+  const usage = decision?.usage && typeof decision.usage === "object" ? decision.usage : {};
+  const context = decision?.context && typeof decision.context === "object" ? decision.context : {};
+  return normalizeLeadInvocationUsage({
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    totalTokens: usage.totalTokens,
+    contextTokens: context.tokens ?? usage.contextTokens,
+    contextBytes: context.bytes ?? usage.contextBytes,
+  });
 }
 
 /**
@@ -318,6 +352,7 @@ export class EngineeringRunController {
       if (integrationRequired && !this.integrator) {
         throw new Error("Multi-worker composition requires an integrator before verification.");
       }
+      const escalation = leadEscalation(task, options);
       return {
         state: integrationRequired ? "integrating" : "verifying",
         composition: {
@@ -330,7 +365,10 @@ export class EngineeringRunController {
           verificationGates,
           requiredVerificationIds,
           requireReview: options.requireReview !== false,
-          requireLeadAcceptance: options.requireLeadAcceptance !== false,
+          requireLeadAcceptance: escalation.required,
+          leadEscalation: escalation,
+          leadInvocations: [],
+          leadUsageSummary: summarizeLeadInvocations([]),
           summary: options.summary || task.workerResult.summary || "",
           rawArtifactReferences: copy(options.rawArtifactReferences || task.workerResult.evidenceRefs || []),
           criticalExcerpts: copy(options.criticalExcerpts || []),
@@ -517,9 +555,87 @@ export class EngineeringRunController {
       reviewDisagreements: task.composition.reviewDisagreements,
       residualRisks: task.composition.residualRisks,
       routingSummary: task.composition.routingSummary,
-      usageSummary: task.composition.usageSummary,
+      usageSummary: task.composition.leadUsageSummary
+        ? { ...(task.composition.usageSummary || {}), lead: task.composition.leadUsageSummary }
+        : task.composition.usageSummary,
       leadDecision,
       generatedAt: this.clock(),
+    });
+  }
+
+  #validateLeadDecision(decision, sourceRevision) {
+    if (!decision || !["accept", "reject"].includes(decision.decision)) {
+      throw new Error("Astra lead returned no valid accept/reject decision.");
+    }
+    if (decision.revision !== sourceRevision) {
+      throw new Error("Astra lead decision is stale or missing the exact source revision.");
+    }
+    const editField = Object.keys(decision).find((field) => LEAD_EDIT_FIELDS.has(field));
+    if (editField) throw new Error(`Astra lead is judgment-only and cannot return ${editField}.`);
+  }
+
+  async #recordLeadInvocation(task, evidencePacket) {
+    const operationId = task.composition.operation.operationId;
+    const invocationId = `lead:${operationId}`;
+    return this.#update(task.taskId, (current) => {
+      if (!this.#operationMatches(current, task, "lead")) return undefined;
+      const existing = current.composition.leadInvocations || [];
+      if (existing.some((event) => event.invocationId === invocationId)) return undefined;
+      const event = createLeadInvocationEvent({
+        runId: current.runId,
+        taskId: current.taskId,
+        invocationId,
+        operationId,
+        sourceRevision: current.composition.sourceRevision,
+        model: this.astraLead?.model || "gpt-6-astra",
+        usage: {
+          inputTokens: usageValue("unknown"),
+          outputTokens: usageValue("unknown"),
+          totalTokens: usageValue("unknown"),
+          contextTokens: usageValue("unknown"),
+          contextBytes: usageValue("measured", Buffer.byteLength(JSON.stringify(evidencePacket))),
+        },
+        at: this.clock(),
+      });
+      const leadInvocations = [...existing, event];
+      return {
+        composition: {
+          ...current.composition,
+          leadInvocations,
+          leadUsageSummary: summarizeLeadInvocations(leadInvocations),
+        },
+      };
+    });
+  }
+
+  async #finishLeadInvocation(task, decision, outcome) {
+    const invocationId = `lead:${task.composition.operation.operationId}`;
+    return this.#update(task.taskId, (current) => {
+      if (!this.#operationMatches(current, task, "lead")) return undefined;
+      const events = current.composition.leadInvocations || [];
+      const index = events.findIndex((event) => event.invocationId === invocationId);
+      if (index < 0) throw new Error("Astra lead invocation was not recorded before completion.");
+      const previous = events[index];
+      const reported = reportedLeadUsage(decision);
+      const usage = {
+        ...reported,
+        contextBytes: reported.contextBytes.kind === "unknown" ? previous.usage.contextBytes : reported.contextBytes,
+      };
+      const event = createLeadInvocationEvent({
+        ...previous,
+        outcome,
+        usage,
+        at: previous.at,
+      });
+      const leadInvocations = [...events];
+      leadInvocations[index] = event;
+      return {
+        composition: {
+          ...current.composition,
+          leadInvocations,
+          leadUsageSummary: summarizeLeadInvocations(leadInvocations),
+        },
+      };
     });
   }
 
@@ -540,20 +656,19 @@ export class EngineeringRunController {
     try {
       const provisionalAcceptance = this.#acceptance(running, undefined, false);
       const provisionalPacket = this.#packet(running, provisionalAcceptance, undefined);
+      const recorded = await this.#recordLeadInvocation(running, provisionalPacket);
       const invoke = typeof this.astraLead === "function" ? this.astraLead : this.astraLead.decide.bind(this.astraLead);
       const leadDecision = await invoke({
-        operationId: running.composition.operation.operationId,
-        task: copy(running),
+        operationId: recorded.composition.operation.operationId,
+        task: copy(recorded),
         evidencePacket: provisionalPacket,
-        sourceRevision: running.composition.sourceRevision,
+        sourceRevision: recorded.composition.sourceRevision,
+        mode: "judgment-only",
+        mayEdit: false,
       });
-      if (!leadDecision || !["accept", "reject"].includes(leadDecision.decision)) {
-        throw new Error("Astra lead returned no valid accept/reject decision.");
-      }
-      if (leadDecision.revision !== running.composition.sourceRevision) {
-        throw new Error("Astra lead decision is stale or missing the exact source revision.");
-      }
-      return this.#completeStage(running, "lead", (current) => ({
+      this.#validateLeadDecision(leadDecision, recorded.composition.sourceRevision);
+      const accounted = await this.#finishLeadInvocation(recorded, leadDecision, leadDecision.decision === "accept" ? "accepted" : "rejected");
+      return this.#completeStage(accounted, "lead", (current) => ({
         composition: {
           ...current.composition,
           stage: "final_pending",
@@ -562,6 +677,10 @@ export class EngineeringRunController {
         },
       }));
     } catch (error) {
+      const current = await this.state.getTask(running.taskId);
+      if (current?.composition?.leadInvocations?.some((event) => event.operationId === running.composition.operation.operationId)) {
+        await this.#finishLeadInvocation(current, undefined, "failed");
+      }
       return this.#failComposition(running, "lead", error);
     }
   }
@@ -645,9 +764,23 @@ export class EngineeringRunController {
         composition: { ...current.composition, stage: "lead_pending", reviewResults: normalizeReviewResults(observation.result), reviewFinishedAt: this.clock() },
       })) };
     }
-    return { task: await this.#completeStage(task, phase, (current) => ({
-      composition: { ...current.composition, stage: "final_pending", leadDecision: copy(observation.result), leadFinishedAt: this.clock() },
-    })) };
+    try {
+      this.#validateLeadDecision(observation.result, task.composition.sourceRevision);
+      const accounted = await this.#finishLeadInvocation(
+        task,
+        observation.result,
+        observation.result.decision === "accept" ? "accepted" : "rejected",
+      );
+      return { task: await this.#completeStage(accounted, phase, (current) => ({
+        composition: { ...current.composition, stage: "final_pending", leadDecision: copy(observation.result), leadFinishedAt: this.clock() },
+      })) };
+    } catch (error) {
+      const current = await this.state.getTask(task.taskId);
+      if (current?.composition?.leadInvocations?.some((event) => event.operationId === task.composition.operation.operationId)) {
+        await this.#finishLeadInvocation(current, undefined, "failed");
+      }
+      return { task: await this.#failComposition(task, phase, error) };
+    }
   }
 
   async #advanceComposition(taskId, { mayExecutePending = true, reconcileRunning = false } = {}) {
