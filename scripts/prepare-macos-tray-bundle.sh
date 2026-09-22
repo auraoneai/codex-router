@@ -11,6 +11,7 @@ source_bundle=$1
 destination_bundle=$2
 repo_dir=$3
 expected_build_sha=${MODEL_ROUTER_PREBUILT_TRAY_EXPECTED_SHA:-}
+existing_bundle=${MODEL_ROUTER_EXISTING_TRAY_BUNDLE:-}
 
 case $source_bundle in /*) ;; *) fail "the prebuilt app path must be absolute." ;; esac
 case $destination_bundle in /*) ;; *) fail "the staging app path must be absolute." ;; esac
@@ -64,11 +65,38 @@ esac
   || fail "the prebuilt Control Center does not support this Mac's architecture."
 /usr/bin/lipo "$widget_executable" -verify_arch "$required_arch" >/dev/null 2>&1 \
   || fail "the prebuilt widget does not support this Mac's architecture."
+[ "$(read_plist "$control_info" ModelRouterBuildSHA)" = "$expected_build_sha" ] \
+  || fail "the embedded Control Center was not built from the expected CI source commit."
 
-/usr/bin/ditto "$source_bundle" "$destination_bundle"
+if [ -n "$existing_bundle" ]; then
+  case $existing_bundle in /*) ;; *) fail "the existing app path must be absolute." ;; esac
+  [ -d "$existing_bundle" ] && [ ! -L "$existing_bundle" ] \
+    || fail "the existing app must be a real .app directory."
+  existing_info="$existing_bundle/Contents/Info.plist"
+  [ "$(read_plist "$existing_info" CFBundleIdentifier)" = "io.github.codex-router.tray" ] \
+    || fail "the existing app has an unexpected bundle identifier."
+  [ "$(read_plist "$existing_info" ModelRouterSourceRoot)" = "$repo_dir" ] \
+    || fail "the existing app is not bound to this repository's state-owner checkout."
+  [ "$(read_plist "$existing_info" ModelRouterControlVersion)" = "$(node -p 'require(process.argv[1]).version' "$repo_dir/apps/control-center/package.json")" ] \
+    || fail "the existing app's Control Center version does not match this checkout."
+  expected_protocol=$(node -p 'require(process.argv[1]).controlProtocol' "$repo_dir/apps/control-center/package.json")
+  [ "$(read_plist "$existing_info" ModelRouterControlProtocol)" = "$expected_protocol" ] \
+    || fail "the existing app uses an incompatible Control Center protocol."
+  /usr/bin/codesign --verify --deep --strict "$existing_bundle" >/dev/null 2>&1 \
+    || fail "the existing app signature is invalid."
+  /usr/bin/codesign -dv --verbose=4 "$existing_bundle" 2>&1 | /usr/bin/grep -qx 'Signature=adhoc' \
+    || fail "preserving the existing tray requires its current local ad-hoc signature."
+  /usr/bin/lipo "$existing_bundle/Contents/MacOS/ModelRouterTray" -verify_arch "$required_arch" >/dev/null 2>&1 \
+    || fail "the existing tray does not support this Mac's architecture."
+  /usr/bin/ditto "$existing_bundle" "$destination_bundle"
+  destination_control="$destination_bundle/Contents/Resources/Control Center.app"
+  /bin/rm -rf "$destination_control"
+  /usr/bin/ditto "$control_center" "$destination_control"
+else
+  /usr/bin/ditto "$source_bundle" "$destination_bundle"
+  destination_control="$destination_bundle/Contents/Resources/Control Center.app"
+fi
 destination_info="$destination_bundle/Contents/Info.plist"
-destination_control="$destination_bundle/Contents/Resources/Control Center.app"
-destination_control_info="$destination_control/Contents/Info.plist"
 destination_widget="$destination_bundle/Contents/PlugIns/RouterUsageWidget.appex"
 
 # The app is installed beside the canonical state-owner checkout. Bind both
@@ -76,25 +104,37 @@ destination_widget="$destination_bundle/Contents/PlugIns/RouterUsageWidget.appex
 # swaps the staged app.
 /usr/libexec/PlistBuddy -c "Set :ModelRouterSourceRoot $repo_dir" "$destination_info"
 printf '%s\n' "$repo_dir" > "$destination_control/Contents/Resources/router-root"
+/usr/libexec/PlistBuddy -c "Set :ModelRouterBuildSHA $expected_build_sha" \
+  "$destination_control/Contents/Info.plist" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :ModelRouterBuildSHA string $expected_build_sha" \
+    "$destination_control/Contents/Info.plist"
 
 signing_identity=${MODEL_ROUTER_CODESIGN_IDENTITY:--}
-if [ "$signing_identity" = "-" ]; then
+if [ -n "$existing_bundle" ]; then
+  signing_identity=-
+  /usr/libexec/PlistBuddy -c "Print :ModelRouterWidgetStorageMode" "$destination_info" >/dev/null \
+    || fail "the existing tray has no widget storage mode marker."
+elif [ "$signing_identity" = "-" ]; then
   widget_storage_mode=local
   widget_entitlements="$repo_dir/apps/macos/RouterUsageWidget/RouterUsageWidget/RouterUsageWidget.local.entitlements"
 else
   widget_storage_mode=app-group
   widget_entitlements="$repo_dir/apps/macos/RouterUsageWidget/RouterUsageWidget/RouterUsageWidget.entitlements"
 fi
-/usr/libexec/PlistBuddy -c "Set :ModelRouterWidgetStorageMode $widget_storage_mode" "$destination_info"
-/usr/libexec/PlistBuddy -c "Set :ModelRouterWidgetStorageMode $widget_storage_mode" \
-  "$destination_widget/Contents/Info.plist"
+if [ -z "$existing_bundle" ]; then
+  /usr/libexec/PlistBuddy -c "Set :ModelRouterWidgetStorageMode $widget_storage_mode" "$destination_info"
+  /usr/libexec/PlistBuddy -c "Set :ModelRouterWidgetStorageMode $widget_storage_mode" \
+    "$destination_widget/Contents/Info.plist"
+fi
 
 # Sign nested code only after all bundle mutations, in the same order as the
 # source builder. This preserves the installer transaction's strict seal check.
 /usr/bin/codesign --force --deep --sign "$signing_identity" "$destination_control"
-/usr/bin/codesign --force --sign "$signing_identity" \
-  --entitlements "$widget_entitlements" "$destination_widget"
-if [ "$signing_identity" = "-" ]; then
+if [ -z "$existing_bundle" ]; then
+  /usr/bin/codesign --force --sign "$signing_identity" \
+    --entitlements "$widget_entitlements" "$destination_widget"
+fi
+if [ -n "$existing_bundle" ] || [ "$signing_identity" = "-" ]; then
   /usr/bin/codesign --force --sign "$signing_identity" "$destination_bundle"
 else
   /usr/bin/codesign --force --sign "$signing_identity" \

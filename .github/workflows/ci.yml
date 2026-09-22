@@ -344,6 +344,7 @@ jobs:
         env:
           MODEL_ROUTER_PREBUILT_TRAY_BUNDLE: ${{ runner.temp }}/Codex Router.app
           MODEL_ROUTER_PREBUILT_TRAY_EXPECTED_SHA: ${{ github.sha }}
+          MODEL_ROUTER_EXISTING_TRAY_BUNDLE: ${{ runner.temp }}/Codex Router.app
         run: |
           scripts/build-macos-tray-app.sh "$RUNNER_TEMP/Codex Router Prepared.app"
           codesign --verify --deep --strict "$RUNNER_TEMP/Codex Router Prepared.app"
@@ -351,6 +352,8 @@ jobs:
             "$RUNNER_TEMP/Codex Router Prepared.app/Contents/Info.plist")" = "$GITHUB_WORKSPACE"
           test "$(/usr/libexec/PlistBuddy -c 'Print :ModelRouterBuildSHA' \
             "$RUNNER_TEMP/Codex Router Prepared.app/Contents/Info.plist")" = "$GITHUB_SHA"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :ModelRouterBuildSHA' \
+            "$RUNNER_TEMP/Codex Router Prepared.app/Contents/Resources/Control Center.app/Contents/Info.plist")" = "$GITHUB_SHA"
           test "$(cat "$RUNNER_TEMP/Codex Router Prepared.app/Contents/Resources/Control Center.app/Contents/Resources/router-root")" = "$GITHUB_WORKSPACE"
       - name: Save electron-builder downloads
         if: ${{ !cancelled() && steps.electron-downloads.outputs.cache-hit != 'true' }}

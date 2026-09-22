@@ -156,6 +156,8 @@ MODEL_ROUTER_WIDGET_ARCH="$widget_arch" \
 rm -rf "$bundle_dir/Contents/Resources/Control Center.app"
 cp -R "$control_center_bundle" "$bundle_dir/Contents/Resources/Control Center.app"
 printf '%s\n' "$repo_dir" > "$bundle_dir/Contents/Resources/Control Center.app/Contents/Resources/router-root"
+/usr/libexec/PlistBuddy -c "Add :ModelRouterBuildSHA string $build_source_sha" \
+  "$bundle_dir/Contents/Resources/Control Center.app/Contents/Info.plist"
 # Seal the checkout relationship into Info.plist itself. An external symlink is
 # invalid inside a strict macOS code-signed bundle; a loose text resource would
 # be executable-path input. This value is covered by the final signature, so
