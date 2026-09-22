@@ -2139,7 +2139,7 @@ final class RouterStore: ObservableObject {
     startMonitoringUsageDirectory()
     await refreshNativeUsage()
     while !Task.isCancelled {
-      let isViewingIsland = (islandMode == .visible && isIslandInspecting)
+      let isViewingIsland = (islandMode != .off && isIslandInspecting)
       let isBusy = (activityState != .idle || activeRequests.count > 0)
       let sleepSeconds: UInt64 = (isViewingIsland || isBusy) ? 5 : 15
       do {
@@ -2165,7 +2165,10 @@ final class RouterStore: ObservableObject {
 
   private func startMonitoringUsageDirectory() {
     stopMonitoringUsageDirectory()
-    let stateDir = RouterStateDirectory.resolve()
+    let stateDir = RouterStateDirectory.resolve(
+      environment: ProcessInfo.processInfo.environment,
+      home: FileManager.default.homeDirectoryForCurrentUser
+    )
     let fd = open(stateDir.path, O_EVTONLY)
     guard fd >= 0 else { return }
     let source = DispatchSource.makeFileSystemObjectSource(

@@ -234,8 +234,13 @@ final class IslandWindowController {
     window.ignoresMouseEvents = !inside
     if inside, display.state == .compact {
       display.setState(.peek)
+      store.setIslandInspecting(true)
+      Task { [store] in
+        await store.refreshNativeUsageIfStale(maxAge: 5.0)
+      }
     } else if !inside, display.state != .compact {
       display.setState(.compact)
+      store.setIslandInspecting(false)
     }
   }
 
@@ -272,7 +277,13 @@ private struct IslandOverlayView: View {
       .frame(width: display.size.width, height: display.size.height)
       .contentShape(IslandSilhouette())
       .onTapGesture {
-        if display.state != .expanded { display.setState(.expanded) }
+        if display.state != .expanded {
+          display.setState(.expanded)
+          store.setIslandInspecting(true)
+          Task {
+            await store.refreshNativeUsageIfStale(maxAge: 3.0)
+          }
+        }
       }
       .animation(
         reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.82),
@@ -2248,6 +2259,11 @@ private struct IslandAccountQuotaTable: View {
     }
     .accessibilityElement(children: .contain)
     .accessibilityLabel(routerLocalized("All usage"))
+    .onAppear {
+      Task {
+        await store.refreshNativeUsageIfStale(maxAge: 5.0)
+      }
+    }
   }
 
   private var header: some View {

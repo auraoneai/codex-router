@@ -984,6 +984,23 @@ export function triggerEmergencyDepletionProbe() {
   });
 }
 
+let lastPostTurnProbeAt = 0;
+let postTurnProbeTimer = null;
+
+export function schedulePostTurnUsageProbe(delayMs = 15_000) {
+  const now = Date.now();
+  if (now - lastPostTurnProbeAt < 45_000) return; // 45s debounce
+  if (postTurnProbeTimer) clearTimeout(postTurnProbeTimer);
+  postTurnProbeTimer = setTimeout(async () => {
+    lastPostTurnProbeAt = Date.now();
+    try {
+      const { probeChatGPTAccountUsage } = await import("./chatgpt-usage-probe.mjs");
+      await probeChatGPTAccountUsage();
+    } catch {}
+  }, delayMs);
+  postTurnProbeTimer.unref?.();
+}
+
 // Per-account quota, as last probed. Read from disk rather than probed inline:
 // a probe spawns the Codex app-server, which must never sit in front of a turn.
 // A missing or stale cache simply means rotation ranks on order and cooldown
@@ -2228,7 +2245,7 @@ const chatgptUsageProbeTimer = setInterval(
       // Usage probing is best-effort; failures must never affect router health.
     }
   },
-  10 * 60_000, // Every 10 minutes
+  2 * 60_000, // Every 2 minutes
 );
 chatgptUsageProbeTimer.unref?.();
 
@@ -5966,6 +5983,9 @@ async function handleResponses(request, response, requestUrl) {
   } finally {
     const status = activityStatus ?? finalStatus ?? response.statusCode;
     activity.finish(status);
+    if (!route && status < 400) {
+      schedulePostTurnUsageProbe();
+    }
     // The first visible or reasoning delta -- the model actually saying
     // something, as opposed to the response headers arriving. HEAD's transform
     // exposes no separate first-frame timestamp, so only the semantic mark is
