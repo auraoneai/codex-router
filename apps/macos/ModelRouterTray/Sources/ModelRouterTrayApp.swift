@@ -1040,6 +1040,17 @@ final class RouterStore: ObservableObject {
   private var activityPolling = false
   private var accountUsagePolling = false
   private var providerPolling = false
+  @Published private(set) var isIslandInspecting = false
+  private var isRefreshingChatGptAccountUsage = false
+  private var isRefreshingAccountUsage = false
+  private var lastNativeUsageRefreshAt = Date.distantPast
+  private var usageDirectoryMonitorSource: DispatchSourceFileSystemObject?
+
+  func setIslandInspecting(_ inspecting: Bool) {
+    if isIslandInspecting != inspecting {
+      isIslandInspecting = inspecting
+    }
+  }
   private let defaults = UserDefaults.standard
   private let islandVisibilityKey = "ModelRouterTray.islandVisible"
   private let islandModeKey = "ModelRouterTray.islandMode"
@@ -2125,21 +2136,65 @@ final class RouterStore: ObservableObject {
     guard !accountUsagePolling else { return }
     accountUsagePolling = true
     defer { accountUsagePolling = false }
+    startMonitoringUsageDirectory()
+    await refreshNativeUsage()
     while !Task.isCancelled {
-      await refreshAccountUsage()
-      await refreshChatGptAccountUsage()
-      await refreshProviderUsage()
+      let isViewingIsland = (islandMode == .visible && isIslandInspecting)
+      let isBusy = (activityState != .idle || activeRequests.count > 0)
+      let sleepSeconds: UInt64 = (isViewingIsland || isBusy) ? 5 : 15
       do {
-        // Provider usage probes fan out across every configured account and can
-        // briefly consume a full core. Quotas do not need sub-minute polling.
-        try await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
+        try await Task.sleep(nanoseconds: sleepSeconds * 1_000_000_000)
       } catch {
         return
       }
+      await refreshNativeUsage()
     }
   }
 
+  func refreshNativeUsage() async {
+    lastNativeUsageRefreshAt = Date()
+    async let chatGpt: () = refreshChatGptAccountUsage()
+    async let account: () = refreshAccountUsage()
+    _ = await (chatGpt, account)
+  }
+
+  func refreshNativeUsageIfStale(maxAge: TimeInterval = 5.0) async {
+    guard Date().timeIntervalSince(lastNativeUsageRefreshAt) >= maxAge else { return }
+    await refreshNativeUsage()
+  }
+
+  private func startMonitoringUsageDirectory() {
+    stopMonitoringUsageDirectory()
+    let stateDir = RouterStateDirectory.resolve()
+    let fd = open(stateDir.path, O_EVTONLY)
+    guard fd >= 0 else { return }
+    let source = DispatchSource.makeFileSystemObjectSource(
+      fileDescriptor: fd,
+      eventMask: [.write, .extend, .attrib],
+      queue: DispatchQueue.global(qos: .utility)
+    )
+    source.setEventHandler { [weak self] in
+      Task { @MainActor [weak self] in
+        guard let self else { return }
+        await self.refreshChatGptAccountUsage()
+      }
+    }
+    source.setCancelHandler {
+      close(fd)
+    }
+    source.resume()
+    usageDirectoryMonitorSource = source
+  }
+
+  private func stopMonitoringUsageDirectory() {
+    usageDirectoryMonitorSource?.cancel()
+    usageDirectoryMonitorSource = nil
+  }
+
   func refreshAccountUsage() async {
+    guard !isRefreshingAccountUsage else { return }
+    isRefreshingAccountUsage = true
+    defer { isRefreshingAccountUsage = false }
     do {
       let output = try await runControl(arguments: ["account", "--json"])
       let nextUsage = try JSONDecoder().decode(CodexAccountUsage.self, from: output)
@@ -2157,6 +2212,9 @@ final class RouterStore: ObservableObject {
   /// ranks it; the bare `usage` form re-probes every account and is deliberately
   /// never called from the tray, on a timer or otherwise.
   func refreshChatGptAccountUsage() async {
+    guard !isRefreshingChatGptAccountUsage else { return }
+    isRefreshingChatGptAccountUsage = true
+    defer { isRefreshingChatGptAccountUsage = false }
     do {
       let output = try await runControl(arguments: ["chatgpt-account-pool", "usage", "cached"])
       let next = try JSONDecoder().decode(ChatGptAccountPoolUsage.self, from: output)
@@ -2218,8 +2276,13 @@ final class RouterStore: ObservableObject {
     guard !providerPolling else { return }
     providerPolling = true
     defer { providerPolling = false }
+    var ticks = 0
     while !Task.isCancelled {
       await refreshProviderSetup()
+      if ticks % 5 == 0 {
+        await refreshProviderUsage()
+      }
+      ticks += 1
       do {
         try await Task.sleep(nanoseconds: 60 * 1_000_000_000)
       } catch {
@@ -3436,11 +3499,18 @@ final class RouterStore: ObservableObject {
       // Publishing an identical value still invalidates every observed SwiftUI
       // tree (and schedules a widget snapshot), which made an open settings
       // panel visibly hitch while the router was idle.
+      let previousRequestCount = activeRequests.count
       if routerHealth != health { routerHealth = health }
       if activityState != health.activity.state { activityState = health.activity.state }
       if activeRequests != nextActiveRequests { activeRequests = nextActiveRequests }
       if activeRequestCount != nextActiveRequestCount {
         activeRequestCount = nextActiveRequestCount
+      }
+      if (previousActivityState == .generating && health.activity.state != .generating)
+          || (nextActiveRequestCount < previousRequestCount) {
+        Task { [weak self] in
+          await self?.refreshNativeUsageIfStale(maxAge: 2.0)
+        }
       }
       if activeModel != health.activity.model { activeModel = health.activity.model }
       let latestActiveRequest = nextActiveRequests.last
@@ -6317,7 +6387,8 @@ private struct TrayView: View {
       "architecture", "complex_coder", "debugger", "reviewer", "integrator",
       "general_coder", "test_author", "synthesizer",
     ]
-    let workers = roles.compactMap { role, value in
+    let workers = roles.compactMap { entry -> (role: String, model: String, effort: String)? in
+      let (role, value) = entry
       guard let candidate = value.candidates.first else { return nil }
       return (role: role, model: candidate.model, effort: candidate.effort)
     }
