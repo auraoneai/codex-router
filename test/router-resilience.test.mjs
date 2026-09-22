@@ -310,6 +310,9 @@ test("the execution deadline aborts before releasing the in-flight slot", async 
     request.once("close", () => {
       if (!request.complete) upstreamAborted = true;
     });
+    response.once("close", () => {
+      if (!response.writableEnded) upstreamAborted = true;
+    });
     await new Promise((resolve) => setTimeout(resolve, 1_000));
     if (!response.writableEnded) {
       response.writeHead(200, {

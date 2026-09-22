@@ -143,7 +143,7 @@ function parseRegisteredWorktrees(output) {
 
 function sameFilesystemPath(left, right) {
   const normalize = (value) => {
-    const resolved = path.resolve(value);
+    const resolved = realpathSync(path.resolve(value));
     return process.platform === "win32" ? resolved.toLocaleLowerCase("en-US") : resolved;
   };
   return normalize(left) === normalize(right);
