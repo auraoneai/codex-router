@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { createEvidencePacket } from "./evidence.mjs";
 import { evaluateEngineeringAcceptance } from "./evidence.mjs";
+import { redactVerificationArguments, redactVerificationCommand } from "./verification.mjs";
 
 const COMPOSITION_STATES = new Set(["verifying", "reviewing", "integrating"]);
 const TERMINAL_STATES = new Set(["accepted", "cancelled", "failed", "blocked"]);
@@ -47,6 +48,31 @@ function normalizeReviewResults(value) {
     throw new TypeError("Review results must be objects.");
   }
   return copy(results);
+}
+
+function persistedVerificationGates(gates) {
+  if (!Array.isArray(gates) || gates.length === 0) throw new Error("At least one deterministic verification gate is required.");
+  return gates.map((gate, index) => {
+    if (!gate || typeof gate !== "object" || Array.isArray(gate)) throw new TypeError(`Verification gate ${index} must be an object.`);
+    const allowed = new Set([
+      "id", "verificationId", "command", "args", "arguments", "cwd", "timeoutMs", "testCount",
+      "enabled", "skip", "notRunReason", "skipReason", "envRef",
+    ]);
+    const unknown = Object.keys(gate).find((key) => !allowed.has(key));
+    if (unknown) throw new Error(`Verification gate ${index} contains unsupported field ${unknown}.`);
+    if (gate.env !== undefined) throw new Error(`Verification gate ${index} must use envRef; inline environments cannot be persisted.`);
+    const args = gate.arguments ?? gate.args ?? [];
+    if (!Array.isArray(args) || args.some((item) => typeof item !== "string")) {
+      throw new TypeError(`Verification gate ${index} arguments must be strings.`);
+    }
+    if (redactVerificationCommand(gate.command) !== gate.command || !isDeepStrictEqual(redactVerificationArguments(args), args)) {
+      throw new Error(`Verification gate ${index} contains a secret-bearing command or argument; use envRef.`);
+    }
+    if (gate.envRef !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/u.test(gate.envRef)) {
+      throw new TypeError(`Verification gate ${index} envRef is invalid.`);
+    }
+    return copy(gate);
+  });
 }
 
 function hasPassingVerification(results) {
@@ -269,8 +295,7 @@ export class EngineeringRunController {
       if (!matchingWorkerRevision(task, sourceRevision)) {
         throw new Error(`Task ${taskId} worker result is not bound to ${sourceRevision}.`);
       }
-      const verificationGates = copy(options.verificationGates || []);
-      if (verificationGates.length === 0) throw new Error("At least one deterministic verification gate is required.");
+      const verificationGates = persistedVerificationGates(options.verificationGates || []);
       const requiredVerificationIds = options.requiredVerificationIds
         ? [...options.requiredVerificationIds]
         : verificationGates.map((gate) => gate.verificationId ?? gate.id);
@@ -610,13 +635,14 @@ export class EngineeringRunController {
     })) };
   }
 
-  async #advanceComposition(taskId, { mayExecutePending = true } = {}) {
+  async #advanceComposition(taskId, { mayExecutePending = true, reconcileRunning = false } = {}) {
     for (let transitions = 0; transitions < 12; transitions += 1) {
       let task = await this.state.getTask(taskId);
       if (!task?.composition || TERMINAL_STATES.has(task.state) || task.state === "needs_remediation") return task;
       if (task.composition.owner !== this.controllerId) return task;
       const stage = task.composition.stage;
       if (stage.endsWith("_running")) {
+        if (!reconcileRunning) return task;
         const observed = await this.#inspectRunningStage(task);
         if (observed.waiting) return observed.task;
         task = observed.task;
@@ -660,7 +686,7 @@ export class EngineeringRunController {
       }
       const current = await this.state.getTask(task.taskId);
       if (COMPOSITION_STATES.has(current.state) && current.composition?.owner === this.controllerId) {
-        outcomes.push(await this.#advanceComposition(current.taskId));
+        outcomes.push(await this.#advanceComposition(current.taskId, { reconcileRunning: true }));
       }
     }
     return outcomes;

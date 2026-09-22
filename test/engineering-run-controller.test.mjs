@@ -199,6 +199,18 @@ test("a stale source revision is rejected before any verification operation", as
   assert.equal(executions, 0);
 });
 
+test("controller refuses secret-bearing gate configuration before durable composition state", async () => {
+  const { state, controller } = await setup();
+  const running = await state.getTask("task-1");
+  await controller.recordWorkerResult("task-1", workerResult(running), { notify: false });
+  await assert.rejects(() => controller.finalizeTask("task-1", {
+    sourceRevision: "source-rev",
+    verificationGates: [{ id: "unit", command: "node", cwd: "/repo", args: ["--token", "literal-secret"] }],
+  }), /use envRef/u);
+  const recorded = await state.getTask("task-1");
+  assert.equal(recorded.composition, undefined);
+});
+
 test("durable scheduler state survives controller replacement with one incorporation acknowledgement", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "router-run-controller-"));
   const target = path.join(directory, "engineering-state.json");
