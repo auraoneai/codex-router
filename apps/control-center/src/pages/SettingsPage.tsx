@@ -180,10 +180,25 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
     }
     return bySlug;
   }, [engineering, models]);
+  const currentEngineeringRoutes = useMemo(() => new Set(
+    Object.values(engineering?.roles || {}).flatMap((role) => (
+      [...(role.candidates || []), ...(role.optionalCandidates || [])].map(({ model }) => model)
+    )),
+  ), [engineering]);
   const engineeringModelOptions = useMemo(
-    () => [...engineeringModels.values()].sort((left, right) => left.displayName.localeCompare(right.displayName)),
-    [engineeringModels],
+    () => [...engineeringModels.values()]
+      .filter((model) => currentEngineeringRoutes.has(model.slug) || (
+        model.enabled && model.available !== false && model.multiAgentVersion === "v2"
+      ))
+      .sort((left, right) => left.displayName.localeCompare(right.displayName)),
+    [currentEngineeringRoutes, engineeringModels],
   );
+  const engineeringLeadOptions = useMemo(() => {
+    const current = engineering?.lead?.model;
+    return [...engineeringModels.values()]
+      .filter((model) => model.slug === current || (model.native === true && model.enabled && model.available !== false))
+      .sort((left, right) => left.displayName.localeCompare(right.displayName));
+  }, [engineering, engineeringModels]);
   const candidateEfforts = (model: string, current: string | undefined) => {
     const advertised = engineeringModels.get(model)?.reasoningLevels || [];
     const supported = advertised.length ? advertised : ENGINEERING_EFFORTS.slice(1);
@@ -544,7 +559,7 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
                           <strong>{t("settings.engineering.lead.native")}</strong>
                           <div className="engineering-route-editor">
                             <select aria-label="Lead model" value={engineeringEditor.model} onChange={(event) => setEngineeringEditor({ ...engineeringEditor, model: event.target.value })}>
-                              {engineeringModelOptions.map((model) => <option key={model.slug} value={model.slug}>{model.displayName} · {model.slug}</option>)}
+                              {engineeringLeadOptions.map((model) => <option key={model.slug} value={model.slug}>{model.displayName} · {model.slug}</option>)}
                             </select>
                             <select aria-label="Lead effort" value={engineeringEditor.effort} onChange={(event) => setEngineeringEditor({ ...engineeringEditor, effort: event.target.value })}>
                               {candidateEfforts(engineeringEditor.model, engineeringEditor.effort).map((effort) => <option key={effort} value={effort}>{effort === "default" ? t("settings.engineering.effort.defaultOption") : effort}</option>)}
