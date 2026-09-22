@@ -185,6 +185,9 @@ export function createSpawnProcessRunner({
       const stderrState = { bytes: 0, truncated: false };
       let timer;
       let forceTimer;
+      let terminationStarted = false;
+      let forceCleanupFinished = false;
+      let closeOutcome;
       let child;
       try {
         child = spawnImpl(command, args, {
@@ -207,25 +210,28 @@ export function createSpawnProcessRunner({
         abortSignal?.removeEventListener?.("abort", abort);
         reject(error);
       });
-      child.once("close", (exitCode, signal) => {
-        if (settled) return;
+      const finishAfterCleanup = () => {
+        if (settled || !closeOutcome || (terminationStarted && !forceCleanupFinished)) return;
         settled = true;
         clearTimeout(timer);
-        clearTimeout(forceTimer);
         abortSignal?.removeEventListener?.("abort", abort);
         resolve({
-          exitCode: exitCode === null ? undefined : exitCode,
-          signal: signal || undefined,
+          exitCode: closeOutcome.exitCode === null ? undefined : closeOutcome.exitCode,
+          signal: closeOutcome.signal || undefined,
           timedOut,
           stdout: Buffer.concat(stdout).toString("utf8"),
           stderr: Buffer.concat(stderr).toString("utf8"),
           stdoutTruncated: stdoutState.truncated,
           stderrTruncated: stderrState.truncated,
         });
+      };
+      child.once("close", (exitCode, signal) => {
+        closeOutcome = { exitCode, signal };
+        finishAfterCleanup();
       });
-      const killTree = (signal) => {
+      const killTree = (signal, done = () => {}) => {
         if (process.platform === "win32" && child.pid) {
-          execFile("taskkill", ["/pid", String(child.pid), "/t", ...(signal === "SIGKILL" ? ["/f"] : [])], () => {});
+          execFile("taskkill", ["/pid", String(child.pid), "/t", ...(signal === "SIGKILL" ? ["/f"] : [])], () => done());
           return;
         }
         try {
@@ -234,12 +240,39 @@ export function createSpawnProcessRunner({
         } catch {
           child.kill(signal);
         }
+        if (signal !== "SIGKILL" || !child.pid) {
+          done();
+          return;
+        }
+        const deadline = Date.now() + 1_000;
+        const waitForProcessGroupExit = () => {
+          try {
+            process.kill(-child.pid, 0);
+          } catch (error) {
+            if (error?.code === "ESRCH") {
+              done();
+              return;
+            }
+          }
+          if (Date.now() >= deadline) {
+            done();
+            return;
+          }
+          setTimeout(waitForProcessGroupExit, 10);
+        };
+        waitForProcessGroupExit();
       };
       const terminate = (timeout) => {
-        if (settled) return;
+        if (settled || terminationStarted) return;
+        terminationStarted = true;
         if (timeout) timedOut = true;
         killTree("SIGTERM");
-        forceTimer = setTimeout(() => killTree("SIGKILL"), terminateGraceMs);
+        forceTimer = setTimeout(() => {
+          killTree("SIGKILL", () => {
+            forceCleanupFinished = true;
+            finishAfterCleanup();
+          });
+        }, terminateGraceMs);
         forceTimer.unref?.();
       };
       const abort = () => terminate(false);

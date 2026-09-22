@@ -7,6 +7,7 @@ import { redactVerificationArguments, redactVerificationCommand } from "./verifi
 
 const COMPOSITION_STATES = new Set(["verifying", "reviewing", "integrating"]);
 const TERMINAL_STATES = new Set(["accepted", "cancelled", "failed", "blocked"]);
+const MULTI_WORKER_STRATEGIES = new Set(["swarm", "pipeline", "arena"]);
 const MAX_PERSISTED_ERROR_BYTES = 2 * 1024;
 
 function copy(value) {
@@ -84,6 +85,20 @@ function matchingWorkerRevision(task, sourceRevision) {
   return task.workerResult?.resultRevision === sourceRevision
     || task.workerResult?.sourceRevision === sourceRevision
     || task.workerResult?.revision === sourceRevision;
+}
+
+function persistedStrategy(task) {
+  return task.strategy
+    ?? task.routingDecision?.strategy
+    ?? task.workflow?.strategy
+    ?? task.compiledWorkflow?.strategy;
+}
+
+function requiresIntegration(task, requested) {
+  return requested === true
+    || MULTI_WORKER_STRATEGIES.has(persistedStrategy(task))
+    || (Array.isArray(task.workerResults) && task.workerResults.length > 1)
+    || (Number.isSafeInteger(task.workerCount) && task.workerCount > 1);
 }
 
 /**
@@ -299,10 +314,10 @@ export class EngineeringRunController {
       const requiredVerificationIds = options.requiredVerificationIds
         ? [...options.requiredVerificationIds]
         : verificationGates.map((gate) => gate.verificationId ?? gate.id);
-      if (options.integrationRequired === true && !this.integrator) {
+      const integrationRequired = requiresIntegration(task, options.integrationRequired);
+      if (integrationRequired && !this.integrator) {
         throw new Error("Multi-worker composition requires an integrator before verification.");
       }
-      const integrationRequired = options.integrationRequired === true;
       return {
         state: integrationRequired ? "integrating" : "verifying",
         composition: {
@@ -669,6 +684,40 @@ export class EngineeringRunController {
       ?? task.workerResult?.sourceRevision;
     await this.#claimComposition(taskId, { ...options, sourceRevision });
     return this.#advanceComposition(taskId);
+  }
+
+  async retryComposition(taskId, options = {}) {
+    requiredText(taskId, "taskId");
+    return this.#update(taskId, (task) => {
+      if (task.state !== "needs_remediation" || !task.composition) {
+        throw new Error(`Task ${taskId} has no failed composition to retry.`);
+      }
+      if (task.composition.owner !== this.controllerId) {
+        throw new Error(`Task ${taskId} composition is owned by another controller.`);
+      }
+      const history = [...(task.compositionHistory || []), {
+        fence: task.composition.fence,
+        sourceRevision: task.composition.sourceRevision,
+        stage: task.composition.stage,
+        failure: copy(task.composition.failure),
+        archivedAt: this.clock(),
+      }].slice(-16);
+      return {
+        // Re-enter through a new fenced worker attempt. The durable lifecycle
+        // intentionally has no needs_remediation -> verifying shortcut.
+        state: "ready",
+        compositionHistory: history,
+        acceptance: undefined,
+        evidencePacket: undefined,
+        composition: undefined,
+        workerResult: undefined,
+        completedAttempt: undefined,
+        resultNotification: undefined,
+        resultAcknowledgement: undefined,
+        attemptLimit: Math.max(task.attemptLimit || 1, (task.attempt || 0) + 1),
+        remediationReason: safeError(options.reason || "composition remediation requested"),
+      };
+    });
   }
 
   async resume(runId) {

@@ -18,7 +18,7 @@ function clock() {
   return () => new Date(milliseconds++).toISOString();
 }
 
-async function setup({ verifier, reviewer, astraLead, notifier, runtimeOverrides = {} } = {}) {
+async function setup({ verifier, reviewer, astraLead, notifier, runtimeOverrides = {}, taskSpec = {} } = {}) {
   const state = createMemorySchedulerState();
   const dispatchObservations = [];
   const runtime = {
@@ -48,7 +48,7 @@ async function setup({ verifier, reviewer, astraLead, notifier, runtimeOverrides
     controllerId: "controller-stable",
     clock: clock(),
   });
-  await scheduler.registerTasks("run-1", [{ taskId: "task-1", writableScopes: ["src/owned"], attemptLimit: 1 }]);
+  await scheduler.registerTasks("run-1", [{ taskId: "task-1", writableScopes: ["src/owned"], attemptLimit: 1, ...taskSpec }]);
   await controller.dispatchReady("run-1");
   return { state, scheduler, controller, dispatchObservations };
 }
@@ -286,9 +286,9 @@ test("concurrent finalize calls claim each external phase only once", async () =
   assert.equal((await first).state, "accepted");
 });
 
-test("multi-worker composition integrates first and reruns gates and review on the integrated revision", async () => {
+test("persisted multi-worker strategy requires integration and reruns gates and review on the integrated revision", async () => {
   const observed = [];
-  const { state, scheduler } = await setup();
+  const { state, scheduler } = await setup({ taskSpec: { strategy: "swarm" } });
   const running = await state.getTask("task-1");
   const baseController = new EngineeringRunController({
     scheduler,
@@ -317,7 +317,6 @@ test("multi-worker composition integrates first and reruns gates and review on t
   await baseController.recordWorkerResult("task-1", workerResult(running), { notify: false });
   const accepted = await baseController.finalizeTask("task-1", {
     sourceRevision: "source-rev",
-    integrationRequired: true,
     verificationGates: [{ id: "unit", command: "node", cwd: "/repo" }],
   });
   assert.equal(accepted.state, "accepted");
@@ -327,4 +326,74 @@ test("multi-worker composition integrates first and reruns gates and review on t
     ["review", "integrated-rev"],
     ["lead", "integrated-rev"],
   ]);
+});
+
+test("failed composition can be remediated only through a new fenced worker attempt", async () => {
+  let fail = true;
+  const { state, controller } = await setup({
+    verifier: {
+      async runPlan() {
+        if (fail) throw new Error("transient verifier outage");
+        return [{ verificationId: "unit", sourceRevision: "source-rev-2", exitCode: 0, timedOut: false }];
+      },
+    },
+  });
+  let running = await state.getTask("task-1");
+  await controller.recordWorkerResult("task-1", workerResult(running), { notify: false });
+  const failed = await controller.finalizeTask("task-1", {
+    sourceRevision: "source-rev",
+    verificationGates: [{ id: "unit", command: "node", cwd: "/repo" }],
+  });
+  assert.equal(failed.state, "needs_remediation");
+  const ready = await controller.retryComposition("task-1", { reason: "retry after verifier repair" });
+  assert.equal(ready.state, "ready");
+  assert.equal(ready.composition, undefined);
+  assert.equal(ready.compositionHistory.length, 1);
+
+  fail = false;
+  await controller.dispatchReady("run-1");
+  running = await state.getTask("task-1");
+  assert.equal(running.attempt, 2);
+  await controller.recordWorkerResult("task-1", workerResult(running, { resultRevision: "source-rev-2" }), { notify: false });
+  const accepted = await controller.finalizeTask("task-1", {
+    sourceRevision: "source-rev-2",
+    verificationGates: [{ id: "unit", command: "node", cwd: "/repo" }],
+  });
+  assert.equal(accepted.state, "accepted");
+});
+
+test("durable lifecycle accepts needs-remediation requeue without a direct verification shortcut", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "router-remediation-"));
+  const target = path.join(directory, "engineering-state.json");
+  try {
+    const state = createDurableSchedulerState(target, { clock: clock() });
+    const runtime = {
+      async dispatch({ binding }) { return { state: "running", childId: `child-${binding.attemptId}` }; },
+      async inspect() { return { state: "running" }; },
+      async cancel() { return { state: "cancelled" }; },
+    };
+    const scheduler = new EngineeringScheduler({ state, runtime, idFactory: ids(), clock: clock() });
+    const controller = new EngineeringRunController({
+      scheduler,
+      state,
+      verifier: { async runPlan() { throw new Error("gate infrastructure failed"); } },
+      reviewer: async () => undefined,
+      astraLead: async () => undefined,
+      controllerId: "durable-remediator",
+      clock: clock(),
+    });
+    await scheduler.registerTasks("run", [{ taskId: "task", writableScopes: ["src/owned"] }]);
+    await controller.dispatchReady("run");
+    const running = await state.getTask("task");
+    await controller.recordWorkerResult("task", workerResult(running), { notify: false });
+    assert.equal((await controller.finalizeTask("task", {
+      sourceRevision: "source-rev",
+      verificationGates: [{ id: "unit", command: "node", cwd: "/repo" }],
+    })).state, "needs_remediation");
+    const ready = await controller.retryComposition("task");
+    assert.equal(ready.state, "ready");
+    assert.equal(ready.composition, undefined);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

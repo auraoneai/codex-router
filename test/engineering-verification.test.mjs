@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   DeterministicVerificationRunner,
   createGitSourceIdentityProvider,
+  createSpawnProcessRunner,
   redactVerificationArguments,
   VERIFICATION_IDENTITY_CHANGED_EXIT_CODE,
   VERIFICATION_NOT_RUN_EXIT_CODE,
@@ -206,4 +207,35 @@ test("post-command identity failures retain command evidence as a failed result"
     assert.equal(artifact.stdout, "command completed");
     assert.match(artifact.postIdentityError, /metadata removed/u);
   });
+});
+
+test("timeout cleanup terminates descendants that ignore SIGTERM", { skip: process.platform === "win32" }, async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "router-process-tree-"));
+  const pidFile = path.join(directory, "grandchild.pid");
+  let grandchildPid;
+  try {
+    const childProgram = [
+      "const { spawn } = require('node:child_process');",
+      "const { writeFileSync } = require('node:fs');",
+      `const grandchild = spawn(process.execPath, ['-e', ${JSON.stringify("process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);")}], { stdio: 'ignore' });`,
+      `writeFileSync(${JSON.stringify(pidFile)}, String(grandchild.pid));`,
+      "process.on('SIGTERM', () => process.exit(0));",
+      "setInterval(() => {}, 1000);",
+    ].join("\n");
+    const run = createSpawnProcessRunner({ terminateGraceMs: 50 });
+    const result = await run({
+      command: process.execPath,
+      arguments: ["-e", childProgram],
+      cwd: directory,
+      timeoutMs: 1_000,
+    });
+    assert.equal(result.timedOut, true);
+    grandchildPid = Number(await readFile(pidFile, "utf8"));
+    assert.throws(() => process.kill(grandchildPid, 0), { code: "ESRCH" });
+  } finally {
+    if (Number.isSafeInteger(grandchildPid)) {
+      try { process.kill(grandchildPid, "SIGKILL"); } catch {}
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
 });

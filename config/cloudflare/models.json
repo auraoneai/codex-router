@@ -40,7 +40,7 @@
       "provider": "cloudflare-workers-ai",
       "listed": true,
       "displayName": "GLM-5.3 (Cloudflare)",
-      "description": "GLM-5.3 through Cloudflare Workers AI, with a 1,048,576-token context window and low, medium, and high reasoning levels.",
+      "description": "GLM-5.3 through Cloudflare Workers AI, with a 1,310,720-token context window and low, medium, and high reasoning levels.",
       "priority": 22,
       "defaultEffort": "high",
       "reasoningLevels": [
@@ -48,7 +48,7 @@
         {"effort": "medium", "description": "Balanced reasoning for routine implementation"},
         {"effort": "high", "description": "Deep reasoning for complex work"}
       ],
-      "contextWindow": 1048576,
+      "contextWindow": 1310720,
       "autoCompact": 900000,
       "inputModalities": ["text"],
       "compHash": "cloudflare-workers-ai-glm-5-3-v1"

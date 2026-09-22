@@ -796,7 +796,7 @@ test("Cloudflare Workers AI publishes the documented GLM-5.3 routes", () => {
       {
         gatewayModel: "cloudflare-workers-ai-glm-5-3",
         upstreamModel: "@cf/zai-org/glm-5.3",
-        contextWindow: 1_048_576,
+        contextWindow: 1_310_720,
         inputModalities: ["text"],
       },
     ],
