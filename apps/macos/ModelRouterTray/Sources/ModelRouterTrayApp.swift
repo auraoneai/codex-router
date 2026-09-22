@@ -183,6 +183,7 @@ struct LocalModelOperation: Equatable {
 
 enum RouterToggleKey: Hashable {
   case provider(String)
+  case engineering
   case signedRouting
   case loginFree
   case toolResultAging
@@ -2523,6 +2524,10 @@ final class RouterStore: ObservableObject {
     optimisticToggles.value(for: .provider(provider), authoritative: authoritative)
   }
 
+  func engineeringEnabled(authoritative: Bool) -> Bool {
+    optimisticToggles.value(for: .engineering, authoritative: authoritative)
+  }
+
   func signedRoutingEnabled(authoritative: Bool) -> Bool {
     optimisticToggles.value(for: .signedRouting, authoritative: authoritative)
   }
@@ -2636,6 +2641,35 @@ final class RouterStore: ObservableObject {
         return enabled
           ? "Provider added. Restart Codex to refresh its model picker."
           : "Provider hidden. Restart Codex to refresh its model picker."
+      }
+    )
+  }
+
+  func setEngineering(_ enabled: Bool) {
+    guard let engineering = snapshot.engineering,
+      let revision = engineering.revision,
+      RouterEngineeringControlPolicy.canChange(to: enabled, snapshot: engineering)
+    else {
+      message = routerLocalized("Engineering routing status is unavailable or needs repair.")
+      return
+    }
+    queueOptimisticToggle(
+      .engineering,
+      value: enabled,
+      label: "engineering",
+      run: { [weak self] enabled in
+        guard let self else { return }
+        _ = try await self.runControl(
+          arguments: RouterEngineeringControlPolicy.arguments(
+            enabled: enabled,
+            revision: revision
+          )
+        )
+      },
+      success: { enabled in
+        enabled
+          ? routerLocalized("Engineering routing enabled for new engineering runs.")
+          : routerLocalized("Engineering routing disabled for new engineering runs.")
       }
     )
   }
@@ -4428,6 +4462,11 @@ struct RouterSnapshot: Decodable {
   // Metadata-only route summary. Older routers omit it and the tray falls
   // back to the target snapshot below.
   let dashboard: RouterDashboardSnapshot?
+  // Engineering orchestration was added after the tray snapshot contract.
+  // It lives under `catalog` and remains optional so a newly updated tray can
+  // still inspect and repair an older installed Router without losing the
+  // rest of its status UI.
+  let engineering: RouterEngineeringSnapshot?
   // Absent from an older router's output, so the tray keeps working against one
   // rather than failing the whole decode over a field it gained later.
   let presence: RouterPresence?
@@ -4459,11 +4498,13 @@ struct RouterSnapshot: Decodable {
     } catch {
       chatgptSession = nil
     }
+    let catalog = try? values.decodeIfPresent(RouterDashboardCatalogEnvelope.self, forKey: .catalog)
     if let directDashboard = try values.decodeIfPresent(RouterDashboardSnapshot.self, forKey: .dashboard) {
       dashboard = directDashboard
     } else {
-      dashboard = try values.decodeIfPresent(RouterDashboardCatalogEnvelope.self, forKey: .catalog)?.dashboard
+      dashboard = catalog?.dashboard
     }
+    engineering = catalog?.engineering
   }
 
   init(
@@ -4471,10 +4512,12 @@ struct RouterSnapshot: Decodable {
     presence: RouterPresence?,
     harness: RouterHarness?,
     chatgptSession: ChatGptSessionStatus?,
-    dashboard: RouterDashboardSnapshot? = nil
+    dashboard: RouterDashboardSnapshot? = nil,
+    engineering: RouterEngineeringSnapshot? = nil
   ) {
     self.targets = targets
     self.dashboard = dashboard
+    self.engineering = engineering
     self.presence = presence
     self.harness = harness
     self.chatgptSession = chatgptSession
@@ -4485,7 +4528,8 @@ struct RouterSnapshot: Decodable {
     presence: nil,
     harness: nil,
     chatgptSession: nil,
-    dashboard: nil
+    dashboard: nil,
+    engineering: nil
   )
 }
 
@@ -4497,6 +4541,86 @@ struct RouterDashboardSnapshot: Decodable {
 
 private struct RouterDashboardCatalogEnvelope: Decodable {
   let dashboard: RouterDashboardSnapshot?
+  let engineering: RouterEngineeringSnapshot?
+
+  private enum CodingKeys: String, CodingKey {
+    case dashboard
+    case engineering
+  }
+
+  init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    dashboard = try values.decodeIfPresent(RouterDashboardSnapshot.self, forKey: .dashboard)
+    do {
+      engineering = try values.decodeIfPresent(RouterEngineeringSnapshot.self, forKey: .engineering)
+    } catch {
+      // Future or malformed engineering metadata must not take the whole tray
+      // offline. Nil is the fail-closed state: the switch is visible but
+      // disabled until a snapshot with a contract this app understands lands.
+      engineering = nil
+    }
+  }
+}
+
+struct RouterEngineeringCandidateSnapshot: Decodable, Equatable {
+  let model: String
+  let effort: String
+}
+
+struct RouterEngineeringRoleSnapshot: Decodable, Equatable {
+  let candidates: [RouterEngineeringCandidateSnapshot]
+  let optionalCandidates: [RouterEngineeringCandidateSnapshot]
+
+  private enum CodingKeys: String, CodingKey {
+    case candidates
+    case optionalCandidates
+  }
+
+  init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    candidates = try values.decode([RouterEngineeringCandidateSnapshot].self, forKey: .candidates)
+    optionalCandidates = try values.decodeIfPresent(
+      [RouterEngineeringCandidateSnapshot].self,
+      forKey: .optionalCandidates
+    ) ?? []
+  }
+}
+
+struct RouterEngineeringSnapshot: Decodable, Equatable {
+  let version: Int
+  let revision: Int?
+  let status: String
+  let fresh: Bool
+  let configured: Bool
+  let enabled: Bool
+  let healthy: Bool
+  let degraded: Bool
+  let activePreset: String
+  let roles: [String: RouterEngineeringRoleSnapshot]
+  let updatedAt: String?
+}
+
+enum RouterEngineeringControlPolicy {
+  private static let mutableStatuses = Set(["default", "ok"])
+
+  static func canChange(to enabled: Bool, snapshot: RouterEngineeringSnapshot?) -> Bool {
+    guard let snapshot,
+      snapshot.version == 1,
+      snapshot.fresh,
+      !snapshot.degraded,
+      mutableStatuses.contains(snapshot.status),
+      let revision = snapshot.revision,
+      revision >= 0
+    else { return false }
+    // A known unhealthy policy can always be turned off. Enabling it would
+    // advertise automatic routing even though its current routes cannot pass
+    // the controller's health gate.
+    return !enabled || snapshot.healthy
+  }
+
+  static func arguments(enabled: Bool, revision: Int) -> [String] {
+    ["engineering", enabled ? "on" : "off", "--revision", String(revision)]
+  }
 }
 
 struct RouterDashboardProvider: Decodable, Identifiable {
@@ -6164,6 +6288,51 @@ private struct TrayView: View {
     return "\(sharing) · \(login)"
   }
 
+  private var engineeringEnabled: Bool {
+    store.engineeringEnabled(authoritative: store.snapshot.engineering?.enabled ?? false)
+  }
+
+  private var engineeringDetail: String {
+    guard let engineering = store.snapshot.engineering else {
+      return routerLocalized("Unavailable from this Router version")
+    }
+    if engineering.degraded {
+      return routerFormat("Preset %@ · policy needs repair", engineering.activePreset)
+    }
+    guard engineering.fresh, ["default", "ok"].contains(engineering.status) else {
+      return routerFormat("Preset %@ · status unavailable", engineering.activePreset)
+    }
+    return routerFormat(
+      "Preset %@ · %@",
+      engineering.activePreset,
+      routerLocalized(engineering.healthy ? "healthy" : "needs attention")
+    )
+  }
+
+  private var engineeringPreviewRows: [(role: String, model: String, effort: String)] {
+    guard let roles = store.snapshot.engineering?.roles else { return [] }
+    let priority = [
+      "architecture", "complex_coder", "debugger", "reviewer", "integrator",
+      "general_coder", "test_author", "synthesizer",
+    ]
+    return roles.compactMap { role, value in
+      guard let candidate = value.candidates.first else { return nil }
+      return (role: role, model: candidate.model, effort: candidate.effort)
+    }
+    .sorted { lhs, rhs in
+      let left = priority.firstIndex(of: lhs.role) ?? priority.count
+      let right = priority.firstIndex(of: rhs.role) ?? priority.count
+      if left != right { return left < right }
+      return lhs.role < rhs.role
+    }
+    .prefix(4)
+    .map { $0 }
+  }
+
+  private func engineeringRoleLabel(_ role: String) -> String {
+    role.replacingOccurrences(of: "_", with: " ").capitalized
+  }
+
   var body: some View {
     ZStack {
       VisualEffectBlur()
@@ -6947,6 +7116,45 @@ private struct TrayView: View {
       ),
       isDisabled: store.loginFreeEnabled(authoritative: store.loginFree)
     )
+    settingRow(
+      title: routerLocalized("Engineering router"),
+      detail: engineeringDetail,
+      isOn: Binding(
+        get: { engineeringEnabled },
+        set: { store.setEngineering($0) }
+      ),
+      isDisabled: !RouterEngineeringControlPolicy.canChange(
+        to: !engineeringEnabled,
+        snapshot: store.snapshot.engineering
+      )
+    )
+    if !engineeringPreviewRows.isEmpty {
+      VStack(alignment: .leading, spacing: 4) {
+        ForEach(Array(engineeringPreviewRows.enumerated()), id: \.offset) { _, row in
+          HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(engineeringRoleLabel(row.role))
+              .font(.system(size: 8, weight: .semibold))
+              .foregroundStyle(routerMutedStrong)
+              .frame(width: 76, alignment: .leading)
+            Text(row.model)
+              .font(.system(size: 8, design: .monospaced))
+              .foregroundStyle(routerMuted)
+              .lineLimit(1)
+              .truncationMode(.middle)
+            Spacer(minLength: 4)
+            Text(routerFormat("effort %@", row.effort))
+              .font(.system(size: 8, weight: .medium, design: .monospaced))
+              .foregroundStyle(routerMutedStrong)
+          }
+        }
+      }
+      .padding(.horizontal, 8)
+      .padding(.vertical, 6)
+      .background(
+        Color.primary.opacity(0.035),
+        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+      )
+    }
     settingRow(
       title: routerLocalized("Share ChatGPT subscription"),
       detail: chatGptSessionDetail,

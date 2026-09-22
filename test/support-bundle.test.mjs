@@ -50,6 +50,7 @@ writeFileSync(
 
 const {
   createSupportBundle,
+  engineeringSupportSnapshot,
   gitCommitForSourceRoot,
   redactSupportBundleObjectForTests,
 } = await import("../src/support-bundle.mjs");
@@ -130,6 +131,39 @@ test("support bundle structurally redacts even one-character secrets", () => {
       credentialSources: { deepseek: { configured: true } },
     },
   );
+});
+
+test("engineering support projection never copies policy, task, evidence, or artifact contents", () => {
+  const stateDir = process.env.CODEX_ROUTER_STATE_DIR;
+  const policyPath = path.join(stateDir, "engineering-policy.json");
+  const runtimeRoot = path.join(stateDir, "engineering");
+  const sentinel = "ENGINEERING_PRIVATE_CONTENT_MUST_NOT_APPEAR";
+  mkdirSync(path.join(runtimeRoot, "artifacts", "run-1"), { recursive: true, mode: 0o700 });
+  writeFileSync(
+    path.join(runtimeRoot, "artifacts", "run-1", "evidence.json"),
+    `${JSON.stringify({ prompt: sentinel, response: sentinel })}\n`,
+    { mode: 0o600 },
+  );
+  writeFileSync(
+    policyPath,
+    `${JSON.stringify({ version: 1, revision: 1, updatedAt: new Date().toISOString(), policy: { secret: sentinel } })}\n`,
+    { mode: 0o600 },
+  );
+  try {
+    const snapshot = engineeringSupportSnapshot();
+    const serialized = JSON.stringify(snapshot);
+    assert.equal(snapshot.degraded, true);
+    assert.equal(snapshot.enabled, false);
+    assert.deepEqual(snapshot.runtimeState, { exists: true, mode: "700" });
+    assert.doesNotMatch(serialized, new RegExp(sentinel));
+    assert.equal("policy" in snapshot, false);
+    assert.equal("tasks" in snapshot, false);
+    assert.equal("evidence" in snapshot, false);
+    assert.equal("artifacts" in snapshot, false);
+  } finally {
+    rmSync(policyPath, { force: true });
+    rmSync(runtimeRoot, { recursive: true, force: true });
+  }
 });
 
 test("support bundle reports credential presence without including values", async () => {

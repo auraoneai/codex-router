@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "providers": [],
+  "models": [],
+  "schemaVersion": 1,
+  "enabled": false,
+  "activePreset": "balanced",
+  "lead": { "executionMode": "native-parent", "model": "gpt-6-astra", "effort": "default" },
+  "deepSeekRecovery": [
+    { "model": "cloudflare-workers-ai/glm-5.3", "effort": "high" },
+    { "model": "kiro-prism/gpt-5.6-sol", "effort": "high" },
+    { "model": "kiro-prism/claude-sonnet-5", "effort": "high" }
+  ],
+  "enabledOptionalModels": [],
+  "operatorModelDefaults": {},
+  "workspace": { "roles": {} },
+  "presets": {
+    "fast": {
+      "roles": {
+        "architecture": { "candidates": [{ "model": "kiro-prism/gpt-5.6-sol", "effort": "high" }, { "model": "kiro-prism/claude-opus-5", "effort": "high" }] },
+        "fast_general_worker": { "candidates": [{ "model": "openrouter/gemini-3.8-flash", "effort": "low" }, { "model": "cloudflare-workers-ai/glm-5.3-flash", "effort": "default" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "low" }] },
+        "repo_explorer": { "candidates": [{ "model": "openrouter/gemini-3.8-flash", "effort": "low" }, { "model": "cloudflare-workers-ai/glm-5.3-flash", "effort": "default" }] },
+        "mechanical_worker": { "candidates": [{ "model": "cloudflare-workers-ai/glm-5.3-flash", "effort": "default" }, { "model": "openrouter/gemini-3.8-flash", "effort": "low" }] },
+        "general_coder": { "candidates": [{ "model": "openrouter/gemini-3.8-flash", "effort": "medium" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "medium" }, { "model": "kiro-prism/gpt-5.6-luna", "effort": "medium" }] },
+        "complex_coder": { "candidates": [{ "model": "kiro-prism/claude-sonnet-5", "effort": "high" }, { "model": "kiro-prism/gpt-5.6-sol", "effort": "high" }, { "model": "cloudflare-workers-ai/glm-5.3", "effort": "high" }], "optionalCandidates": [{ "model": "kiro-prism/kimi-k3", "effort": "high" }] },
+        "debugger": { "candidates": [{ "model": "kiro-prism/deepseek-v4.1-flash", "effort": "high", "capacityHost": "modal" }, { "model": "cloudflare-workers-ai/glm-5.3", "effort": "high" }, { "model": "kiro-prism/gpt-5.6-sol", "effort": "high" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "high" }], "capacityFailurePolicy": "deepseek-non-modal-fallback" },
+        "test_author": { "candidates": [{ "model": "openrouter/gemini-3.8-flash", "effort": "medium" }, { "model": "cloudflare-workers-ai/glm-5.3", "effort": "high" }], "optionalCandidates": [{ "model": "kiro-prism/deepseek-v4.1-flash", "effort": "high", "capacityHost": "modal" }], "capacityFailurePolicy": "deepseek-non-modal-fallback" },
+        "reviewer": { "candidates": [{ "model": "kiro-prism/gpt-5.6-sol", "effort": "high" }, { "model": "kiro-prism/claude-opus-5", "effort": "high" }, { "model": "cloudflare-workers-ai/glm-5.3", "effort": "high" }], "optionalCandidates": [{ "model": "kiro-prism/kimi-k3", "effort": "high" }], "requireDifferentFamilyFromAuthor": true },
+        "integrator": { "candidates": [{ "model": "kiro-prism/gpt-5.6-sol", "effort": "high" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "high" }] },
+        "deputy_lead": { "candidates": [{ "model": "kiro-prism/gpt-5.6-sol", "effort": "high" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "high" }] },
+        "prose_docs": { "candidates": [{ "model": "openrouter/gemini-3.8-flash", "effort": "low" }, { "model": "cloudflare-workers-ai/glm-5.3-flash", "effort": "default" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "low" }] },
+        "synthesizer": { "candidates": [{ "model": "openrouter/gemini-3.8-flash", "effort": "medium" }, { "model": "cloudflare-workers-ai/glm-5.3-flash", "effort": "default" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "medium" }] }
+      }
+    },
+    "balanced": {
+      "roles": {
+        "architecture": { "candidates": [{ "model": "kiro-prism/gpt-5.6-sol", "effort": "high" }, { "model": "kiro-prism/claude-opus-5", "effort": "max" }] },
+        "fast_general_worker": { "candidates": [{ "model": "openrouter/gemini-3.8-flash", "effort": "medium" }, { "model": "cloudflare-workers-ai/glm-5.3-flash", "effort": "default" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "medium" }] },
+        "repo_explorer": { "candidates": [{ "model": "openrouter/gemini-3.8-flash", "effort": "medium" }, { "model": "cloudflare-workers-ai/glm-5.3-flash", "effort": "default" }] },
+        "mechanical_worker": { "candidates": [{ "model": "cloudflare-workers-ai/glm-5.3-flash", "effort": "default" }, { "model": "openrouter/gemini-3.8-flash", "effort": "medium" }] },
+        "general_coder": { "candidates": [{ "model": "openrouter/gemini-3.8-flash", "effort": "high" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "high" }, { "model": "kiro-prism/gpt-5.6-luna", "effort": "high" }] },
+        "complex_coder": { "candidates": [{ "model": "kiro-prism/claude-sonnet-5", "effort": "high" }, { "model": "kiro-prism/gpt-5.6-sol", "effort": "high" }, { "model": "cloudflare-workers-ai/glm-5.3", "effort": "high" }], "optionalCandidates": [{ "model": "kiro-prism/kimi-k3", "effort": "high" }] },
+        "debugger": { "candidates": [{ "model": "kiro-prism/deepseek-v4.1-flash", "effort": "high", "capacityHost": "modal" }, { "model": "cloudflare-workers-ai/glm-5.3", "effort": "high" }, { "model": "kiro-prism/gpt-5.6-sol", "effort": "high" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "high" }], "capacityFailurePolicy": "deepseek-non-modal-fallback" },
+        "test_author": { "candidates": [{ "model": "openrouter/gemini-3.8-flash", "effort": "high" }, { "model": "cloudflare-workers-ai/glm-5.3", "effort": "high" }], "optionalCandidates": [{ "model": "kiro-prism/deepseek-v4.1-flash", "effort": "high", "capacityHost": "modal" }], "capacityFailurePolicy": "deepseek-non-modal-fallback" },
+        "reviewer": { "candidates": [{ "model": "kiro-prism/gpt-5.6-sol", "effort": "high" }, { "model": "kiro-prism/claude-opus-5", "effort": "max" }, { "model": "cloudflare-workers-ai/glm-5.3", "effort": "high" }], "optionalCandidates": [{ "model": "kiro-prism/kimi-k3", "effort": "high" }], "requireDifferentFamilyFromAuthor": true },
+        "integrator": { "candidates": [{ "model": "kiro-prism/gpt-5.6-sol", "effort": "high" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "high" }] },
+        "deputy_lead": { "candidates": [{ "model": "kiro-prism/gpt-5.6-sol", "effort": "high" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "high" }] },
+        "prose_docs": { "candidates": [{ "model": "openrouter/gemini-3.8-flash", "effort": "medium" }, { "model": "cloudflare-workers-ai/glm-5.3-flash", "effort": "default" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "medium" }] },
+        "synthesizer": { "candidates": [{ "model": "openrouter/gemini-3.8-flash", "effort": "high" }, { "model": "cloudflare-workers-ai/glm-5.3-flash", "effort": "default" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "high" }] }
+      }
+    },
+    "deep-review": {
+      "roles": {
+        "architecture": { "candidates": [{ "model": "kiro-prism/claude-opus-5", "effort": "max" }, { "model": "kiro-prism/gpt-5.6-sol", "effort": "max" }] },
+        "fast_general_worker": { "candidates": [{ "model": "openrouter/gemini-3.8-flash", "effort": "high" }, { "model": "cloudflare-workers-ai/glm-5.3-flash", "effort": "default" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "high" }] },
+        "repo_explorer": { "candidates": [{ "model": "openrouter/gemini-3.8-flash", "effort": "high" }, { "model": "cloudflare-workers-ai/glm-5.3-flash", "effort": "default" }] },
+        "mechanical_worker": { "candidates": [{ "model": "cloudflare-workers-ai/glm-5.3-flash", "effort": "default" }, { "model": "openrouter/gemini-3.8-flash", "effort": "high" }] },
+        "general_coder": { "candidates": [{ "model": "openrouter/gemini-3.8-flash", "effort": "high" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "max" }, { "model": "kiro-prism/gpt-5.6-luna", "effort": "max" }] },
+        "complex_coder": { "candidates": [{ "model": "kiro-prism/claude-sonnet-5", "effort": "max" }, { "model": "kiro-prism/gpt-5.6-sol", "effort": "max" }, { "model": "cloudflare-workers-ai/glm-5.3", "effort": "high" }], "optionalCandidates": [{ "model": "kiro-prism/kimi-k3", "effort": "high" }] },
+        "debugger": { "candidates": [{ "model": "kiro-prism/deepseek-v4.1-flash", "effort": "high", "capacityHost": "modal" }, { "model": "cloudflare-workers-ai/glm-5.3", "effort": "high" }, { "model": "kiro-prism/gpt-5.6-sol", "effort": "max" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "max" }], "capacityFailurePolicy": "deepseek-non-modal-fallback" },
+        "test_author": { "candidates": [{ "model": "openrouter/gemini-3.8-flash", "effort": "high" }, { "model": "cloudflare-workers-ai/glm-5.3", "effort": "high" }], "optionalCandidates": [{ "model": "kiro-prism/deepseek-v4.1-flash", "effort": "high", "capacityHost": "modal" }], "capacityFailurePolicy": "deepseek-non-modal-fallback" },
+        "reviewer": { "candidates": [{ "model": "kiro-prism/claude-opus-5", "effort": "max" }, { "model": "kiro-prism/gpt-5.6-sol", "effort": "max" }, { "model": "cloudflare-workers-ai/glm-5.3", "effort": "high" }], "optionalCandidates": [{ "model": "kiro-prism/kimi-k3", "effort": "high" }], "requireDifferentFamilyFromAuthor": true },
+        "integrator": { "candidates": [{ "model": "kiro-prism/gpt-5.6-sol", "effort": "max" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "max" }] },
+        "deputy_lead": { "candidates": [{ "model": "kiro-prism/gpt-5.6-sol", "effort": "max" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "max" }] },
+        "prose_docs": { "candidates": [{ "model": "openrouter/gemini-3.8-flash", "effort": "high" }, { "model": "cloudflare-workers-ai/glm-5.3-flash", "effort": "default" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "high" }] },
+        "synthesizer": { "candidates": [{ "model": "openrouter/gemini-3.8-flash", "effort": "high" }, { "model": "cloudflare-workers-ai/glm-5.3-flash", "effort": "default" }, { "model": "kiro-prism/claude-sonnet-5", "effort": "high" }] }
+      }
+    }
+  }
+}

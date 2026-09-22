@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 
 import { redactCallerUrl, validCallerSecret } from "./caller-auth.mjs";
@@ -58,6 +58,7 @@ import {
   PORTS,
   SEARCH_SIDECARS_PATH,
   SOURCE_ROOT,
+  STATE_DIR,
   TARGET,
 } from "./paths.mjs";
 import { CODEX_APP_TOOLS } from "./codex-app-tools.mjs";
@@ -109,6 +110,11 @@ import {
 import { retentionTtlMs } from "./tool-result-aging-state.mjs";
 import { loopbackProxyBypassStatus } from "./loopback-proxy-bypass.mjs";
 import { serviceProxyOptInProblem } from "./proxy-environment.mjs";
+import {
+  ENGINEERING_POLICY_DEFAULTS_PATH,
+  engineeringPolicyStatePath,
+  readEngineeringPolicyState,
+} from "./engineering/policy-state.mjs";
 
 const checks = [];
 const add = (status, name, detail, fix) => checks.push({ status, name, detail, fix });
@@ -206,6 +212,68 @@ function childJson(script, args = []) {
       stdio: ["ignore", "pipe", "ignore"],
     }),
   );
+}
+
+function protectedEngineeringRuntimeState(root = path.join(STATE_DIR, "engineering")) {
+  if (!existsSync(root)) return { ok: true, detail: "runtime state has not been created yet" };
+  const pending = [root];
+  let inspected = 0;
+  while (pending.length > 0) {
+    const target = pending.pop();
+    const metadata = lstatSync(target);
+    inspected += 1;
+    if (inspected > 10_000) {
+      return { ok: false, detail: "runtime state contains more than 10,000 entries" };
+    }
+    if (metadata.isSymbolicLink()) {
+      return { ok: false, detail: `${target} is a symbolic link` };
+    }
+    if (process.platform !== "win32" && (metadata.mode & 0o077) !== 0) {
+      return { ok: false, detail: `${target} is accessible by another user` };
+    }
+    if (metadata.isDirectory()) {
+      for (const entry of readdirSync(target)) pending.push(path.join(target, entry));
+    } else if (metadata.isFile()) {
+      if (!privateFileIsProtected(target)) {
+        return { ok: false, detail: `${target} is not protected as private state` };
+      }
+    } else {
+      return { ok: false, detail: `${target} is not a regular file or directory` };
+    }
+  }
+  return { ok: true, detail: `${inspected} protected runtime-state entries` };
+}
+
+function codexAppServerStatus(binary) {
+  if (!binary) return { ok: false, detail: "Codex binary is unavailable" };
+  try {
+    const target = spawnableCommand(binary, ["app-server", "--help"]);
+    const result = spawnSync(target.command, target.args, {
+      ...target.options,
+      encoding: "utf8",
+      timeout: 10_000,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if (result.error) return { ok: false, detail: result.error.message };
+    if (result.status !== 0) {
+      const detail = `${result.stderr || result.stdout || "unsupported"}`.trim();
+      return { ok: false, detail: detail || `Codex exited with ${result.status}` };
+    }
+    return { ok: true, detail: "Codex app-server lifecycle adapter is available" };
+  } catch (error) {
+    return { ok: false, detail: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function dormantCheckedInEngineeringDefault(engineering) {
+  if (!engineering.degraded || existsSync(engineeringPolicyStatePath())) return false;
+  try {
+    const defaults = JSON.parse(readFileSync(ENGINEERING_POLICY_DEFAULTS_PATH, "utf8"));
+    return defaults?.schemaVersion === 1 && defaults?.enabled === false;
+  } catch {
+    return false;
+  }
 }
 
 function repair() {
@@ -1727,6 +1795,113 @@ if (codexTarget) {
       : `skill shapes drifted from the snapshot: ${drift.join("; ")}`,
     "co-revise the skill pack together with src/codex-app-tools.mjs",
   );
+}
+
+// Engineering orchestration is deliberately dormant unless its private policy
+// enables it. A disabled, schema-valid default is healthy and must not turn an
+// ordinary Codex Router installation yellow. Once enabled, every dependency
+// that can make a dispatch unsafe becomes a hard diagnostic: the complete
+// route/effort policy, the non-Modal DeepSeek recovery chain, private runtime
+// state, the exact managed skill, and Codex's app-server lifecycle surface.
+if (codexTarget) {
+  const engineering = readEngineeringPolicyState();
+  if (dormantCheckedInEngineeringDefault(engineering)) {
+    add(
+      "ok",
+      "Engineering orchestration",
+      "off; the checked-in opt-in default has no runtime route requirements",
+      "Enable it explicitly through the engineering policy controls when needed; enabled policy validates every route and effort.",
+    );
+  } else if (engineering.degraded) {
+    add(
+      "fail",
+      "Engineering orchestration policy",
+      engineering.error || "the policy could not be validated",
+      "Repair the private engineering policy or remove it to return to the checked-in disabled default; doctor --fix never rewrites policy.",
+    );
+  } else if (!engineering.enabled) {
+    add(
+      "ok",
+      "Engineering orchestration",
+      engineering.revision === 0
+        ? "off; checked-in defaults are schema-valid and remain opt-in"
+        : `off by private policy revision ${engineering.revision}`,
+      "Enable it explicitly through the engineering policy controls when needed.",
+    );
+  } else {
+    const policy = engineering.policy;
+    const preset = policy.presets[policy.activePreset];
+    const roles = Object.values(preset.roles);
+    const configuredCandidates = roles.flatMap((role) => [
+      ...(role.candidates || []),
+      ...(role.optionalCandidates || []),
+    ]);
+    const exactRoutes = new Set(configuredCandidates.map((candidate) => candidate.model));
+    const explicitEfforts = new Set(
+      configuredCandidates
+        .map((candidate) => candidate.effort)
+        .filter((effort) => effort && effort !== "default"),
+    );
+    add(
+      "ok",
+      "Engineering orchestration policy",
+      `enabled at revision ${engineering.revision}; preset ${policy.activePreset}`,
+      "Edit policy through the engineering policy controls; doctor --fix does not change it.",
+    );
+    add(
+      "ok",
+      "Engineering routes and efforts",
+      `${roles.length} roles, ${exactRoutes.size} exact route(s), ${explicitEfforts.size} explicit effort level(s); all validated against the routable catalog`,
+      "Choose only exact listed routes and efforts advertised by those routes.",
+    );
+
+    const recovery = policy.deepSeekRecovery || [];
+    const modalRecovery = recovery.filter((candidate) => {
+      const model = MODEL_BY_SLUG.get(candidate.model);
+      return `${candidate.capacityHost || model?.provider || ""}`.toLowerCase().includes("modal");
+    });
+    add(
+      recovery.length > 0 && modalRecovery.length === 0 ? "ok" : "fail",
+      "Engineering DeepSeek recovery",
+      recovery.length === 0
+        ? "no capacity fallback is configured"
+        : modalRecovery.length > 0
+          ? `Modal recovery routes are not allowed: ${modalRecovery.map((candidate) => candidate.model).join(", ")}`
+          : `non-Modal recovery order: ${recovery.map((candidate) => candidate.model).join(" -> ")}`,
+      "Configure a later healthy route outside Modal, followed by Sol and Sonnet recovery as available.",
+    );
+
+    const policyPath = engineeringPolicyStatePath();
+    const policyProtected = existsSync(policyPath) && privateFileIsProtected(policyPath);
+    const runtimeState = protectedEngineeringRuntimeState();
+    add(
+      policyProtected && runtimeState.ok ? "ok" : "fail",
+      "Engineering state privacy",
+      !policyProtected
+        ? `${policyPath} is missing or not owner-only`
+        : runtimeState.detail,
+      "Protect engineering policy, state, evidence, and artifact files as owner-only; doctor --fix will not replace their contents.",
+    );
+
+    const skillStatus = skillPackStatus(CODEX_HOME);
+    const managedEngineeringSkill = skillStatus.managed.includes("codex-engineering-orchestrator");
+    add(
+      managedEngineeringSkill ? "ok" : "fail",
+      "Engineering orchestration skill",
+      managedEngineeringSkill
+        ? "codex-engineering-orchestrator is installed and verified as router-owned"
+        : "codex-engineering-orchestrator is not installed as a verified router-owned skill",
+      "Run ./bin/install to refresh marker-owned skills without changing engineering policy or evidence.",
+    );
+
+    const appServer = codexAppServerStatus(codex);
+    add(
+      appServer.ok ? "ok" : "fail",
+      "Engineering executor",
+      appServer.detail,
+      "Install a Codex build with app-server support, then rerun doctor.",
+    );
+  }
 }
 
 if (codex && catalogOk && routedTransportActive && credentialDiscoveryOff) {

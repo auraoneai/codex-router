@@ -649,6 +649,19 @@ export function injectSessionModelForSpawnCalls(item, model) {
   if (typeof args !== "object" || args === null || Array.isArray(args)) return item;
   if (args.model !== undefined && !isSubagentSpawnCall(item)) return item;
   if (args.target?.type === "chatgptWorkCloud") return item;
+  // Current Codex collaboration schemas select a generated, model-pinned
+  // worker through `agent_type` rather than an arbitrary `model` field. The
+  // host validates that value against its offered enum before the call reaches
+  // the router. Injecting the routed parent's model alongside an explicit
+  // agent type makes the parent override the generated agent definition and
+  // silently collapses heterogeneous nested delegation back to one model.
+  if (
+    isSubagentSpawnCall(item) &&
+    typeof args.agent_type === "string" &&
+    args.agent_type.trim()
+  ) {
+    return item;
+  }
   if (typeof args.model === "string" && args.model) return item;
   return { ...item, arguments: JSON.stringify({ ...args, model }) };
 }

@@ -82,6 +82,13 @@ export function routedAgentDefinition(model, { effort } = {}) {
   return { agentName, fileName: `${fileStem}.toml`, contents };
 }
 
+// Synchronization and drift detection must render the same expected bytes.
+// Keeping the operator's per-model effort in only the writer made every
+// correctly written non-default definition appear stale immediately.
+export function expectedRoutedAgentDefinition(model) {
+  return routedAgentDefinition(model, { effort: subagentEffort(model.slug) });
+}
+
 // Writes one definition per model, and removes the definitions of models that
 // are no longer passed in. Codex offers every file in the agents directory by
 // name, so a definition left behind keeps a model spawnable through
@@ -98,9 +105,7 @@ export function syncRoutedCodexAgents(models, agentsDir = CODEX_AGENTS_DIR) {
   const keep = new Set();
   try {
     for (const model of models) {
-      const definition = routedAgentDefinition(model, {
-        effort: subagentEffort(model.slug),
-      });
+      const definition = expectedRoutedAgentDefinition(model);
       const target = path.join(agentsDir, definition.fileName);
       writeManagedAgent(target, definition.contents);
       keep.add(definition.fileName);
@@ -156,7 +161,7 @@ export function routedCodexAgentStatus(models, agentsDir = CODEX_AGENTS_DIR) {
   };
   const expectedFiles = new Set();
   for (const model of models) {
-    const definition = routedAgentDefinition(model);
+    const definition = expectedRoutedAgentDefinition(model);
     const target = path.join(agentsDir, definition.fileName);
     expectedFiles.add(definition.fileName);
     if (!existsSync(target)) {

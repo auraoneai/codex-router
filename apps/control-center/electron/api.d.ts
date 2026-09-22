@@ -213,6 +213,7 @@ export interface RouterControl {
   setRouterDefault(model: string): Promise<unknown>;
   clearRouterDefault(): Promise<unknown>;
   setSignedRouting(enabled: boolean): Promise<unknown>;
+  setEngineeringEnabled(enabled: boolean, revision: number): Promise<unknown>;
   setChatGptSessionSharing(enabled: boolean): Promise<ChatGptSessionStatus>;
   addChatGptSubscriptionAccount(label?: string): Promise<unknown>;
   loginChatGptSubscriptionAccount(accountId: string): Promise<unknown>;

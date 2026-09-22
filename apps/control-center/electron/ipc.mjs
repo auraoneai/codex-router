@@ -1234,6 +1234,30 @@ function oneOf(value, values, label) {
   return value;
 }
 
+export function engineeringToggleArgs(enabled, revision) {
+  if (typeof enabled !== "boolean") throw new Error("enabled must be boolean.");
+  if (!Number.isSafeInteger(revision) || revision < 0) {
+    throw new Error("Engineering policy revision must be a non-negative safe integer.");
+  }
+  return [
+    "engineering",
+    enabled ? "on" : "off",
+    "--revision",
+    String(revision),
+  ];
+}
+
+export function engineeringToggleInputArgs(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("Engineering policy input must be an object.");
+  }
+  const keys = Object.keys(input).sort();
+  if (keys.length !== 2 || keys[0] !== "enabled" || keys[1] !== "revision") {
+    throw new Error("Engineering policy input must contain only enabled and revision.");
+  }
+  return engineeringToggleArgs(input.enabled, input.revision);
+}
+
 async function snapshot() {
   return runControlJson(["--json"]);
 }
@@ -1874,6 +1898,14 @@ export function registerIpcHandlers({
   handleAction("setSignedRouting", async ({ enabled } = {}) => {
     if (typeof enabled !== "boolean") throw new Error("enabled must be boolean.");
     return runJson(["signed-routing", enabled ? "on" : "off"], { timeoutMs: CATALOG_MUTATION_TIMEOUT_MS });
+  });
+  // Engineering orchestration is an explicit, revision-guarded policy switch.
+  // Keep the compare-and-swap revision in the trusted IPC boundary so a stale
+  // Settings window cannot overwrite a newer CLI or Control Center choice.
+  // The control command updates only policy state; no service restart is part
+  // of this transaction or required for new assignments to observe it.
+  handleAction("setEngineeringEnabled", async (input) => {
+    return runJson(engineeringToggleInputArgs(input));
   });
   handleAction("setChatGptSessionSharing", async ({ enabled } = {}) => {
     if (typeof enabled !== "boolean") throw new Error("enabled must be boolean.");

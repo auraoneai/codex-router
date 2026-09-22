@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in
+    /*) self=$link ;;
+    *) self=$(dirname -- "$self")/$link ;;
+  esac
+done
+repo_dir=$(CDPATH= cd -P -- "$(dirname -- "$self")/.." && pwd -P)
+
+target=${MODEL_ROUTER_TARGET:-codex}
+if [ "$target" != codex ]; then
+  echo "engineering is supported only for the Codex target." >&2
+  exit 2
+fi
+
+MODEL_ROUTER_TARGET=codex
+export MODEL_ROUTER_TARGET
+exec node "$repo_dir/src/control.mjs" engineering "$@"

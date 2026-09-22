@@ -48,6 +48,7 @@ Providers and models
   refresh-catalog   Rebuild the merged model catalog
   test-model        Send one small billed request to a model
   local-mlx         Install or inspect the supported local MLX model
+  engineering       Inspect or toggle opt-in Codex engineering orchestration
 
 Maintenance
   update            Update the installation (Git checkouts only)

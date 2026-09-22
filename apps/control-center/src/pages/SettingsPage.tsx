@@ -8,6 +8,8 @@ import type {
   ChatGptSessionStatus,
   ChatGptSubscriptionAccount,
   DoctorSnapshot,
+  EngineeringPolicyCandidate,
+  EngineeringPolicySnapshot,
   PresenceSnapshot,
   RouterControlApi,
   RouterHealth,
@@ -56,8 +58,60 @@ function formatBytes(value: number | null | undefined): string {
   return `${size >= 10 || unit === 0 ? Math.round(size) : size.toFixed(1)} ${units[unit]}`;
 }
 
-export function SettingsPage({ target, health, presence, chatgptSession, accountPool, accountPoolError, api, theme, onTheme, language, onLanguage, t, refreshing, onRefresh, runAction }: {
+function roleLabel(role: string): string {
+  return role.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function candidateLabel(candidate: EngineeringPolicyCandidate, t: Translate): string {
+  return `${candidate.model} · ${candidate.effort && candidate.effort !== "default"
+    ? candidate.effort
+    : t("settings.engineering.effort.default")}`;
+}
+
+function engineeringUsageLabel(engineering: EngineeringPolicySnapshot | undefined, t: Translate): {
+  tone: "neutral" | "success" | "warning";
+  label: string;
+  detail: string;
+} {
+  const usage = engineering?.usage;
+  const total = usage?.fields?.totalTokens;
+  if (!usage || !total || usage.requests < 1) {
+    return {
+      tone: "neutral",
+      label: t("settings.engineering.usage.unknown"),
+      detail: t("settings.engineering.usage.none"),
+    };
+  }
+  const measured = Number.isFinite(total.measured) ? total.measured : 0;
+  const estimated = Number.isFinite(total.estimated) ? total.estimated : 0;
+  const unknown = Number.isFinite(total.unknown) ? total.unknown : usage.requests;
+  if (unknown > 0) {
+    return {
+      tone: "warning",
+      label: t("settings.engineering.usage.unknown"),
+      detail: t("settings.engineering.usage.detail", {
+        tokens: compactNumber(measured + estimated),
+        requests: compactNumber(usage.requests),
+        unknown: compactNumber(unknown),
+      }),
+    };
+  }
+  return {
+    tone: estimated > 0 ? "neutral" : "success",
+    label: t(estimated > 0
+      ? "settings.engineering.usage.estimated"
+      : "settings.engineering.usage.measured"),
+    detail: t("settings.engineering.usage.detail", {
+      tokens: compactNumber(measured + estimated),
+      requests: compactNumber(usage.requests),
+      unknown: 0,
+    }),
+  };
+}
+
+export function SettingsPage({ target, engineering, health, presence, chatgptSession, accountPool, accountPoolError, api, theme, onTheme, language, onLanguage, t, refreshing, onRefresh, runAction }: {
   target?: RouterTarget;
+  engineering?: EngineeringPolicySnapshot;
   health?: RouterHealth;
   presence?: PresenceSnapshot;
   chatgptSession?: ChatGptSessionStatus;
@@ -77,6 +131,7 @@ export function SettingsPage({ target, health, presence, chatgptSession, account
   const [confirmSessionSharing, setConfirmSessionSharing] = useState(false);
   const [confirmRepair, setConfirmRepair] = useState(false);
   const [repairing, setRepairing] = useState(false);
+  const [engineeringMutationPending, setEngineeringMutationPending] = useState(false);
   const [repairReport, setRepairReport] = useState<DoctorSnapshot | null>(null);
   const [newAccountLabel, setNewAccountLabel] = useState("");
   const [removeAccountId, setRemoveAccountId] = useState<string | null>(null);
@@ -295,12 +350,23 @@ export function SettingsPage({ target, health, presence, chatgptSession, account
     : RETENTION_CHOICES;
 
   const bridge = target?.modelSettings?.visionBridge;
+  const engineeringKnownFresh = Boolean(
+    engineering
+    && engineering.fresh === true
+    && engineering.degraded !== true
+    && engineering.healthy !== false
+    && Number.isSafeInteger(engineering.revision)
+    && (engineering.revision ?? -1) >= 0,
+  );
+  const engineeringRoles = Object.entries(engineering?.roles || {});
+  const engineeringUsage = engineeringUsageLabel(engineering, t);
   const toggleStates = useMemo(() => new Map([
     ["signed-routing", target?.signedRouting === true],
+    ...(engineeringKnownFresh ? [["engineering", engineering?.enabled === true] as const] : []),
     ["tool-result-aging", aging?.enabled === true],
     ["native-tool-result-aging", aging?.nativeEnabled === true],
     ["vision-bridge", bridge?.enabled === true],
-  ]), [aging?.enabled, aging?.nativeEnabled, bridge?.enabled, target?.signedRouting]);
+  ]), [aging?.enabled, aging?.nativeEnabled, bridge?.enabled, engineering?.enabled, engineeringKnownFresh, target?.signedRouting]);
   const optimisticToggles = useOptimisticValues(toggleStates, runAction);
   const toolResultAgingEnabled = optimisticToggles.value("tool-result-aging", aging?.enabled === true);
   // Same split the tray menu shows: the models the operator already pays for,
@@ -332,6 +398,103 @@ export function SettingsPage({ target, health, presence, chatgptSession, account
       <PageHeader eyebrow={t("settings.eyebrow")} title={t("settings.title")} description={t("settings.description")} onRefresh={onRefresh} refreshing={refreshing} />
       <div className="settings-columns">
         <div className="page-stack">
+          <section className="panel-section">
+            <SectionHeading title={t("settings.engineering.title")} description={t("settings.engineering.description")} />
+            <div className="settings-list">
+              <div className="setting-row">
+                <div>
+                  <strong>{t("settings.engineering.toggle.title")}</strong>
+                  <small>{engineeringKnownFresh
+                    ? t("settings.engineering.toggle.detail")
+                    : t("settings.engineering.unavailable")}</small>
+                </div>
+                {engineeringKnownFresh ? (
+                  <Toggle
+                    checked={optimisticToggles.value("engineering", engineering?.enabled === true)}
+                    disabled={!api || engineeringMutationPending}
+                    label={t("settings.engineering.toggle.title")}
+                    onChange={(enabled) => {
+                      if (!api || !Number.isSafeInteger(engineering?.revision)) return;
+                      const revision = engineering!.revision as number;
+                      setEngineeringMutationPending(true);
+                      void optimisticToggles.mutate(
+                        "engineering",
+                        enabled,
+                        enabled
+                          ? t("settings.engineering.action.enable")
+                          : t("settings.engineering.action.disable"),
+                        () => api.setEngineeringEnabled(enabled, revision),
+                      ).finally(() => setEngineeringMutationPending(false));
+                    }}
+                  />
+                ) : (
+                  <Badge tone={engineering?.degraded ? "danger" : "neutral"}>
+                    {engineering?.degraded
+                      ? t("settings.engineering.status.degraded")
+                      : t("settings.engineering.status.unavailable")}
+                  </Badge>
+                )}
+              </div>
+              <div className="setting-row static-row">
+                <div>
+                  <strong>{t("settings.engineering.preset")}</strong>
+                  <small>{engineeringKnownFresh && engineering?.revision !== null
+                    ? t("settings.engineering.revision", { revision: engineering?.revision ?? 0 })
+                    : t("settings.engineering.unavailable")}</small>
+                </div>
+                <Badge tone={engineering?.enabled && engineeringKnownFresh ? "success" : "neutral"}>
+                  {engineeringKnownFresh
+                    ? engineering?.activePreset || "—"
+                    : "—"}
+                </Badge>
+              </div>
+            </div>
+            {engineering?.degraded ? (
+              <InlineNotice tone="danger" title={t("settings.engineering.status.degraded")}>
+                {t("settings.engineering.degraded")}
+              </InlineNotice>
+            ) : null}
+            {engineeringKnownFresh && engineeringRoles.length ? (
+              <>
+                <SectionHeading title={t("settings.engineering.roles.title")} description={t("settings.engineering.roles.description")} />
+                <div className="settings-list">
+                  {engineeringRoles.map(([roleName, role]) => {
+                    const candidates = (role.candidates || []).filter((candidate) => candidate.disabled !== true);
+                    const optionalCandidates = (role.optionalCandidates || []).filter((candidate) => candidate.disabled !== true);
+                    const [primary, ...fallbacks] = candidates;
+                    return (
+                      <div className="setting-row static-row" key={roleName}>
+                        <div>
+                          <strong>{roleLabel(roleName)}</strong>
+                          <small>{primary
+                            ? t("settings.engineering.role.primary", { route: candidateLabel(primary, t) })
+                            : t("settings.engineering.role.unavailable")}</small>
+                          <small>{fallbacks.length
+                            ? t("settings.engineering.role.fallbacks", {
+                                routes: fallbacks.map((candidate) => candidateLabel(candidate, t)).join(" → "),
+                              })
+                            : t("settings.engineering.role.noFallbacks")}</small>
+                          {optionalCandidates.length ? (
+                            <small>{t("settings.engineering.role.optional", {
+                              routes: optionalCandidates.map((candidate) => candidateLabel(candidate, t)).join(" · "),
+                            })}</small>
+                          ) : null}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            ) : null}
+            <div className="surface-summary">
+              <ShieldCheck aria-hidden size={20} strokeWidth={1.6} />
+              <div>
+                <strong>{t("settings.engineering.usage.title")} · <Badge tone={engineeringUsage.tone}>{engineeringUsage.label}</Badge></strong>
+                <small>{engineeringUsage.detail}</small>
+              </div>
+            </div>
+          </section>
+
           <section className="panel-section">
             <SectionHeading title={t("settings.routing.title")} description={t("settings.routing.description")} />
             <div className="settings-list">

@@ -29,7 +29,8 @@ test("recordInstall records the skill pack from the checkout source", () => {
     );
     const manifest = JSON.parse(output);
     const pack = packSkillNames();
-    assert.ok(pack.length >= 4, "pack has at least the 4 core skills");
+    assert.ok(pack.length >= 6, "pack includes the core and engineering skills");
+    assert.ok(pack.includes("codex-engineering-orchestrator"));
     assert.deepEqual(manifest.current.skills.names, pack);
     assert.equal(manifest.current.skills.count, pack.length);
     // The recorded manifest on disk matches the stdout record.
@@ -40,4 +41,15 @@ test("recordInstall records the skill pack from the checkout source", () => {
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }
+});
+
+test("POSIX and Windows install and uninstall paths manage the engineering skill pack", () => {
+  const posixInstall = readFileSync(path.join(root, "bin", "install"), "utf8");
+  const posixUninstall = readFileSync(path.join(root, "bin", "uninstall"), "utf8");
+  const windowsInstall = readFileSync(path.join(root, "install.ps1"), "utf8");
+  const windowsRouter = readFileSync(path.join(root, "codex-router.ps1"), "utf8");
+  assert.match(posixInstall, /node src\/skills-install\.mjs install/u);
+  assert.match(posixUninstall, /node src\/skills-install\.mjs uninstall/u);
+  assert.match(windowsInstall, /node src[\\/]skills-install\.mjs install/u);
+  assert.match(windowsRouter, /src[\\/]skills-install\.mjs" @\("uninstall"\)/u);
 });

@@ -216,7 +216,9 @@ import {
   endpointCapabilityError,
   supportsOpenAIModelEndpoint,
 } from "./openai-endpoint-policy.mjs";
-import { recordUsageEvent } from "./usage-events.mjs";
+import { recentEngineeringUsageEvents, recordUsageEvent } from "./usage-events.mjs";
+import { engineeringControlHttpResponse } from "./engineering/http.mjs";
+import { resolveEngineeringBinding } from "./engineering/scheduler-state-adapter.mjs";
 import { createRequestProgress } from "./request-progress.mjs";
 import {
   grokOauth46IngressContextBytes,
@@ -337,6 +339,11 @@ const EMBEDDINGS_MAX_RESPONSE_BYTES = positiveByteLimit(
   process.env.CODEX_ROUTER_EMBEDDINGS_MAX_RESPONSE_BYTES,
   8 * 1024 * 1024,
 );
+const ENGINEERING_CONTROL_MAX_BODY_BYTES = positiveByteLimit(
+  process.env.CODEX_ROUTER_ENGINEERING_CONTROL_MAX_BODY_BYTES,
+  16 * 1024,
+);
+const ENGINEERING_BINDING_HEADER = "x-codex-router-engineering-binding";
 // Kill switch for the zero-prompt-token substitution (#95). It is on because a
 // provider that reports no prompt tokens breaks compaction outright, but an
 // operator who would rather see the provider's own numbers can turn it off
@@ -719,6 +726,7 @@ function recordObservedUsage(fields, diagnostics) {
   recordUsageEvent({
     ...fields,
     ...usageDiagnosticMetadata(diagnostics),
+    ...(diagnostics?.engineering ? { engineering: diagnostics.engineering } : {}),
   });
 }
 
@@ -1055,6 +1063,99 @@ function authenticatedCallerRoute(request, requestUrl) {
     authenticatedRoute(requestUrl.pathname, CALLER_KEY) ||
     authenticatedDirectV1Route(request, requestUrl.pathname)
   );
+}
+
+function engineeringBindingError(message, code = "invalid_engineering_binding") {
+  const error = new Error(message);
+  error.status = 409;
+  error.code = code;
+  return error;
+}
+
+function engineeringBindingId(request) {
+  const value = request.headers[ENGINEERING_BINDING_HEADER];
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "string" ||
+    value.length > 160 ||
+    !/^binding-[A-Za-z0-9_-]{8,152}$/u.test(value)
+  ) {
+    throw engineeringBindingError("The engineering execution binding identifier is invalid.");
+  }
+  return value;
+}
+
+function supportedRouteEfforts(route) {
+  return new Set(
+    (route?.reasoningLevels || [])
+      .map((entry) => entry?.effort)
+      .filter((value) => typeof value === "string" && value),
+  );
+}
+
+// The request supplies only an opaque local identifier. Every routing and
+// effort field comes from the protected durable assignment written by the
+// engineering scheduler, whose resolver verifies the immutable binding digest.
+// This prevents a raw caller-controlled effort header from becoming routing
+// authority and keeps concurrent attempts isolated on the same model.
+function resolveEngineeringRequestBinding(request, { model, route } = {}) {
+  const bindingId = engineeringBindingId(request);
+  if (!bindingId) return undefined;
+  let record;
+  try {
+    record = resolveEngineeringBinding(bindingId);
+  } catch {
+    throw engineeringBindingError(
+      "The engineering execution binding could not be verified.",
+      "engineering_binding_unavailable",
+    );
+  }
+  const binding = record?.binding;
+  if (
+    !record ||
+    !binding ||
+    record.bindingId !== bindingId ||
+    record.policyEnabledAtAssignment !== true ||
+    !["assigned", "running"].includes(record.status)
+  ) {
+    throw engineeringBindingError("The engineering execution binding could not be verified.");
+  }
+  const selectedModel = route?.slug || model;
+  if (!selectedModel || binding.model !== selectedModel) {
+    throw engineeringBindingError("The engineering execution binding does not match the selected model.");
+  }
+  const effort = binding.effectiveEffort;
+  // Routed models expose their effort ladder in this process, so recheck it at
+  // the last transport boundary. A native binding was already validated
+  // against the app-server's offered binding when assigned; it has no Router
+  // registry entry to validate against and this path does not rewrite it.
+  if (
+    route &&
+    ![undefined, null, "", "default", "unknown"].includes(effort) &&
+    !supportedRouteEfforts(route).has(effort)
+  ) {
+    throw engineeringBindingError("The engineering execution binding effort is unsupported by the selected route.");
+  }
+  const sourceRevision = record.sourceRevision;
+  if (typeof sourceRevision !== "string" || !sourceRevision.trim()) {
+    throw engineeringBindingError("The engineering execution binding has no immutable source revision.");
+  }
+  return Object.freeze({
+    bindingId,
+    runId: binding.runId,
+    taskId: binding.taskId,
+    attemptId: binding.attemptId,
+    role: binding.role,
+    sourceRevision: sourceRevision.trim(),
+    model: binding.model,
+    provider: binding.provider,
+    family: binding.family,
+    requestedRoute: binding.model,
+    requestedEffort: binding.requestedEffort,
+    effectiveEffort: binding.effectiveEffort,
+    effortSource: binding.effortSource,
+    childId: binding.agentId === "pending" ? undefined : binding.agentId,
+  });
 }
 
 // ChatGPT's own backend accepts a narrower request than the public Responses
@@ -3941,9 +4042,15 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   // The level is deliberately not validated against the model here. A provider
   // that rejects an unsupported effort says so in a way the operator can read,
   // whereas silently dropping the setting looks like the feature never worked.
-  const childEffort = request.headers["x-openai-subagent"]
-    ? subagentEffort(route.slug)
-    : undefined;
+  const engineeringBinding = request.engineeringBinding;
+  const boundEffort = engineeringBinding?.effectiveEffort;
+  const childEffort = engineeringBinding
+    ? ([undefined, null, "", "default", "unknown"].includes(boundEffort)
+        ? undefined
+        : boundEffort)
+    : request.headers["x-openai-subagent"]
+      ? subagentEffort(route.slug)
+      : undefined;
   // This leaves on the Responses API, where the effort travels inside
   // `reasoning`. A flat `reasoning_effort` is a Chat Completions field:
   // LiteLLM's Responses bridge derives its own effort from `reasoning` whenever
@@ -4417,6 +4524,11 @@ async function handleResponses(request, response, requestUrl) {
     route = registeredRoute && routeProviderEnabled(registeredRoute.provider)
       ? registeredRoute
       : undefined;
+    request.engineeringBinding = resolveEngineeringRequestBinding(request, {
+      model: requestedModel,
+      route,
+    });
+    if (request.engineeringBinding) diagnostics.engineering = request.engineeringBinding;
     // Route selection is over: the phase is closed here, before any of the
     // refusals below return, so a rejected turn still records what selecting
     // its route cost rather than reporting no phase at all.
@@ -6081,6 +6193,25 @@ async function handleEmbeddings(request, response, requestUrl) {
   }
 }
 
+async function handleEngineeringControlRequest(request, response, requestUrl) {
+  const hasRequestBody =
+    request.headers["transfer-encoding"] !== undefined ||
+    Number(request.headers["content-length"] || 0) > 0;
+  const rawBody = hasRequestBody
+    ? await readRequestBody(request, { maxBytes: ENGINEERING_CONTROL_MAX_BODY_BYTES })
+    : undefined;
+  const result = engineeringControlHttpResponse({
+    method: request.method,
+    url: requestUrl.pathname,
+    body: rawBody,
+  }, {
+    usageEvents: recentEngineeringUsageEvents(),
+    modelBySlug: MODEL_BY_SLUG,
+  });
+  if (result.headers?.allow) response.setHeader("Allow", result.headers.allow);
+  writeJson(response, result.status, result.body);
+}
+
 async function handleRequest(request, response) {
   const requestUrl = new URL(
     request.url || "/",
@@ -6161,6 +6292,10 @@ async function handleRequest(request, response) {
   }
   if (request.method === "GET" && ["/models", "/v1/models"].includes(requestUrl.pathname)) {
     await handleModels(response);
+    return;
+  }
+  if (["/engineering", "/v1/engineering"].includes(requestUrl.pathname)) {
+    await handleEngineeringControlRequest(request, response, requestUrl);
     return;
   }
   // Gemini CLI speaks nothing but the Gemini API, so it gets its own leaf

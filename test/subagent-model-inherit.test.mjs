@@ -114,6 +114,42 @@ test("an explicit subagent model is kept instead of pinned to the routed parent"
   }
 });
 
+test("an explicit generated agent type wins over routed parent model injection", () => {
+  for (const subagent of [
+    spawnCall(
+      "collaboration__spawn_agent",
+      undefined,
+      JSON.stringify({
+        task_name: "review",
+        message: "inspect",
+        agent_type: "router_kiro_prism_claude_sonnet_5",
+      }),
+    ),
+    spawnCall(
+      "spawn_agent",
+      "collaboration",
+      JSON.stringify({
+        task_name: "review",
+        message: "inspect",
+        agent_type: "router_opencode_go_glm_5_3",
+      }),
+    ),
+  ]) {
+    assert.equal(injectSessionModelForSpawnCalls(subagent, SESSION_MODEL), subagent);
+    assert.equal(JSON.parse(subagent.arguments).model, undefined);
+  }
+});
+
+test("an empty generated agent type still inherits the routed parent model", () => {
+  const item = spawnCall(
+    "collaboration__spawn_agent",
+    undefined,
+    JSON.stringify({ task_name: "review", message: "inspect", agent_type: "  " }),
+  );
+  const next = injectSessionModelForSpawnCalls(item, SESSION_MODEL);
+  assert.equal(JSON.parse(next.arguments).model, SESSION_MODEL);
+});
+
 test("an unusable spawn model still inherits the routed parent", () => {
   // Absent, empty, and non-string values carry no override, so the child keeps
   // the routed parent exactly as it did before.

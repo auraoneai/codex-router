@@ -39,6 +39,9 @@ const bridgeSource = String.raw`
   const pollOnceMs = Number(searchParams.get("pollOnceMs")) || 0;
   const healthPollOnceMs = Number(searchParams.get("healthPollOnceMs")) || 0;
   const staleHealth = searchParams.get("staleHealth") === "1";
+  const engineeringDegraded = searchParams.get("engineeringDegraded") === "1";
+  const engineeringMissing = searchParams.get("engineeringMissing") === "1";
+  const rejectEngineeringMutation = searchParams.get("rejectEngineeringMutation") === "1";
   let accountUsageReads = 0;
   let accountPoolReads = 0;
   let subscriptionLoginRequested = false;
@@ -90,6 +93,39 @@ const bridgeSource = String.raw`
     multiAgentVersion: "v1",
     subagentCertification: "unknown",
   }));
+  const engineeringRole = {
+    candidates: [
+      { model: "kiro-prism/claude-sonnet-5", effort: "high" },
+      { model: "kiro-prism/gpt-5.6-sol", effort: "high" },
+      { model: "opencode-go/glm-5.3", effort: "default" },
+    ],
+    optionalCandidates: [{ model: "kiro-prism/kimi-k3", effort: "high" }],
+  };
+  const engineering = {
+    version: 1,
+    revision: engineeringDegraded ? null : 3,
+    status: engineeringDegraded ? "degraded" : "ok",
+    fresh: !engineeringDegraded,
+    configured: true,
+    enabled: !engineeringDegraded,
+    healthy: !engineeringDegraded,
+    degraded: engineeringDegraded,
+    activePreset: "balanced",
+    roles: { complex_coder: engineeringRole },
+    usage: {
+      requests: 4,
+      fields: {
+        inputTokens: { measured: 9000, estimated: 0, unknown: 0 },
+        cachedInputTokens: { measured: 2500, estimated: 0, unknown: 0 },
+        outputTokens: { measured: 3500, estimated: 0, unknown: 0 },
+        reasoningTokens: { measured: 800, estimated: 0, unknown: 0 },
+        totalTokens: { measured: 12500, estimated: 0, unknown: 0 },
+        costMicros: { measured: 0, estimated: 0, unknown: 4 },
+      },
+    },
+    gates: { codexTargetOnly: true, manualOptIn: true, compareAndSwap: true, ordinaryRoutingUnaffected: true },
+    updatedAt: "2026-09-22T00:00:00.000Z",
+  };
   const target = {
     target: "codex",
     configured: true,
@@ -146,6 +182,7 @@ const bridgeSource = String.raw`
       knownModels: knownOxModels,
       picker: { hidden: [], visible: [selectedModel.slug], hasExplicitVisibility: true },
       subagents,
+      ...(engineeringMissing ? {} : { engineering }),
     },
     chatgptSession: { sharing: "disabled", session: "unavailable", present: false },
   };
@@ -479,6 +516,14 @@ const bridgeSource = String.raw`
     },
     setPickerModel: async () => ({ ok: true }),
     setProviderEnabled: async () => ({ ok: true }),
+    setEngineeringEnabled: async (enabled, revision) => {
+      record("setEngineeringEnabled", enabled, revision);
+      if (rejectEngineeringMutation) throw new Error("Engineering policy revision conflict.");
+      if (revision !== engineering.revision) throw new Error("Engineering policy revision conflict.");
+      engineering.enabled = enabled;
+      engineering.revision += 1;
+      return engineering;
+    },
     setChatGptAccountSelection: async (selection) => {
       record("setChatGptAccountSelection", selection);
       return { ok: true };
@@ -925,6 +970,23 @@ test("the production renderer exposes model discovery and picker actions", { tim
     assert.equal(calls.some((call) => call.name === "setPickerModels" && call.args[0] === true), true);
 
     await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByRole("heading", { name: "Engineering orchestration", exact: true }).waitFor();
+    assert.equal(await page.getByText("balanced", { exact: true }).count(), 1);
+    const complexCoder = page.locator(".setting-row").filter({ hasText: "Complex Coder" });
+    assert.match(await complexCoder.innerText(), /claude-sonnet-5 · high/);
+    assert.match(await complexCoder.innerText(), /gpt-5\.6-sol · high → opencode-go\/glm-5\.3 · model default effort/);
+    assert.match(await complexCoder.innerText(), /Optional specialists: kiro-prism\/kimi-k3 · high/);
+    assert.equal(await page.getByText("Measured", { exact: true }).count(), 1);
+    assert.equal(await page.getByText(/12\.5k recorded tokens across 4 requests/).count(), 1);
+    const engineeringToggle = page.getByRole("checkbox", { name: "Use engineering orchestration", exact: true });
+    assert.equal(await engineeringToggle.isChecked(), true);
+    await engineeringToggle.click();
+    await page.waitForFunction(() => window.routerControlTest.calls()
+      .some((call) => call.name === "setEngineeringEnabled"));
+    assert.equal(await engineeringToggle.isChecked(), false);
+    const engineeringCall = await page.evaluate(() => window.routerControlTest.calls()
+      .find((call) => call.name === "setEngineeringEnabled"));
+    assert.deepEqual(engineeringCall?.args, [false, 3]);
     const accountRows = page.locator(".subscription-account-row");
     await page.getByText("ChatGPT accounts", { exact: true }).waitFor();
     assert.equal(await accountRows.count(), 2, "two logged-in accounts should be visible");
@@ -935,6 +997,47 @@ test("the production renderer exposes model discovery and picker actions", { tim
     await page.getByRole("button", { name: "Select ChatGPT account: primary@example.com", exact: true }).click();
     await page.waitForFunction(() => window.routerControlTest.calls()
       .some((call) => call.name === "setChatGptAccountSelection" && call.args[0] === "current"));
+
+    const rejectedEngineeringPage = await newEnglishTestPage(browser, { viewport: { width: 1280, height: 840 } });
+    rejectedEngineeringPage.setDefaultTimeout(10_000);
+    await rejectedEngineeringPage.goto(`${url}?rejectEngineeringMutation=1`, { waitUntil: "domcontentloaded" });
+    await rejectedEngineeringPage.getByRole("button", { name: "Settings", exact: true }).click();
+    const rejectedEngineeringToggle = rejectedEngineeringPage.getByRole("checkbox", { name: "Use engineering orchestration", exact: true });
+    await rejectedEngineeringToggle.waitFor();
+    assert.equal(await rejectedEngineeringToggle.isChecked(), true);
+    await rejectedEngineeringToggle.click();
+    await rejectedEngineeringPage.getByText("Engineering policy revision conflict.", { exact: true }).waitFor();
+    await rejectedEngineeringPage.waitForFunction(() => {
+      const toggle = document.querySelector('input[aria-label="Use engineering orchestration"]');
+      return toggle instanceof HTMLInputElement && toggle.checked;
+    });
+    await rejectedEngineeringPage.close();
+
+    const degradedEngineeringPage = await newEnglishTestPage(browser, { viewport: { width: 1280, height: 840 } });
+    degradedEngineeringPage.setDefaultTimeout(10_000);
+    await degradedEngineeringPage.goto(`${url}?engineeringDegraded=1`, { waitUntil: "domcontentloaded" });
+    await degradedEngineeringPage.getByRole("button", { name: "Settings", exact: true }).click();
+    await degradedEngineeringPage.getByRole("heading", { name: "Engineering orchestration", exact: true }).waitFor();
+    assert.equal(
+      await degradedEngineeringPage.getByRole("checkbox", { name: "Use engineering orchestration", exact: true }).count(),
+      0,
+      "degraded policy state must expose no actionable switch",
+    );
+    assert.ok(await degradedEngineeringPage.getByText("Degraded", { exact: true }).count() >= 1);
+    await degradedEngineeringPage.close();
+
+    const oldSnapshotPage = await newEnglishTestPage(browser, { viewport: { width: 1280, height: 840 } });
+    oldSnapshotPage.setDefaultTimeout(10_000);
+    await oldSnapshotPage.goto(`${url}?engineeringMissing=1`, { waitUntil: "domcontentloaded" });
+    await oldSnapshotPage.getByRole("button", { name: "Settings", exact: true }).click();
+    await oldSnapshotPage.getByRole("heading", { name: "Engineering orchestration", exact: true }).waitFor();
+    assert.equal(await oldSnapshotPage.getByText("Unavailable", { exact: true }).count(), 1);
+    assert.equal(
+      await oldSnapshotPage.getByRole("checkbox", { name: "Use engineering orchestration", exact: true }).count(),
+      0,
+      "an older snapshot must remain readable without inventing an off policy",
+    );
+    await oldSnapshotPage.close();
 
     // Add/remove must paint before the durable control round-trip finishes.
     const optimisticPage = await newEnglishTestPage(browser, { viewport: { width: 1280, height: 840 } });

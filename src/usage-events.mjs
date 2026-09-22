@@ -45,6 +45,36 @@ function usageEventLines() {
   return lines;
 }
 
+export function recentEngineeringUsageEvents({ limit = 1_000 } = {}) {
+  const boundedLimit = Number.isSafeInteger(limit) && limit > 0
+    ? Math.min(limit, 10_000)
+    : 1_000;
+  const events = [];
+  const lines = usageEventLines();
+  for (let index = lines.length - 1; index >= 0 && events.length < boundedLimit; index -= 1) {
+    const line = lines[index];
+    if (!line?.includes('"engineering"')) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!event?.engineering?.bindingId || !event.engineering.usage) continue;
+    events.push({
+      ...event.engineering,
+      at: event.at,
+      model: event.model,
+      provider: event.provider,
+      routerRequestId: event.requestId,
+      servingRoute: event.model,
+      latencyMs: event.durationMs,
+      retries: event.retries,
+    });
+  }
+  return events.reverse();
+}
+
 function safeText(value, fallback) {
   const text = typeof value === "string" ? value.trim() : "";
   return (text || fallback).slice(0, 160);
@@ -62,6 +92,59 @@ function safeTokenCount(value) {
 function safeRetryCount(value) {
   const count = safeTokenCount(value);
   return count ? count : undefined;
+}
+
+const ENGINEERING_TEXT_FIELDS = Object.freeze([
+  "bindingId",
+  "runId",
+  "taskId",
+  "attemptId",
+  "role",
+  "sourceRevision",
+  "childId",
+  "decisionId",
+  "requestedRoute",
+  "requestedEffort",
+  "effectiveEffort",
+  "effortSource",
+  "circuitState",
+  "verificationOutcome",
+]);
+
+function usageObservation(value, estimatedValue) {
+  const measured = safeTokenCount(value);
+  if (measured !== undefined) return { kind: "measured", value: measured };
+  const estimated = safeTokenCount(estimatedValue);
+  if (estimated !== undefined) return { kind: "estimated", value: estimated };
+  return { kind: "unknown" };
+}
+
+// Engineering attribution is optional and strictly additive: ordinary Router
+// traffic keeps its historical event shape. A resolved binding may contribute
+// only bounded identifiers, never a prompt, checkout path, capability, or raw
+// header. Usage quality lives beside the correlation so absent provider counts
+// remain explicitly unknown instead of becoming misleading zeroes.
+function engineeringUsageMetadata(engineering, usage) {
+  if (!engineering || typeof engineering !== "object" || Array.isArray(engineering)) {
+    return undefined;
+  }
+  const bindingId = safeText(engineering.bindingId, "");
+  if (!bindingId) return undefined;
+  const metadata = { bindingId };
+  for (const field of ENGINEERING_TEXT_FIELDS) {
+    if (field === "bindingId") continue;
+    const value = safeText(engineering[field], "");
+    if (value) metadata[field] = value;
+  }
+  metadata.usage = {
+    inputTokens: usageObservation(usage.inputTokens, usage.estimatedInputTokens),
+    cachedInputTokens: usageObservation(usage.cachedInputTokens),
+    outputTokens: usageObservation(usage.outputTokens),
+    reasoningTokens: usageObservation(usage.reasoningTokens),
+    totalTokens: usageObservation(usage.totalTokens),
+    costMicros: usageObservation(usage.costMicros),
+  };
+  return metadata;
 }
 
 export function recordUsageEvent({
@@ -178,9 +261,21 @@ export function recordUsageEvent({
   // a token estimate. Missing payload fields measure as zero.
   contextBytes,
   grokStructuredPatch,
+  // Sanitized metadata from a locally verified immutable engineering binding.
+  // Raw request headers and caller-supplied effort values never enter this
+  // object; the Router resolves the opaque binding identifier first.
+  engineering,
   at = Date.now(),
 }) {
   const diagnostics = usageDiagnosticMetadata({ requestId, contextBytes, grokStructuredPatch });
+  const engineeringMetadata = engineeringUsageMetadata(engineering, {
+    inputTokens,
+    cachedInputTokens,
+    outputTokens,
+    reasoningTokens,
+    totalTokens,
+    estimatedInputTokens,
+  });
   const event = {
     ...serviceTierMetadata({
       requestedServiceTier,
@@ -275,6 +370,18 @@ export function recordUsageEvent({
       : {}),
     ...(safeTokenCount(toolResultBytesLargest) !== undefined
       ? { toolResultBytesLargest: safeTokenCount(toolResultBytesLargest) }
+      : {}),
+    ...(engineeringMetadata
+      ? {
+          engineering: engineeringMetadata,
+          bindingId: engineeringMetadata.bindingId,
+          runId: engineeringMetadata.runId,
+          taskId: engineeringMetadata.taskId,
+          attemptId: engineeringMetadata.attemptId,
+          role: engineeringMetadata.role,
+          sourceRevision: engineeringMetadata.sourceRevision,
+          usage: engineeringMetadata.usage,
+        }
       : {}),
     ...diagnostics,
   };

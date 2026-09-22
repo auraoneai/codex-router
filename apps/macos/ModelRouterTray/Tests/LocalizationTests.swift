@@ -148,6 +148,30 @@ struct LocalizationTests {
     #expect(routerFormat("%d local fallback dates", 2).contains("2"))
   }
 
+  @Test(
+    "engineering routing state is translated in every explicit locale",
+    arguments: [TrayLanguage.chinese, .arabic, .hindi, .japanese, .korean]
+  )
+  func engineeringRoutingIsLocalized(language: TrayLanguage) {
+    let original = RouterLanguage.selection
+    defer { RouterLanguage.setSelection(original) }
+    RouterLanguage.setSelection(language)
+    for english in [
+      "Engineering router",
+      "Unavailable from this Router version",
+      "Preset %@ · policy needs repair",
+      "Preset %@ · status unavailable",
+      "effort %@",
+      "healthy",
+      "needs attention",
+      "Engineering routing status is unavailable or needs repair.",
+      "Engineering routing enabled for new engineering runs.",
+      "Engineering routing disabled for new engineering runs.",
+    ] {
+      #expect(routerLocalized(english) != english, "\(language.rawValue) did not translate \(english)")
+    }
+  }
+
   @Test("interpolated strings keep their format specifiers")
   func formatSpecifiersSurvive() {
     let original = RouterLanguage.selection

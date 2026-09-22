@@ -613,3 +613,56 @@ test("the reasoning-streamed marker persists both measured values and drops anyt
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
+
+
+test("engineering usage adds bounded correlation with measured, estimated, and unknown semantics", () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "model-router-engineering-usage-"));
+  const script = `
+    import { recordUsageEvent, recentEngineeringUsageEvents } from "./src/usage-events.mjs";
+    recordUsageEvent({ model: "provider/model", provider: "provider", status: 200, durationMs: 1, inputTokens: 4 });
+    recordUsageEvent({
+      model: "provider/model", provider: "provider", status: 200, durationMs: 2,
+      estimatedInputTokens: 19, outputTokens: 7,
+      engineering: {
+        bindingId: "binding-12345678", runId: "r".repeat(300), taskId: "task-1",
+        attemptId: "attempt-1", role: "implementation", sourceRevision: "abc123",
+        effectiveEffort: "high", worktree: "/private/never-recorded",
+      },
+    });
+    recordUsageEvent({
+      model: "provider/model", provider: "provider", status: 200, durationMs: 3,
+      engineering: { runId: "caller-controlled", effectiveEffort: "max" },
+    });
+    process.stdout.write(JSON.stringify(recentEngineeringUsageEvents()));
+  `;
+  try {
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      cwd: root,
+      env: { ...process.env, MODEL_ROUTER_STATE_DIR: stateDir },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const events = JSON.parse(result.stdout);
+    assert.equal(events.length, 1);
+    const [event] = events;
+    assert.equal(event.bindingId, "binding-12345678");
+    assert.equal(event.runId.length, 160);
+    assert.equal(event.taskId, "task-1");
+    assert.equal(event.effectiveEffort, "high");
+    assert.equal("worktree" in event, false);
+    assert.deepEqual(event.usage.inputTokens, { kind: "estimated", value: 19 });
+    assert.deepEqual(event.usage.outputTokens, { kind: "measured", value: 7 });
+    assert.deepEqual(event.usage.reasoningTokens, { kind: "unknown" });
+    assert.deepEqual(event.usage.costMicros, { kind: "unknown" });
+    const rows = readFileSync(path.join(stateDir, "usage-events.jsonl"), "utf8")
+      .trim().split("\n").map(JSON.parse);
+    assert.equal("engineering" in rows[0], false, "ordinary event shape changed");
+    assert.equal("engineering" in rows[2], false, "unverified caller metadata was attributed");
+    assert.equal("worktree" in rows[1].engineering, false);
+    assert.equal(rows[1].runId, "r".repeat(160));
+    assert.equal(rows[1].taskId, "task-1");
+    assert.deepEqual(rows[1].usage.inputTokens, { kind: "estimated", value: 19 });
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});

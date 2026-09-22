@@ -454,7 +454,7 @@ export default function App() {
       case "local": return <LocalPage {...shared} operation={operation} />;
       case "harness": return <HarnessPage {...shared} operation={operation} onNavigate={navigateTo} />;
       case "context": return <ContextPage {...shared} />;
-      case "settings": return <SettingsPage {...shared} onRefresh={refreshAll} health={health} presence={presence} chatgptSession={chatgptSession ?? snapshot?.chatgptSession} accountPool={accountPool} accountPoolError={readErrors.accountPool} theme={theme} onTheme={setTheme} language={language} onLanguage={setLanguage} t={t} />;
+      case "settings": return <SettingsPage {...shared} onRefresh={refreshAll} health={health} presence={presence} chatgptSession={chatgptSession ?? snapshot?.chatgptSession} accountPool={accountPool} accountPoolError={readErrors.accountPool} engineering={snapshot?.catalog?.engineering} theme={theme} onTheme={setTheme} language={language} onLanguage={setLanguage} t={t} />;
     }
   })();
 

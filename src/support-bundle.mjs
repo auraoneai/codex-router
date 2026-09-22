@@ -25,7 +25,7 @@ import {
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { readInstallManifest } from "./install-manifest.mjs";
 import { redactProxyCredentials } from "./proxy-environment.mjs";
-import { protectPrivateFile } from "./file-security.mjs";
+import { privateFileIsProtected, protectPrivateFile } from "./file-security.mjs";
 import {
   boundedOperationChild,
   operationDeadlineFromEnvironment,
@@ -40,11 +40,13 @@ import {
 import { genericProviderConfigured } from "./generic-provider-readiness.mjs";
 import {
   CALLER_SECRET_PATH,
+  CODEX_HOME,
   CONFIG_PATH,
   CURSOR_PUBLIC_SECRET_PATH,
   INTERNAL_SECRET_PATH,
   LOG_PATH,
   SOURCE_ROOT,
+  STATE_DIR,
   SUPPORT_DIR,
 } from "./paths.mjs";
 import {
@@ -59,6 +61,11 @@ import {
 } from "./provider-credential-store.mjs";
 import { providerApiKeyPoolsSupportSnapshot } from "./provider-api-key-pool.mjs";
 import { resolveStoredCredential } from "./provider-api-key-routing.mjs";
+import {
+  engineeringPolicyStatePath,
+  readEngineeringPolicyState,
+} from "./engineering/policy-state.mjs";
+import { skillPackStatus } from "./skills-install.mjs";
 
 const ANTIGRAVITY_RECORD_KEYS = new Set([
   "version",
@@ -335,6 +342,41 @@ function outputOption() {
   return value;
 }
 
+// Support output deliberately carries only the orchestration control-plane
+// shape. Policies can contain workspace choices, while task/evidence/artifact
+// state can contain source, prompts, diffs, and model output. None of those
+// documents is copied or summarized here; support only needs to know whether
+// the mode is enabled, which revision/preset was accepted, and whether the
+// owned integration and private-state boundary are intact.
+export function engineeringSupportSnapshot() {
+  const state = readEngineeringPolicyState();
+  const policyPath = engineeringPolicyStatePath();
+  const skills = skillPackStatus(CODEX_HOME);
+  const runtimeRoot = path.join(STATE_DIR, "engineering");
+  return {
+    status: state.status,
+    degraded: state.degraded,
+    enabled: state.enabled,
+    revision: Number.isSafeInteger(state.revision) ? state.revision : null,
+    activePreset: state.degraded ? null : state.policy.activePreset,
+    policyState: {
+      exists: existsSync(policyPath),
+      protected: existsSync(policyPath) && privateFileIsProtected(policyPath),
+    },
+    runtimeState: existsSync(runtimeRoot)
+      ? {
+          exists: true,
+          mode: (lstatSync(runtimeRoot).mode & 0o777).toString(8),
+        }
+      : { exists: false },
+    skill: {
+      managed: skills.managed.includes("codex-engineering-orchestrator"),
+      stale: skills.stale.includes("codex-engineering-orchestrator"),
+      missing: skills.missing.includes("codex-engineering-orchestrator"),
+    },
+  };
+}
+
 export function createSupportBundle(options = {}) {
   // An arbitrary historical log may contain a credential that was rotated or
   // deleted before this bundle discovers current values. There is no safe
@@ -401,6 +443,7 @@ export function createSupportBundle(options = {}) {
     }),
     ownership: detectLegacyInstallations(),
     install: sharableInstallManifest(),
+    engineering: engineeringSupportSnapshot(),
     files: {
       config: fileMetadata(CONFIG_PATH),
       log: fileMetadata(LOG_PATH),

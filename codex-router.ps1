@@ -31,6 +31,10 @@ function Invoke-RouterNode([string]$Script, [string[]]$ScriptArguments = @()) {
 
 function Remove-TargetIntegration {
   switch ($Target) {
+    "codex" {
+      Invoke-RouterNode "src\config-manager.mjs" @("disable")
+      Invoke-RouterNode "src\skills-install.mjs" @("uninstall")
+    }
     "dsh" { Invoke-RouterNode "src\dsh-config-manager.mjs" @("uninstall") }
     "gemini" { Invoke-RouterNode "src\gemini-config-manager.mjs" @("uninstall") }
     "cursor" { Invoke-RouterNode "src\cursor-config-manager.mjs" @("uninstall") }

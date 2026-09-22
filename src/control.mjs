@@ -559,7 +559,169 @@ async function routerCatalogSnapshot() {
     picker,
     subagents: settings,
     dashboard: routerDashboardState({ models }),
+    engineering: await engineeringCatalogSnapshot(),
   };
+}
+
+async function engineeringUsageEventsForControl() {
+  const { recentUsageEvents } = await import("./usage-events.mjs");
+  return recentUsageEvents({ sinceMs: 90 * 24 * 60 * 60 * 1000, limit: 10_000 })
+    .filter((event) => (
+      typeof event?.runId === "string" &&
+      typeof event?.taskId === "string" &&
+      typeof event?.attemptId === "string" &&
+      event?.usage && typeof event.usage === "object"
+    ));
+}
+
+async function engineeringCatalogSnapshot() {
+  const { readEngineeringControlSnapshot } = await import("./engineering/control-snapshot.mjs");
+  return readEngineeringControlSnapshot({ usageEvents: await engineeringUsageEventsForControl() });
+}
+
+async function engineeringResolutionInventory() {
+  const { selectedConfiguredListedModels } = await import("./provider-selection.mjs");
+  const { verifiedSubagentTargets } = await import("./subagent-routing.mjs");
+  const { routedAgentDefinition } = await import("./codex-agent-catalog.mjs");
+  const models = selectedConfiguredListedModels();
+  const configured = new Set(models.map((model) => model.slug));
+  const offeredBindings = verifiedSubagentTargets({ authority: models })
+    .filter((target) => configured.has(target.slug))
+    .map(({ model }) => ({
+      model: model.slug,
+      provider: model.provider,
+      agentType: routedAgentDefinition(model).agentName,
+      eligible: true,
+      healthy: true,
+      capacityHost: model.provider,
+      supportedEfforts: (model.reasoningLevels || []).map((level) => level.effort),
+    }));
+  return { configuredModels: [...configured], offeredBindings };
+}
+
+function engineeringOption(commandArgs, name) {
+  const index = commandArgs.indexOf(name);
+  if (index === -1) return undefined;
+  const value = commandArgs[index + 1];
+  if (!value || value.startsWith("--")) throw new Error(`${name} requires a value.`);
+  return value;
+}
+
+function engineeringExpectedRevision(commandArgs) {
+  const revisionIndex = commandArgs.indexOf("--revision");
+  const expectedIndex = commandArgs.indexOf("--expected-revision");
+  if (revisionIndex !== -1 && expectedIndex !== -1) {
+    throw new Error("Use only one of --revision or --expected-revision.");
+  }
+  const flag = revisionIndex !== -1 ? "--revision" : "--expected-revision";
+  const raw = engineeringOption(commandArgs, flag);
+  if (raw === undefined) throw new Error("Engineering on/off requires --revision REV.");
+  if (!/^\d+$/u.test(raw) || !Number.isSafeInteger(Number(raw))) {
+    throw new Error(`${flag} must be a non-negative safe integer.`);
+  }
+  return Number(raw);
+}
+
+function assertEngineeringArguments(commandArgs, { values = [], flags = [] } = {}) {
+  const valueNames = new Set(values);
+  const flagNames = new Set(flags);
+  const seen = new Set();
+  for (let index = 0; index < commandArgs.length; index += 1) {
+    const argument = commandArgs[index];
+    if (valueNames.has(argument)) {
+      if (seen.has(argument)) throw new Error(`${argument} may be supplied only once.`);
+      seen.add(argument);
+      const value = commandArgs[index + 1];
+      if (!value || value.startsWith("--")) throw new Error(`${argument} requires a value.`);
+      index += 1;
+      continue;
+    }
+    if (flagNames.has(argument)) {
+      if (seen.has(argument)) throw new Error(`${argument} may be supplied only once.`);
+      seen.add(argument);
+      continue;
+    }
+    throw new Error(`Unsupported engineering argument: ${argument}`);
+  }
+}
+
+async function handleEngineering(commandArgs) {
+  const { TARGET } = await import("./paths.mjs");
+  if (TARGET !== "codex") {
+    throw new Error("Engineering orchestration is supported only for the Codex target.");
+  }
+  const action = commandArgs[0] || "status";
+  const supported = new Set(["status", "policy", "preview", "usage", "on", "off"]);
+  if (!supported.has(action)) {
+    throw new Error(
+      "Usage: control engineering status|policy [replace --file PATH --revision REV]|preview <role> [--model SLUG] [--effort LEVEL] [--high-risk]|usage|on|off --revision REV",
+    );
+  }
+  const { executeEngineeringControlAction } = await import("./engineering/http.mjs");
+  const { readEngineeringPolicyState } = await import("./engineering/policy-state.mjs");
+  const usageEvents = await engineeringUsageEventsForControl();
+  let body;
+  let inventory = {};
+  if (action === "policy" && commandArgs[1] === "replace") {
+    const replaceArgs = commandArgs.slice(2);
+    assertEngineeringArguments(replaceArgs, {
+      values: ["--file", "--revision", "--expected-revision"],
+    });
+    const policyPath = engineeringOption(replaceArgs, "--file");
+    if (!policyPath) throw new Error("engineering policy replace requires --file PATH.");
+    let policy;
+    try {
+      policy = JSON.parse(readFileSync(path.resolve(policyPath), "utf8"));
+    } catch (error) {
+      throw new Error(`Engineering policy file could not be read: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    const { replaceEngineeringPolicy } = await import("./engineering/policy-state.mjs");
+    const { engineeringControlSnapshot } = await import("./engineering/control-snapshot.mjs");
+    const updated = replaceEngineeringPolicy(policy, {
+      expectedRevision: engineeringExpectedRevision(replaceArgs),
+    });
+    process.stdout.write(`${JSON.stringify(engineeringControlSnapshot({ state: updated, usageEvents }), null, 2)}\n`);
+    return;
+  }
+  if (action === "on" || action === "off") {
+    assertEngineeringArguments(commandArgs.slice(1), {
+      values: ["--revision", "--expected-revision"],
+    });
+    const current = readEngineeringPolicyState();
+    if (!Number.isSafeInteger(current.revision)) {
+      throw new Error("Engineering policy is degraded and cannot be toggled until it is repaired.");
+    }
+    body = { expectedRevision: engineeringExpectedRevision(commandArgs.slice(1)) };
+  } else if (action === "preview") {
+    const role = commandArgs[1];
+    if (!role || role.startsWith("--")) {
+      throw new Error("Usage: control engineering preview <role> [--model SLUG] [--effort LEVEL] [--high-risk]");
+    }
+    assertEngineeringArguments(commandArgs.slice(2), {
+      values: ["--model", "--effort"],
+      flags: ["--high-risk"],
+    });
+    const model = engineeringOption(commandArgs.slice(2), "--model");
+    const effort = engineeringOption(commandArgs.slice(2), "--effort");
+    body = {
+      role,
+      ...(model || effort ? { attemptOverride: { ...(model ? { model } : {}), ...(effort ? { effort } : {}) } } : {}),
+      ...(commandArgs.includes("--high-risk") ? { highRisk: true } : {}),
+    };
+    inventory = await engineeringResolutionInventory();
+  } else if (action === "policy") {
+    if (commandArgs.length > 1) {
+      throw new Error("Usage: control engineering policy [replace --file PATH --revision REV]");
+    }
+  } else {
+    assertEngineeringArguments(commandArgs.slice(1));
+  }
+  const result = executeEngineeringControlAction(action, {
+    body,
+    usageEvents,
+    ...inventory,
+  });
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
 // --- aggregate over all targets --------------------------------------------
@@ -3690,6 +3852,8 @@ if (args.includes("--probe")) {
 } else if (args[0] === "activity") {
   if (args.length > 2) throw new Error("Usage: control activity [thread-id]");
   process.stdout.write(`${JSON.stringify(await readControlActivity({ threadId: args[1] }))}\n`);
+} else if (args[0] === "engineering") {
+  await handleEngineering(args.slice(1));
 } else if (args[0] === "health") {
   await printHealth();
 } else if (args[0] === "maintenance") {

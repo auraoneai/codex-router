@@ -45,4 +45,17 @@ struct OptimisticToggleLedgerTests {
     #expect(ledger.value(for: .provider("deepseek"), authoritative: false))
     #expect(!ledger.value(for: .pickerModel("deepseek/chat"), authoritative: true))
   }
+
+  @Test("an engineering revision conflict rolls the optimistic switch back")
+  func engineeringConflictRollsBack() {
+    var ledger = OptimisticToggleLedger<RouterToggleKey>()
+    let intent = ledger.request(true, for: .engineering)
+
+    // The control command reports the CAS conflict, refresh supplies the
+    // unchanged authoritative value, and the store reconciles this intent.
+    #expect(ledger.value(for: .engineering, authoritative: false))
+    let reconciled = ledger.reconcile(intent, for: .engineering)
+    #expect(reconciled)
+    #expect(!ledger.value(for: .engineering, authoritative: false))
+  }
 }

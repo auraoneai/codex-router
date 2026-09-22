@@ -261,7 +261,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
     "deepseek-v4.1-flash",
   );
   assert.equal(MODELS.filter((model) => model.provider === "free-prism").length, 2);
-  assert.equal(MODELS.filter((model) => model.provider === "cloudflare-workers-ai").length, 2);
+  assert.equal(MODELS.filter((model) => model.provider === "cloudflare-workers-ai").length, 4);
   assert.equal(PROVIDERS.get("free-prism").ownedBy, "AuraOne");
   assert.equal(PROVIDERS.get("kiro-prism").protocol, "openai-responses");
   assert.ok(
@@ -786,6 +786,49 @@ test("provider registry exposes configured API and OAuth model families", () => 
     MODEL_BY_SLUG.get("deepseek/deepseek-v4-flash-vision-exp").inputModalities,
     ["text", "image"],
   );
+});
+
+test("Cloudflare Workers AI publishes the documented GLM-5.3 routes", () => {
+  const provider = PROVIDERS.get("cloudflare-workers-ai");
+  const expected = new Map([
+    [
+      "cloudflare-workers-ai/glm-5.3",
+      {
+        gatewayModel: "cloudflare-workers-ai-glm-5-3",
+        upstreamModel: "@cf/zai-org/glm-5.3",
+        contextWindow: 1_048_576,
+        inputModalities: ["text"],
+      },
+    ],
+    [
+      "cloudflare-workers-ai/glm-5.3-flash",
+      {
+        gatewayModel: "cloudflare-workers-ai-glm-5-3-flash",
+        upstreamModel: "@cf/zai-org/glm-5.3-flash",
+        contextWindow: 1_310_720,
+        inputModalities: ["text", "image"],
+      },
+    ],
+  ]);
+
+  for (const [slug, contract] of expected) {
+    const model = MODEL_BY_SLUG.get(slug);
+    assert.ok(model, `${slug} is registered`);
+    assert.equal(model.provider, "cloudflare-workers-ai");
+    assert.equal(model.listed, true);
+    assert.equal(model.gatewayModel, contract.gatewayModel);
+    assert.equal(model.upstreamModel, contract.upstreamModel);
+    assert.equal(model.contextWindow, contract.contextWindow);
+    assert.deepEqual(model.inputModalities, contract.inputModalities);
+    assert.equal(model.defaultEffort, "high");
+    assert.deepEqual(
+      model.reasoningLevels.map(({ effort }) => effort),
+      ["low", "medium", "high"],
+    );
+    assert.equal(model.requestProfile, undefined);
+    assert.equal(endpointForModel(model), provider);
+    assert.ok(API_MODELS.includes(model));
+  }
 });
 
 test("only checked-in Gemini reseller models opt into trailing model-turn trimming", () => {

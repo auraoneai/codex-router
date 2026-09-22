@@ -1,0 +1,6 @@
+interface:
+  display_name: "Codex Engineering Orchestrator"
+  short_description: "Run opt-in Astra-led engineering workflows"
+  default_prompt: "Use $codex-engineering-orchestrator to run this coding task through the enabled engineering policy, scheduler, and evidence gates."
+policy:
+  allow_implicit_invocation: true

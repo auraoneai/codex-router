@@ -74,6 +74,53 @@ export interface SubagentSettings {
   all?: boolean;
 }
 
+export interface EngineeringPolicyCandidate {
+  model: string;
+  effort?: string;
+  capacityHost?: string;
+  disabled?: boolean;
+  minimumCapabilities?: string[];
+}
+
+export interface EngineeringRolePolicy {
+  candidates: EngineeringPolicyCandidate[];
+  optionalCandidates?: EngineeringPolicyCandidate[];
+  requireDifferentFamilyFromAuthor?: boolean;
+  capacityFailurePolicy?: string;
+  minimumCapabilities?: string[];
+}
+
+export interface EngineeringUsageSummary {
+  requests: number;
+  fields: Record<
+    "inputTokens" | "cachedInputTokens" | "outputTokens" | "reasoningTokens" | "totalTokens" | "costMicros",
+    { measured: number; estimated: number; unknown: number }
+  >;
+}
+
+/** Optional shared-plane policy projection. Older router snapshots omit it. */
+export interface EngineeringPolicySnapshot {
+  version: 1;
+  revision: number | null;
+  updatedAt: string | null;
+  status: "default" | "ok" | "degraded" | "unavailable" | string;
+  degraded: boolean;
+  enabled: boolean;
+  /** False means the projection is known stale even when its shape is valid. */
+  fresh: boolean;
+  configured: boolean;
+  healthy: boolean;
+  activePreset: string;
+  roles: Record<string, EngineeringRolePolicy>;
+  gates: {
+    codexTargetOnly: boolean;
+    manualOptIn: boolean;
+    compareAndSwap: boolean;
+    ordinaryRoutingUnaffected: boolean;
+  };
+  usage: EngineeringUsageSummary;
+}
+
 export interface LocalModel {
   tag: string;
   family?: string;
@@ -349,6 +396,8 @@ export interface RouterCatalogSnapshot {
   subagents: SubagentSettings;
   /** Metadata-only route dashboard. No credentials, endpoints, or sessions. */
   dashboard?: RouterDashboardSnapshot;
+  /** Explicitly opt-in engineering orchestration policy and read-only preview. */
+  engineering?: EngineeringPolicySnapshot;
 }
 
 export interface ProviderSetup {
@@ -825,6 +874,7 @@ export interface RouterControlApi {
   setRouterDefault(model: string): Promise<unknown>;
   clearRouterDefault(): Promise<unknown>;
   setSignedRouting(enabled: boolean): Promise<unknown>;
+  setEngineeringEnabled(enabled: boolean, revision: number): Promise<unknown>;
   setChatGptSessionSharing(enabled: boolean): Promise<ChatGptSessionStatus>;
   addChatGptSubscriptionAccount(label?: string): Promise<unknown>;
   loginChatGptSubscriptionAccount(accountId: string): Promise<unknown>;
