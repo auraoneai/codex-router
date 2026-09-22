@@ -3,7 +3,12 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 
-import { engineeringToggleArgs, engineeringToggleInputArgs } from "../electron/ipc.mjs";
+import {
+  engineeringLeadInput,
+  engineeringRoleInput,
+  engineeringToggleArgs,
+  engineeringToggleInputArgs,
+} from "../electron/ipc.mjs";
 
 test("engineering toggle arguments are exact and revision guarded", () => {
   assert.deepEqual(engineeringToggleArgs(true, 0), ["engineering", "on", "--revision", "0"]);
@@ -65,6 +70,54 @@ test("preload sends only the engineering choice and observed revision", async ()
   assert.equal(calls[0][1].enabled, true);
   assert.equal(calls[0][1].revision, 7);
   assert.deepEqual(Object.keys(calls[0][1]).sort(), ["enabled", "revision"]);
+
+  await api.setEngineeringRole(
+    "reviewer",
+    [{ model: "gpt-5.6-sol", effort: "low" }],
+    [{ model: "kiro-prism/claude-opus-5", effort: "max" }],
+    8,
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[1])), ["router-control:setEngineeringRole", {
+    role: "reviewer",
+    candidates: [{ model: "gpt-5.6-sol", effort: "low" }],
+    optionalCandidates: [{ model: "kiro-prism/claude-opus-5", effort: "max" }],
+    revision: 8,
+    reset: false,
+  }]);
+  await api.setEngineeringLead("gpt-6-astra", "low", 9);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls[2])), ["router-control:setEngineeringLead", {
+    model: "gpt-6-astra", effort: "low", revision: 9,
+  }]);
+});
+
+test("engineering role and lead editors validate exact routes, efforts, ordering, and revisions", () => {
+  assert.deepEqual(engineeringRoleInput({
+    role: "integrator",
+    candidates: [
+      { model: "gpt-5.6-sol", effort: "low" },
+      { model: "kiro-prism/claude-sonnet-5", effort: "max" },
+    ],
+    optionalCandidates: [],
+    revision: 4,
+    reset: false,
+  }).candidates.map(({ model, effort }) => [model, effort]), [
+    ["gpt-5.6-sol", "low"],
+    ["kiro-prism/claude-sonnet-5", "max"],
+  ]);
+  assert.deepEqual(
+    engineeringRoleInput({ role: "integrator", candidates: [], optionalCandidates: [], revision: 5, reset: true }),
+    { role: "integrator", revision: 5, reset: true },
+  );
+  assert.deepEqual(engineeringLeadInput({ model: "gpt-6-astra", effort: "low", revision: 6 }), {
+    model: "gpt-6-astra", effort: "low", revision: 6,
+  });
+  assert.throws(() => engineeringRoleInput({
+    role: "integrator",
+    candidates: [{ model: "gpt-5.6-sol", effort: "low" }, { model: "gpt-5.6-sol", effort: "high" }],
+    optionalCandidates: [],
+    revision: 4,
+  }), /must be unique/u);
+  assert.throws(() => engineeringLeadInput({ model: "gpt-6-astra", effort: "impossible", revision: 6 }), /must be one of/u);
 });
 
 test("settings fail closed for absent or degraded engineering snapshots", async () => {
@@ -78,7 +131,7 @@ test("settings fail closed for absent or degraded engineering snapshots", async 
   assert.match(source, /optimisticToggles\.mutate\(/u);
 });
 
-test("settings preview exposes preset routes, efforts, fallbacks, and usage confidence", async () => {
+test("settings exposes editable models, efforts, ordered fallbacks, reset, and usage confidence", async () => {
   const [settings, types, messages] = await Promise.all([
     readFile(new URL("../src/pages/SettingsPage.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/types.ts", import.meta.url), "utf8"),
@@ -88,6 +141,10 @@ test("settings preview exposes preset routes, efforts, fallbacks, and usage conf
   assert.match(settings, /role\.candidates/u);
   assert.match(settings, /role\.optionalCandidates/u);
   assert.match(settings, /settings\.engineering\.role\.fallbacks/u);
+  assert.match(settings, /api\.setEngineeringRole/u);
+  assert.match(settings, /api\.setEngineeringLead/u);
+  assert.match(settings, /moveCandidate/u);
+  assert.match(settings, /settings\.engineering\.editor\.reset/u);
   assert.match(settings, /total\.measured/u);
   assert.match(settings, /total\.estimated/u);
   assert.match(settings, /total\.unknown/u);
@@ -96,4 +153,5 @@ test("settings preview exposes preset routes, efforts, fallbacks, and usage conf
   assert.match(messages, /"settings\.engineering\.usage\.measured": "Measured"/u);
   assert.match(messages, /"settings\.engineering\.usage\.estimated": "Estimated"/u);
   assert.match(messages, /"settings\.engineering\.usage\.unknown": "Unknown"/u);
+  assert.match(messages, /"settings\.engineering\.effort\.defaultResolved"/u);
 });

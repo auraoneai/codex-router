@@ -880,6 +880,14 @@ export interface RouterControlApi {
   clearRouterDefault(): Promise<unknown>;
   setSignedRouting(enabled: boolean): Promise<unknown>;
   setEngineeringEnabled(enabled: boolean, revision: number): Promise<unknown>;
+  setEngineeringRole(
+    role: string,
+    candidates: EngineeringPolicyCandidate[],
+    optionalCandidates: EngineeringPolicyCandidate[],
+    revision: number,
+    reset?: boolean,
+  ): Promise<unknown>;
+  setEngineeringLead(model: string, effort: string, revision: number): Promise<unknown>;
   setChatGptSessionSharing(enabled: boolean): Promise<ChatGptSessionStatus>;
   addChatGptSubscriptionAccount(label?: string): Promise<unknown>;
   loginChatGptSubscriptionAccount(accountId: string): Promise<unknown>;

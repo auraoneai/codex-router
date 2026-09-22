@@ -214,6 +214,8 @@ export interface RouterControl {
   clearRouterDefault(): Promise<unknown>;
   setSignedRouting(enabled: boolean): Promise<unknown>;
   setEngineeringEnabled(enabled: boolean, revision: number): Promise<unknown>;
+  setEngineeringRole(role: string, candidates: unknown[], optionalCandidates: unknown[], revision: number, reset?: boolean): Promise<unknown>;
+  setEngineeringLead(model: string, effort: string, revision: number): Promise<unknown>;
   setChatGptSessionSharing(enabled: boolean): Promise<ChatGptSessionStatus>;
   addChatGptSubscriptionAccount(label?: string): Promise<unknown>;
   loginChatGptSubscriptionAccount(accountId: string): Promise<unknown>;

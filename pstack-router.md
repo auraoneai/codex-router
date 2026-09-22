@@ -858,11 +858,24 @@ revision. Validation rejects unknown routes, unsupported efforts, duplicate
 candidates, and any DeepSeek V4.1 Flash placement that lacks a later healthy
 non-Modal recovery route. Running attempts retain their assignment snapshot.
 
+The Control Center exposes the same edits directly under **Settings →
+Engineering orchestration → Role routing**. Each role has model and effort
+selectors, ordered primary/fallback controls, optional-specialist controls, and
+a reset-to-preset action. The native lead has its own model and effort editor.
+Every save is compare-and-swap guarded by the displayed policy revision and
+affects only new assignments. An effort of `default` means the role sends no
+per-assignment override; the selected model's currently configured default is
+used. The UI shows that resolved default when the catalog publishes it. Choosing
+`low`, `medium`, `high`, `xhigh`, `max`, or `ultra` pins the role explicitly and
+is accepted only when that exact model advertises the level.
+
 The authenticated Router surface is `GET /v1/engineering` and
 `PATCH /v1/engineering` with exactly `{ "expectedRevision": N, "enabled":
 BOOLEAN }`. It returns the same allowlisted snapshot published at
 `catalog.engineering`. The Electron Control Center and native macOS tray consume
-that snapshot and issue revision-guarded toggles with optimistic rollback. An
+that snapshot. The Electron app issues revision-guarded toggles and role/lead
+edits with optimistic error reporting; the tray shows the lead and highest
+priority role routes. An
 older Router, degraded policy, stale snapshot, or unknown schema disables the UI
 control instead of being displayed as a false off state.
 

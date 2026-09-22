@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AppWindow, Check, Eye, LogIn, Moon, Plus, RefreshCw, Server, ShieldCheck, Sun, Trash2, UserRound, Wrench } from "lucide-react";
+import { AppWindow, Check, ChevronDown, ChevronUp, Eye, LogIn, Moon, Pencil, Plus, RefreshCw, RotateCcw, Server, ShieldCheck, Sun, Trash2, UserRound, Wrench, X } from "lucide-react";
 import { Badge, Button, Dialog, InlineNotice, PageHeader, SectionHeading, Toggle } from "../components";
 import { compactNumber } from "../lib";
 import { LANGUAGE_OPTIONS, type LanguageId, type Translate } from "../i18n";
@@ -13,6 +13,7 @@ import type {
   PresenceSnapshot,
   RouterControlApi,
   RouterHealth,
+  RouterModel,
   RouterTarget,
   VisionEngine,
 } from "../types";
@@ -62,11 +63,21 @@ function roleLabel(role: string): string {
   return role.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function candidateLabel(candidate: EngineeringPolicyCandidate, t: Translate): string {
-  return `${candidate.model} · ${candidate.effort && candidate.effort !== "default"
+function candidateLabel(candidate: EngineeringPolicyCandidate, t: Translate, models: ReadonlyMap<string, RouterModel> = new Map()): string {
+  const modelDefault = models.get(candidate.model)?.defaultEffort;
+  const effort = candidate.effort && candidate.effort !== "default"
     ? candidate.effort
-    : t("settings.engineering.effort.default")}`;
+    : modelDefault
+      ? `${modelDefault} (${t("settings.engineering.effort.default")})`
+      : t("settings.engineering.effort.default");
+  return `${candidate.model} · ${effort}`;
 }
+
+type EngineeringEditor =
+  | { kind: "lead"; model: string; effort: string }
+  | { kind: "role"; role: string; candidates: EngineeringPolicyCandidate[]; optionalCandidates: EngineeringPolicyCandidate[] };
+
+const ENGINEERING_EFFORTS = ["default", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 function engineeringUsageLabel(engineering: EngineeringPolicySnapshot | undefined, t: Translate): {
   tone: "neutral" | "success" | "warning";
@@ -109,9 +120,10 @@ function engineeringUsageLabel(engineering: EngineeringPolicySnapshot | undefine
   };
 }
 
-export function SettingsPage({ target, engineering, health, presence, chatgptSession, accountPool, accountPoolError, api, theme, onTheme, language, onLanguage, t, refreshing, onRefresh, runAction }: {
+export function SettingsPage({ target, engineering, models = [], health, presence, chatgptSession, accountPool, accountPoolError, api, theme, onTheme, language, onLanguage, t, refreshing, onRefresh, runAction }: {
   target?: RouterTarget;
   engineering?: EngineeringPolicySnapshot;
+  models?: RouterModel[];
   health?: RouterHealth;
   presence?: PresenceSnapshot;
   chatgptSession?: ChatGptSessionStatus;
@@ -132,6 +144,7 @@ export function SettingsPage({ target, engineering, health, presence, chatgptSes
   const [confirmRepair, setConfirmRepair] = useState(false);
   const [repairing, setRepairing] = useState(false);
   const [engineeringMutationPending, setEngineeringMutationPending] = useState(false);
+  const [engineeringEditor, setEngineeringEditor] = useState<EngineeringEditor | null>(null);
   const [repairReport, setRepairReport] = useState<DoctorSnapshot | null>(null);
   const [newAccountLabel, setNewAccountLabel] = useState("");
   const [removeAccountId, setRemoveAccountId] = useState<string | null>(null);
@@ -141,6 +154,72 @@ export function SettingsPage({ target, engineering, health, presence, chatgptSes
   const [accountOverlays, setAccountOverlays] = useState<AccountOverlay[]>([]);
   const refreshRef = useRef(onRefresh);
   refreshRef.current = onRefresh;
+  const engineeringModels = useMemo(() => {
+    const bySlug = new Map(models.map((model) => [model.slug, model]));
+    for (const role of Object.values(engineering?.roles || {})) {
+      for (const candidate of [...(role.candidates || []), ...(role.optionalCandidates || [])]) {
+        if (!bySlug.has(candidate.model)) {
+          bySlug.set(candidate.model, {
+            slug: candidate.model,
+            displayName: candidate.model,
+            provider: candidate.model.includes("/") ? candidate.model.split("/")[0] : "openai",
+            enabled: true,
+            visible: true,
+          });
+        }
+      }
+    }
+    if (engineering?.lead && !bySlug.has(engineering.lead.model)) {
+      bySlug.set(engineering.lead.model, {
+        slug: engineering.lead.model,
+        displayName: engineering.lead.model,
+        provider: "openai",
+        enabled: true,
+        visible: true,
+      });
+    }
+    return bySlug;
+  }, [engineering, models]);
+  const engineeringModelOptions = useMemo(
+    () => [...engineeringModels.values()].sort((left, right) => left.displayName.localeCompare(right.displayName)),
+    [engineeringModels],
+  );
+  const candidateEfforts = (model: string, current: string | undefined) => {
+    const advertised = engineeringModels.get(model)?.reasoningLevels || [];
+    const supported = advertised.length ? advertised : ENGINEERING_EFFORTS.slice(1);
+    return [...new Set(["default", ...supported, ...(current ? [current] : [])])];
+  };
+  const editCandidate = (list: "candidates" | "optionalCandidates", index: number, patch: Partial<EngineeringPolicyCandidate>) => {
+    setEngineeringEditor((current) => {
+      if (!current || current.kind !== "role") return current;
+      const next = current[list].map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, ...patch } : candidate);
+      return { ...current, [list]: next };
+    });
+  };
+  const moveCandidate = (list: "candidates" | "optionalCandidates", index: number, direction: -1 | 1) => {
+    setEngineeringEditor((current) => {
+      if (!current || current.kind !== "role") return current;
+      const target = index + direction;
+      if (target < 0 || target >= current[list].length) return current;
+      const next = [...current[list]];
+      [next[index], next[target]] = [next[target], next[index]];
+      return { ...current, [list]: next };
+    });
+  };
+  const removeCandidate = (list: "candidates" | "optionalCandidates", index: number) => {
+    setEngineeringEditor((current) => current?.kind === "role"
+      ? { ...current, [list]: current[list].filter((_, candidateIndex) => candidateIndex !== index) }
+      : current);
+  };
+  const addCandidate = (list: "candidates" | "optionalCandidates") => {
+    setEngineeringEditor((current) => {
+      if (!current || current.kind !== "role") return current;
+      const used = new Set([...current.candidates, ...current.optionalCandidates].map(({ model }) => model));
+      const model = engineeringModelOptions.find((option) => !used.has(option.slug))?.slug;
+      if (!model) return current;
+      return { ...current, [list]: [...current[list], { model, effort: "default" }] };
+    });
+  };
   const [trayCapability, setTrayCapability] = useState<{ supported?: boolean; why?: string }>();
   useEffect(() => {
     let active = true;
@@ -460,36 +539,149 @@ export function SettingsPage({ target, engineering, health, presence, chatgptSes
                 <div className="settings-list">
                   {engineering?.lead ? (
                     <div className="setting-row static-row">
-                      <div>
-                        <strong>{t("settings.engineering.lead.native")}</strong>
-                        <small>{t("settings.engineering.lead.detail", {
-                          route: candidateLabel(engineering.lead, t),
-                        })}</small>
-                      </div>
+                      {engineeringEditor?.kind === "lead" ? (
+                        <div className="engineering-editor">
+                          <strong>{t("settings.engineering.lead.native")}</strong>
+                          <div className="engineering-route-editor">
+                            <select aria-label="Lead model" value={engineeringEditor.model} onChange={(event) => setEngineeringEditor({ ...engineeringEditor, model: event.target.value })}>
+                              {engineeringModelOptions.map((model) => <option key={model.slug} value={model.slug}>{model.displayName} · {model.slug}</option>)}
+                            </select>
+                            <select aria-label="Lead effort" value={engineeringEditor.effort} onChange={(event) => setEngineeringEditor({ ...engineeringEditor, effort: event.target.value })}>
+                              {candidateEfforts(engineeringEditor.model, engineeringEditor.effort).map((effort) => <option key={effort} value={effort}>{effort === "default" ? t("settings.engineering.effort.defaultOption") : effort}</option>)}
+                            </select>
+                          </div>
+                          <small>{t("settings.engineering.effort.help")}</small>
+                          <div className="engineering-editor-actions">
+                            <Button variant="secondary" disabled={!api || engineeringMutationPending} onClick={() => setEngineeringEditor(null)}><X aria-hidden size={13} /> {t("common.cancel")}</Button>
+                            <Button disabled={!api || engineeringMutationPending || engineering?.revision === null} onClick={() => {
+                              if (!api || engineering?.revision === null || engineering?.revision === undefined || engineeringEditor.kind !== "lead") return;
+                              setEngineeringMutationPending(true);
+                              let saved = false;
+                              void runAction(t("settings.engineering.action.save"), async () => {
+                                const result = await api.setEngineeringLead(engineeringEditor.model, engineeringEditor.effort, engineering.revision as number);
+                                saved = true;
+                                return result;
+                              }).finally(() => {
+                                setEngineeringMutationPending(false);
+                                if (saved) setEngineeringEditor(null);
+                              });
+                            }}>{t("common.save")}</Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div>
+                            <strong>{t("settings.engineering.lead.native")}</strong>
+                            <small>{t("settings.engineering.lead.detail", {
+                              route: candidateLabel(engineering.lead, t, engineeringModels),
+                            })}</small>
+                          </div>
+                          <Button variant="secondary" disabled={!api || engineeringMutationPending} onClick={() => setEngineeringEditor({ kind: "lead", model: engineering.lead!.model, effort: engineering.lead!.effort })}><Pencil aria-hidden size={13} /> {t("common.edit")}</Button>
+                        </>
+                      )}
                     </div>
                   ) : null}
                   {engineeringRoles.map(([roleName, role]) => {
                     const candidates = (role.candidates || []).filter((candidate) => candidate.disabled !== true);
                     const optionalCandidates = (role.optionalCandidates || []).filter((candidate) => candidate.disabled !== true);
                     const [primary, ...fallbacks] = candidates;
+                    const editing = engineeringEditor?.kind === "role" && engineeringEditor.role === roleName
+                      ? engineeringEditor
+                      : undefined;
                     return (
                       <div className="setting-row static-row" key={roleName}>
-                        <div>
-                          <strong>{roleLabel(roleName)}</strong>
-                          <small>{primary
-                            ? t("settings.engineering.role.primary", { route: candidateLabel(primary, t) })
-                            : t("settings.engineering.role.unavailable")}</small>
-                          <small>{fallbacks.length
-                            ? t("settings.engineering.role.fallbacks", {
-                                routes: fallbacks.map((candidate) => candidateLabel(candidate, t)).join(" → "),
-                              })
-                            : t("settings.engineering.role.noFallbacks")}</small>
-                          {optionalCandidates.length ? (
-                            <small>{t("settings.engineering.role.optional", {
-                              routes: optionalCandidates.map((candidate) => candidateLabel(candidate, t)).join(" · "),
-                            })}</small>
-                          ) : null}
-                        </div>
+                        {editing ? (
+                          <div className="engineering-editor">
+                            <strong>{roleLabel(roleName)}</strong>
+                            <small>{t("settings.engineering.editor.ordered")}</small>
+                            {editing.candidates.map((candidate, index) => (
+                              <div className="engineering-route-editor" key={`candidate-${index}`}>
+                                <span>{index === 0 ? t("settings.engineering.editor.primary") : t("settings.engineering.editor.fallback", { index })}</span>
+                                <select aria-label={`${roleLabel(roleName)} ${index === 0 ? "primary" : `fallback ${index}`} model`} value={candidate.model} onChange={(event) => editCandidate("candidates", index, { model: event.target.value })}>
+                                  {engineeringModelOptions.map((model) => <option key={model.slug} value={model.slug}>{model.displayName} · {model.slug}</option>)}
+                                </select>
+                                <select aria-label={`${roleLabel(roleName)} ${index === 0 ? "primary" : `fallback ${index}`} effort`} value={candidate.effort || "default"} onChange={(event) => editCandidate("candidates", index, { effort: event.target.value })}>
+                                  {candidateEfforts(candidate.model, candidate.effort).map((effort) => <option key={effort} value={effort}>{effort === "default" ? t("settings.engineering.effort.defaultOption") : effort}</option>)}
+                                </select>
+                                <button type="button" className="engineering-icon-button" aria-label={`Move ${roleLabel(roleName)} route up`} disabled={index === 0} onClick={() => moveCandidate("candidates", index, -1)}><ChevronUp aria-hidden size={13} /></button>
+                                <button type="button" className="engineering-icon-button" aria-label={`Move ${roleLabel(roleName)} route down`} disabled={index === editing.candidates.length - 1} onClick={() => moveCandidate("candidates", index, 1)}><ChevronDown aria-hidden size={13} /></button>
+                                <button type="button" className="engineering-icon-button" aria-label={`Remove ${roleLabel(roleName)} route`} disabled={editing.candidates.length === 1} onClick={() => removeCandidate("candidates", index)}><Trash2 aria-hidden size={13} /></button>
+                              </div>
+                            ))}
+                            <Button variant="secondary" disabled={engineeringModelOptions.length <= editing.candidates.length + editing.optionalCandidates.length} onClick={() => addCandidate("candidates")}><Plus aria-hidden size={13} /> {t("settings.engineering.editor.addFallback")}</Button>
+                            <small>{t("settings.engineering.editor.optional")}</small>
+                            {editing.optionalCandidates.map((candidate, index) => (
+                              <div className="engineering-route-editor" key={`optional-${index}`}>
+                                <span>{t("settings.engineering.editor.optionalRoute")}</span>
+                                <select aria-label={`${roleLabel(roleName)} optional ${index + 1} model`} value={candidate.model} onChange={(event) => editCandidate("optionalCandidates", index, { model: event.target.value })}>
+                                  {engineeringModelOptions.map((model) => <option key={model.slug} value={model.slug}>{model.displayName} · {model.slug}</option>)}
+                                </select>
+                                <select aria-label={`${roleLabel(roleName)} optional ${index + 1} effort`} value={candidate.effort || "default"} onChange={(event) => editCandidate("optionalCandidates", index, { effort: event.target.value })}>
+                                  {candidateEfforts(candidate.model, candidate.effort).map((effort) => <option key={effort} value={effort}>{effort === "default" ? t("settings.engineering.effort.defaultOption") : effort}</option>)}
+                                </select>
+                                <button type="button" className="engineering-icon-button" aria-label={`Move ${roleLabel(roleName)} optional route up`} disabled={index === 0} onClick={() => moveCandidate("optionalCandidates", index, -1)}><ChevronUp aria-hidden size={13} /></button>
+                                <button type="button" className="engineering-icon-button" aria-label={`Move ${roleLabel(roleName)} optional route down`} disabled={index === editing.optionalCandidates.length - 1} onClick={() => moveCandidate("optionalCandidates", index, 1)}><ChevronDown aria-hidden size={13} /></button>
+                                <button type="button" className="engineering-icon-button" aria-label={`Remove ${roleLabel(roleName)} optional route`} onClick={() => removeCandidate("optionalCandidates", index)}><Trash2 aria-hidden size={13} /></button>
+                              </div>
+                            ))}
+                            <Button variant="secondary" disabled={engineeringModelOptions.length <= editing.candidates.length + editing.optionalCandidates.length} onClick={() => addCandidate("optionalCandidates")}><Plus aria-hidden size={13} /> {t("settings.engineering.editor.addOptional")}</Button>
+                            <small>{t("settings.engineering.effort.help")}</small>
+                            <div className="engineering-editor-actions">
+                              <Button variant="secondary" disabled={!api || engineeringMutationPending || engineering?.revision === null} onClick={() => {
+                                if (!api || engineering?.revision === null || engineering?.revision === undefined) return;
+                                setEngineeringMutationPending(true);
+                                let saved = false;
+                                void runAction(t("settings.engineering.action.reset"), async () => {
+                                  const result = await api.setEngineeringRole(roleName, [], [], engineering.revision as number, true);
+                                  saved = true;
+                                  return result;
+                                }).finally(() => {
+                                  setEngineeringMutationPending(false);
+                                  if (saved) setEngineeringEditor(null);
+                                });
+                              }}><RotateCcw aria-hidden size={13} /> {t("settings.engineering.editor.reset")}</Button>
+                              <Button variant="secondary" disabled={engineeringMutationPending} onClick={() => setEngineeringEditor(null)}><X aria-hidden size={13} /> {t("common.cancel")}</Button>
+                              <Button disabled={!api || engineeringMutationPending || engineering?.revision === null} onClick={() => {
+                                if (!api || engineering?.revision === null || engineering?.revision === undefined) return;
+                                setEngineeringMutationPending(true);
+                                let saved = false;
+                                void runAction(t("settings.engineering.action.save"), async () => {
+                                  const result = await api.setEngineeringRole(roleName, editing.candidates, editing.optionalCandidates, engineering.revision as number);
+                                  saved = true;
+                                  return result;
+                                }).finally(() => {
+                                  setEngineeringMutationPending(false);
+                                  if (saved) setEngineeringEditor(null);
+                                });
+                              }}>{t("common.save")}</Button>
+                            </div>
+                          </div>
+                        ) : (
+                          <>
+                            <div>
+                              <strong>{roleLabel(roleName)}</strong>
+                              <small>{primary
+                                ? t("settings.engineering.role.primary", { route: candidateLabel(primary, t, engineeringModels) })
+                                : t("settings.engineering.role.unavailable")}</small>
+                              <small>{fallbacks.length
+                                ? t("settings.engineering.role.fallbacks", {
+                                    routes: fallbacks.map((candidate) => candidateLabel(candidate, t, engineeringModels)).join(" → "),
+                                  })
+                                : t("settings.engineering.role.noFallbacks")}</small>
+                              {optionalCandidates.length ? (
+                                <small>{t("settings.engineering.role.optional", {
+                                  routes: optionalCandidates.map((candidate) => candidateLabel(candidate, t, engineeringModels)).join(" · "),
+                                })}</small>
+                              ) : null}
+                            </div>
+                            <Button variant="secondary" disabled={!api || engineeringMutationPending || engineeringEditor !== null} onClick={() => setEngineeringEditor({
+                              kind: "role",
+                              role: roleName,
+                              candidates: candidates.map((candidate) => ({ ...candidate })),
+                              optionalCandidates: optionalCandidates.map((candidate) => ({ ...candidate })),
+                            })}><Pencil aria-hidden size={13} /> {t("common.edit")}</Button>
+                          </>
+                        )}
                       </div>
                     );
                   })}

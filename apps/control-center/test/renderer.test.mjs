@@ -524,6 +524,21 @@ const bridgeSource = String.raw`
       engineering.revision += 1;
       return engineering;
     },
+    setEngineeringRole: async (role, candidates, optionalCandidates, revision, reset = false) => {
+      record("setEngineeringRole", role, candidates, optionalCandidates, revision, reset);
+      if (rejectEngineeringMutation) throw new Error("Engineering policy revision conflict.");
+      if (revision !== engineering.revision) throw new Error("Engineering policy revision conflict.");
+      if (!reset) engineering.roles[role] = { ...engineering.roles[role], candidates, optionalCandidates };
+      engineering.revision += 1;
+      return engineering;
+    },
+    setEngineeringLead: async (model, effort, revision) => {
+      record("setEngineeringLead", model, effort, revision);
+      if (revision !== engineering.revision) throw new Error("Engineering policy revision conflict.");
+      engineering.lead = { executionMode: "native-parent", model, effort };
+      engineering.revision += 1;
+      return engineering;
+    },
     setChatGptAccountSelection: async (selection) => {
       record("setChatGptAccountSelection", selection);
       return { ok: true };
@@ -979,6 +994,18 @@ test("the production renderer exposes model discovery and picker actions", { tim
     assert.equal(await page.getByText("Measured", { exact: true }).count(), 1);
     const engineeringUsage = page.locator(".surface-summary").filter({ hasText: "Measured" });
     assert.match(await engineeringUsage.innerText(), /13k recorded tokens across 4 requests/);
+    const reviewer = page.locator(".setting-row").filter({ hasText: "Reviewer" });
+    await reviewer.getByRole("button", { name: "Edit", exact: true }).click();
+    await reviewer.getByRole("combobox", { name: "Reviewer primary effort", exact: true }).selectOption("low");
+    await reviewer.getByRole("button", { name: "Save", exact: true }).click();
+    await page.waitForFunction(() => window.routerControlTest.calls()
+      .some((call) => call.name === "setEngineeringRole"));
+    const roleCall = await page.evaluate(() => window.routerControlTest.calls()
+      .find((call) => call.name === "setEngineeringRole"));
+    assert.equal(roleCall?.args[0], "reviewer");
+    assert.equal(roleCall?.args[1][0].model, "gpt-5.6-sol");
+    assert.equal(roleCall?.args[1][0].effort, "low");
+    assert.equal(roleCall?.args[3], 3);
     const engineeringToggle = page.getByRole("checkbox", { name: "Use engineering orchestration", exact: true });
     assert.equal(await engineeringToggle.isChecked(), true);
     await engineeringToggle.click();
@@ -987,7 +1014,7 @@ test("the production renderer exposes model discovery and picker actions", { tim
     assert.equal(await engineeringToggle.isChecked(), false);
     const engineeringCall = await page.evaluate(() => window.routerControlTest.calls()
       .find((call) => call.name === "setEngineeringEnabled"));
-    assert.deepEqual(engineeringCall?.args, [false, 3]);
+    assert.deepEqual(engineeringCall?.args, [false, 4]);
     const accountRows = page.locator(".subscription-account-row");
     await page.getByText("ChatGPT accounts", { exact: true }).waitFor();
     assert.equal(await accountRows.count(), 2, "two logged-in accounts should be visible");

@@ -59,6 +59,9 @@ const routerControl = Object.freeze({
   clearRouterDefault: () => call("clearRouterDefault"),
   setSignedRouting: (enabled) => call("setSignedRouting", { enabled }),
   setEngineeringEnabled: (enabled, revision) => call("setEngineeringEnabled", { enabled, revision }),
+  setEngineeringRole: (role, candidates, optionalCandidates, revision, reset = false) =>
+    call("setEngineeringRole", { role, candidates, optionalCandidates, revision, reset }),
+  setEngineeringLead: (model, effort, revision) => call("setEngineeringLead", { model, effort, revision }),
   setChatGptSessionSharing: (enabled) => call("setChatGptSessionSharing", { enabled }),
   addChatGptSubscriptionAccount: (label) => call("addChatGptSubscriptionAccount", { label }),
   loginChatGptSubscriptionAccount: (accountId) => call("loginChatGptSubscriptionAccount", { accountId }),

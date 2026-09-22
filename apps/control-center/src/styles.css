@@ -1858,6 +1858,50 @@ progress::-webkit-progress-value { border-radius: 999px; background: var(--accen
 
 .settings-list .setting-row:last-child { border-bottom: 0; }
 
+.engineering-editor {
+  display: grid;
+  width: 100%;
+  gap: 8px;
+}
+
+.engineering-route-editor {
+  display: grid;
+  grid-template-columns: 76px minmax(220px, 1fr) minmax(120px, 170px) 28px 28px 28px;
+  align-items: center;
+  gap: 6px;
+}
+
+.engineering-route-editor > span {
+  color: var(--ink-subtle);
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.engineering-route-editor select {
+  width: 100%;
+  max-width: none;
+}
+
+.engineering-icon-button {
+  display: inline-grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-2);
+  color: var(--ink-subtle);
+}
+
+.engineering-icon-button:disabled { opacity: 0.38; }
+
+.engineering-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
 .setting-row code {
   max-width: 45%;
   overflow: hidden;

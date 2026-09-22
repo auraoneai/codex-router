@@ -54,6 +54,11 @@ const SERVICE_COMMANDS = ["status", "start"];
 const TRAY_COMMANDS = ["enable", "disable", "status", "restart"];
 const SUBAGENT_MODES = ["all", "selected", "proven"];
 const EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max", "ultra", "default"];
+const ENGINEERING_ROLES = new Set([
+  "architecture", "fast_general_worker", "repo_explorer", "mechanical_worker",
+  "general_coder", "complex_coder", "debugger", "test_author", "reviewer",
+  "integrator", "deputy_lead", "prose_docs", "synthesizer",
+]);
 const LOCAL_RUNTIME_COMMANDS = ["start", "update"];
 const RETENTION_MIN_TTL_DAYS = 1;
 const RETENTION_MAX_TTL_DAYS = 3_650;
@@ -1258,6 +1263,67 @@ export function engineeringToggleInputArgs(input) {
   return engineeringToggleArgs(input.enabled, input.revision);
 }
 
+function engineeringCandidateInput(candidate, label) {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+    throw new Error(`${label} must be an object.`);
+  }
+  const allowed = new Set(["model", "effort", "capacityHost", "disabled", "minimumCapabilities"]);
+  for (const key of Object.keys(candidate)) {
+    if (!allowed.has(key)) throw new Error(`${label} contains unsupported field ${key}.`);
+  }
+  const model = stringValue(candidate.model, `${label} model`, MODEL_SLUG);
+  const effort = candidate.effort === undefined ? "default" : oneOf(candidate.effort, EFFORTS, `${label} effort`);
+  return {
+    ...candidate,
+    model,
+    effort,
+  };
+}
+
+export function engineeringRoleInput(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new Error("Engineering role input must be an object.");
+  }
+  const keys = Object.keys(input).sort();
+  const allowed = new Set(["role", "candidates", "optionalCandidates", "revision", "reset"]);
+  for (const key of keys) if (!allowed.has(key)) throw new Error(`Engineering role input contains unsupported field ${key}.`);
+  if (!ENGINEERING_ROLES.has(input.role)) throw new Error("Engineering role is unsupported.");
+  if (!Number.isSafeInteger(input.revision) || input.revision < 0) {
+    throw new Error("Engineering policy revision must be a non-negative safe integer.");
+  }
+  if (input.reset === true) return { role: input.role, revision: input.revision, reset: true };
+  if (!Array.isArray(input.candidates) || input.candidates.length < 1 || input.candidates.length > 20) {
+    throw new Error("Engineering role candidates must contain between 1 and 20 routes.");
+  }
+  if (!Array.isArray(input.optionalCandidates) || input.optionalCandidates.length > 20) {
+    throw new Error("Engineering optional candidates must be an array with at most 20 routes.");
+  }
+  const candidates = input.candidates.map((candidate, index) => engineeringCandidateInput(candidate, `Candidate ${index + 1}`));
+  const optionalCandidates = input.optionalCandidates.map((candidate, index) => engineeringCandidateInput(candidate, `Optional candidate ${index + 1}`));
+  const models = [...candidates, ...optionalCandidates].map(({ model }) => model);
+  if (new Set(models).size !== models.length) throw new Error("Engineering role routes must be unique.");
+  return { role: input.role, revision: input.revision, candidates, optionalCandidates, reset: false };
+}
+
+export function engineeringLeadInput(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Engineering lead input must be an object.");
+  const keys = Object.keys(input).sort();
+  if (keys.join(",") !== "effort,model,revision") throw new Error("Engineering lead input must contain only effort, model, and revision.");
+  if (!Number.isSafeInteger(input.revision) || input.revision < 0) throw new Error("Engineering policy revision must be a non-negative safe integer.");
+  return {
+    revision: input.revision,
+    model: stringValue(input.model, "Engineering lead model", MODEL_SLUG),
+    effort: oneOf(input.effort, EFFORTS, "Engineering lead effort"),
+  };
+}
+
+async function updateEngineeringPolicyFromControl(input, transform) {
+  const root = discoverSourceRoot();
+  const policyModule = await import(pathToFileURL(path.join(root, "src", "engineering", "policy-state.mjs")).href);
+  policyModule.updateEngineeringPolicy(transform, { expectedRevision: input.revision });
+  return runJson(["engineering", "status"]);
+}
+
 async function snapshot() {
   return runControlJson(["--json"]);
 }
@@ -1906,6 +1972,31 @@ export function registerIpcHandlers({
   // of this transaction or required for new assignments to observe it.
   handleAction("setEngineeringEnabled", async (input) => {
     return runJson(engineeringToggleInputArgs(input));
+  });
+  handleAction("setEngineeringRole", async (input) => {
+    const request = engineeringRoleInput(input);
+    return updateEngineeringPolicyFromControl(request, (policy) => {
+      const roles = { ...(policy.workspace?.roles || {}) };
+      if (request.reset) {
+        delete roles[request.role];
+      } else {
+        const base = roles[request.role] || policy.presets?.[policy.activePreset]?.roles?.[request.role];
+        if (!base) throw new Error(`Engineering role ${request.role} is unavailable in the active preset.`);
+        roles[request.role] = {
+          ...base,
+          candidates: request.candidates,
+          optionalCandidates: request.optionalCandidates,
+        };
+      }
+      return { ...policy, workspace: { ...policy.workspace, roles } };
+    });
+  });
+  handleAction("setEngineeringLead", async (input) => {
+    const request = engineeringLeadInput(input);
+    return updateEngineeringPolicyFromControl(request, (policy) => ({
+      ...policy,
+      lead: { executionMode: "native-parent", model: request.model, effort: request.effort },
+    }));
   });
   handleAction("setChatGptSessionSharing", async ({ enabled } = {}) => {
     if (typeof enabled !== "boolean") throw new Error("enabled must be boolean.");
