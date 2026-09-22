@@ -5,8 +5,8 @@
 **Research date: 2026-09-21 America/Los_Angeles (2026-09-22 UTC).**
 **Follow-up audit:** refreshed against the implemented Codex Router runtime and
 the deployed multi-provider Jev revision on 2026-09-22 UTC.
-**Status: core orchestration implemented, tested, and opt-in by default.** The
-production runtime, graph executor,
+**Status: complete, deployed, installed, and opt-in by default.** The production
+runtime, graph executor,
 durable scheduler/worktree composition, CLI run surface, pinned/adaptive policy,
 lead risk gate, and telemetry described below now exist. Live rollout evidence
 is recorded in the checklists. Routes that failed a live probe remain explicitly
@@ -878,11 +878,16 @@ retained engineering state/evidence; uninstall removes only the managed skill.
 ### 11.2 Verification record for this implementation
 
 The repository evidence for the implementation is deliberately separate from
-provider availability. The engineering suite passes 135 of 135 checks, the
-Cloudflare registry suite passes 43 of 43 checks, the deterministic
-verification/controller lane passes 55 of 55 adjacent checks, and the focused
-Prism Jev/fallback suite passes 154 checks with one intentional skip. Static
-checks, owner-only state tests, secret-pattern scans, route/effort isolation,
+provider availability. Focused engineering, routing and resilience validation
+passed 199 of 199 checks before release. The corrected Windows portability
+cases then passed their focused 20-check lane, and exact-code commit
+`ebabbd85eee5c717eb6acdfb17738e660d3c1766` passed the full Ubuntu, macOS and
+Windows test jobs, both Electron packages, the unified macOS application,
+formula consistency, and a macOS Homebrew source install. The separate manual
+Ubuntu Homebrew source install remained inside its single opaque build step for
+76 minutes and was cancelled after all functional Linux coverage had passed; it
+is not an application, router, provider or orchestration failure. Static checks,
+owner-only state tests, secret-pattern scans, route/effort isolation,
 process-tree cleanup, install/refresh/disable/uninstall preservation, and doctor
 all pass. The installed Codex plane reports engineering revision `0`, preset
 `balanced`, `enabled: false`, `healthy: true`, 117 routed models and 31 routed
@@ -2860,7 +2865,9 @@ Do not report completion until all applicable items are proven.
 * [x] Tests cover routing and provider failure.
 * [x] Documentation explains the architecture.
 * [x] No secrets were committed.
-* [ ] Existing functionality remains intact.
+* [x] Existing functionality remains intact across the full Ubuntu, macOS and
+  Windows test jobs, both Electron packages, the unified macOS application,
+  installed doctor, and macOS Homebrew source installation.
 
 ---
 
