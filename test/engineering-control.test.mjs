@@ -16,6 +16,7 @@ import {
   parseEngineeringHttpRequest,
 } from "../src/engineering/http.mjs";
 import { readEngineeringPolicyDefaults } from "../src/engineering/policy-state.mjs";
+import { privateFileIsProtected } from "../src/file-security.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -129,7 +130,7 @@ test("HTTP PATCH toggles only policy state with CAS and returns a sanitized snap
     assert.equal(enabled.status, 200);
     assert.equal(enabled.body.enabled, true);
     assert.equal(enabled.body.revision, 1);
-    assert.equal(statSync(path.join(current.stateDir, "engineering-policy.json")).mode & 0o077, 0);
+    assert.equal(privateFileIsProtected(path.join(current.stateDir, "engineering-policy.json")), true);
 
     const stale = engineeringControlHttpResponse({
       method: "PATCH",
@@ -153,7 +154,9 @@ test("HTTP PATCH toggles only policy state with CAS and returns a sanitized snap
   }
 });
 
-test("CLI dispatchers expose engineering only for Codex and preserve other commands", () => {
+test("CLI dispatchers expose engineering only for Codex and preserve other commands", {
+  skip: process.platform === "win32" ? "POSIX bin launchers are not Windows entry points" : false,
+}, () => {
   const engineering = path.join(root, "bin", "engineering");
   assert.ok(statSync(engineering).mode & 0o111);
   for (const file of ["bin/model-router", "bin/codex-router"]) {
@@ -174,7 +177,9 @@ test("CLI dispatchers expose engineering only for Codex and preserve other comma
   assert.match(version.stdout.trim(), /^\d+\.\d+\.\d+/u);
 });
 
-test("CLI on/off uses the UI --revision contract and mutates no provider or model state", () => {
+test("CLI on/off uses the UI --revision contract and mutates no provider or model state", {
+  skip: process.platform === "win32" ? "POSIX bin launchers are not Windows entry points" : false,
+}, () => {
   const temp = fixture();
   const providerSelection = path.join(temp.stateDir, "enabled-providers.json");
   const userModels = path.join(temp.stateDir, "user-models.json");
@@ -222,7 +227,9 @@ test("CLI on/off uses the UI --revision contract and mutates no provider or mode
   }
 });
 
-test("CLI policy export and CAS replacement interchange models and efforts without code edits", () => {
+test("CLI policy export and CAS replacement interchange models and efforts without code edits", {
+  skip: process.platform === "win32" ? "POSIX bin launchers are not Windows entry points" : false,
+}, () => {
   const temp = fixture();
   const environment = {
     ...process.env,

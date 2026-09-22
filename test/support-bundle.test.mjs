@@ -154,7 +154,10 @@ test("engineering support projection never copies policy, task, evidence, or art
     const serialized = JSON.stringify(snapshot);
     assert.equal(snapshot.degraded, true);
     assert.equal(snapshot.enabled, false);
-    assert.deepEqual(snapshot.runtimeState, { exists: true, mode: "700" });
+    assert.deepEqual(snapshot.runtimeState, {
+      exists: true,
+      mode: process.platform === "win32" ? "666" : "700",
+    });
     assert.doesNotMatch(serialized, new RegExp(sentinel));
     assert.equal("policy" in snapshot, false);
     assert.equal("tasks" in snapshot, false);

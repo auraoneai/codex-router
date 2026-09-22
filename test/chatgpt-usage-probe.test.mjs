@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { probeChatGPTAccountUsage } from "../src/chatgpt-usage-probe.mjs";
+import { privateFileIsProtected } from "../src/file-security.mjs";
 
 function box() {
   const root = mkdtempSync(path.join(tmpdir(), "usage-probe-"));
@@ -77,7 +78,7 @@ test("the snapshot records each account's windows under the upstream names", asy
     assert.equal(written.accounts.length, 2);
     assert.ok(written.fetchedAt);
     // The document sits beside the credential store and is held to the same bound.
-    assert.equal(statSync(b.cache).mode & 0o777, 0o600);
+    assert.equal(privateFileIsProtected(b.cache), true);
   } finally { b.cleanup(); }
 });
 

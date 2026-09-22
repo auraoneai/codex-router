@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { protectPrivateFile } from "../src/file-security.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -108,7 +109,7 @@ test("doctor gates enabled engineering mode on policy, recovery, private state, 
       })}\n`,
       { mode: 0o600 },
     );
-    if (process.platform !== "win32") chmodSync(policyPath, 0o600);
+    protectPrivateFile(policyPath);
     const result = runDoctor(env);
     for (const name of [
       "Engineering orchestration policy",

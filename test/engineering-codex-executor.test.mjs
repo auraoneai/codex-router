@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -71,11 +72,11 @@ test("app-server executor initializes once and binds start/turn lifecycle parame
     starts[0].params.config.model_providers["codex-router"].http_headers["x-codex-router-engineering-binding"],
     binding.bindingId,
   );
-  assert.equal(starts[0].params.cwd, "/tmp/worktree");
+  assert.equal(starts[0].params.cwd, path.resolve("/tmp/worktree"));
   assert.equal(starts[0].params.effort, undefined);
   const turn = transport.sent.find((message) => message.method === "turn/start");
   assert.equal(turn.params.effort, "high");
-  assert.equal(turn.params.cwd, "/tmp/worktree");
+  assert.equal(turn.params.cwd, path.resolve("/tmp/worktree"));
   assert.equal(turn.params.threadId, "thread-1");
   assert.equal(transport.sent.filter((message) => message.method === "initialize").length, 1);
 
@@ -214,7 +215,7 @@ test("ambiguous thread start reconciles by the app-server-visible thread source"
     if (message.method === "thread/list") fake.reply(message.id, { data: [{
       id: "thread-recovered",
       threadSource: source,
-      cwd: "/tmp/worktree",
+      cwd: executionBinding.worktree,
       model: "kiro-prism/claude-sonnet-5",
       modelProvider: "codex-router",
     }] });

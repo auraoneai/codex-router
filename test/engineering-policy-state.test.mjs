@@ -43,7 +43,7 @@ test("policy state uses owner-only atomic CAS updates and preserves immutable re
     });
     assert.equal(enabled.revision, 1);
     assert.equal(enabled.enabled, true);
-    assert.equal(statSync(enabled.path).mode & 0o777, 0o600);
+    if (process.platform !== "win32") assert.equal(statSync(enabled.path).mode & 0o777, 0o600);
     assert.equal(Object.isFrozen(enabled.policy), true);
 
     const before = readFileSync(enabled.path, "utf8");
@@ -57,7 +57,9 @@ test("policy state uses owner-only atomic CAS updates and preserves immutable re
   }
 });
 
-test("invalid or unprotected mutable policy fails closed without deleting evidence", () => {
+test("invalid or unprotected mutable policy fails closed without deleting evidence", {
+  skip: process.platform === "win32" ? "chmod cannot widen a protected Windows ACL fixture" : false,
+}, () => {
   const { root, stateDir } = fixture();
   try {
     const policy = { ...readEngineeringPolicyDefaults(), enabled: true };

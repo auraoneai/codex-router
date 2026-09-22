@@ -1696,7 +1696,7 @@ test("router preserves relay 429 and suppresses repeated native attempts per acc
     CODEX_ROUTER_PORT: String(routerPort),
     CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
     CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
-    CODEX_ROUTER_AGENT_RELAY_FAILURE_BACKOFF_MS: "250",
+    CODEX_ROUTER_AGENT_RELAY_FAILURE_BACKOFF_MS: "3000",
     CODEX_ROUTER_QUIET: "1",
   });
 
@@ -1741,7 +1741,7 @@ test("router preserves relay 429 and suppresses repeated native attempts per acc
     assert.equal(otherAccount.status, 429);
     assert.equal(nativeRequests, 2, "relay failures must stay partitioned by native account");
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await new Promise((resolve) => setTimeout(resolve, 3100));
     const afterBackoff = await relayRequest("account-a");
     assert.equal(afterBackoff.status, 429);
     assert.equal(nativeRequests, 3, "relay should retry native after the short backoff expires");

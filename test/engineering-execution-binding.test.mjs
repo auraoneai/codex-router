@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 
 import {
@@ -50,7 +51,7 @@ test("execution binding freezes exact route, effort, and checkout identity", () 
   assert.deepEqual(codexExecutionOverrides(value), {
     model: assignment.model,
     modelProvider: "codex-router",
-    cwd: "/tmp/repo-worktree",
+    cwd: path.resolve("/tmp/repo-worktree"),
     effort: "high",
   });
   assertBindingMatchesAssignment(value, assignment);

@@ -171,7 +171,7 @@ test("only the integration owner can integrate the selected clean candidate from
       selectedCandidateId: "winner", candidateId: "winner",
     });
     assert.equal(integrated.status, "integrated");
-    assert.equal(readFileSync(path.join(repo, "chosen.txt"), "utf8"), "winner\n");
+    assert.equal(readFileSync(path.join(repo, "chosen.txt"), "utf8").replaceAll("\r\n", "\n"), "winner\n");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

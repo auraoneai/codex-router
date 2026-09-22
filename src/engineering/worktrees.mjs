@@ -141,6 +141,14 @@ function parseRegisteredWorktrees(output) {
     .map((field) => path.resolve(field.slice("worktree ".length)));
 }
 
+function sameFilesystemPath(left, right) {
+  const normalize = (value) => {
+    const resolved = path.resolve(value);
+    return process.platform === "win32" ? resolved.toLocaleLowerCase("en-US") : resolved;
+  };
+  return normalize(left) === normalize(right);
+}
+
 function isOwnedChange(file, ownedPaths) {
   const folded = file.normalize("NFC").replaceAll("\\", "/").toLocaleLowerCase("en-US");
   return ownedPaths.some((owned) => folded === owned.folded || folded.startsWith(`${owned.folded}/`));
@@ -265,7 +273,7 @@ export class EngineeringWorktrees {
     const registered = parseRegisteredWorktrees(
       await this.runGit(["worktree", "list", "--porcelain", "-z"], { cwd: this.repoRoot }),
     );
-    if (!registered.some((entry) => entry === path.resolve(record.path))) {
+    if (!registered.some((entry) => sameFilesystemPath(entry, record.path))) {
       throw new Error("Refusing to remove an unregistered or path-mismatched worktree.");
     }
     // Repeat ownership/path checks at the destructive boundary.
@@ -298,7 +306,7 @@ export class EngineeringWorktrees {
       const registered = parseRegisteredWorktrees(
         await this.runGit(["worktree", "list", "--porcelain", "-z"], { cwd: this.repoRoot }),
       );
-      if (!registered.includes(path.resolve(record.path))) {
+      if (!registered.some((entry) => sameFilesystemPath(entry, record.path))) {
         throw new Error("A creating worktree exists but is not registered with the repository.");
       }
       const head = String(await this.runGit(["rev-parse", "HEAD"], { cwd: record.path })).trim();

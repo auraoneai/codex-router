@@ -147,7 +147,7 @@ test("an opaque current binding isolates effort, stays local, and correlates usa
     observed.push({ headers: request.headers, body: JSON.parse(Buffer.concat(chunks).toString("utf8")) });
     activeGatewayRequests += 1;
     maxGatewayRequests = Math.max(maxGatewayRequests, activeGatewayRequests);
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    await new Promise((resolve) => setTimeout(resolve, process.platform === "win32" ? 500 : 40));
     activeGatewayRequests -= 1;
     const payload = Buffer.from(JSON.stringify({
       id: "resp_engineering_binding",
