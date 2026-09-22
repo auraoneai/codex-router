@@ -11,7 +11,7 @@
 // `fiveHour`/`weekly` spelling, because the rotation reader accepts both and the
 // upstream names are the ones that will keep matching future releases.
 
-import { writeFileSync } from "node:fs";
+import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -22,6 +22,7 @@ import {
 import { readChatGPTAccountPoolState } from "./chatgpt-account-pool.mjs";
 import { readCodexAccountUsage } from "./codex-account-usage.mjs";
 import { protectPrivateFile } from "./file-security.mjs";
+import { clearAccountAuthInvalid } from "./chatgpt-rotation.mjs";
 
 export const USAGE_PROBE_TIMEOUT_MS = 12_000;
 export const USAGE_PROBE_LIMIT = 8;
@@ -30,13 +31,50 @@ function accountHome(accountId, homesDir) {
   return path.join(homesDir, accountId);
 }
 
+function writeAtomicPrivateJson(filePath, data) {
+  const dir = path.dirname(filePath);
+  const tmpPath = path.join(dir, `.tmp.${path.basename(filePath)}.${process.pid}.${Date.now()}`);
+  writeFileSync(tmpPath, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
+  protectPrivateFile(tmpPath);
+  renameSync(tmpPath, filePath);
+  protectPrivateFile(filePath);
+}
+
+export function nextKnownResetAt(accounts, { now = Date.now() } = {}) {
+  let earliest = null;
+  const list = Array.isArray(accounts)
+    ? accounts
+    : accounts instanceof Map
+    ? Array.from(accounts.values())
+    : typeof accounts === "object" && accounts
+    ? Object.values(accounts)
+    : [];
+  for (const acct of list) {
+    const candidates = [
+      acct?.secondary?.resetsAt,
+      acct?.primary?.resetsAt,
+      acct?.fiveHour?.resetsAt,
+      acct?.weekly?.resetsAt,
+    ].filter((ts) => Number.isFinite(ts) && ts > 0);
+    for (const ts of candidates) {
+      const ms = ts < 100_000_000_000 ? ts * 1000 : ts;
+      if (ms > now) {
+        if (earliest === null || ms < earliest) {
+          earliest = ms;
+        }
+      }
+    }
+  }
+  return earliest;
+}
+
 // Probes every usable account and writes the snapshot. Returns the snapshot so a
 // caller can report it without reading the file back.
 //
 // A probe failure for one account is recorded as an absent reading rather than
 // omitted: rotation treats "no numbers" as eligible, so a transient app-server
 // failure must not silently look like a healthy account.
-export async function probeChatGPTAccountUsage({
+async function executeProbeChatGPTAccountUsage({
   poolPath = CHATGPT_ACCOUNT_POOL_PATH,
   homesDir = CHATGPT_ACCOUNT_HOMES_DIR,
   cachePath = CHATGPT_ACCOUNT_USAGE_CACHE_PATH,
@@ -59,6 +97,19 @@ export async function probeChatGPTAccountUsage({
     // about the one currently spending the operator's quota.
     .sort((left, right) => Number(right.id === selectedId) - Number(left.id === selectedId))
     .slice(0, Math.max(0, Math.floor(probeLimit)));
+
+  let prevAccountsById = new Map();
+  try {
+    const prev = JSON.parse(readFileSync(cachePath, "utf8"));
+    if (Array.isArray(prev?.accounts)) {
+      for (const a of prev.accounts) {
+        if (a?.id) prevAccountsById.set(a.id, a);
+      }
+    }
+  } catch {
+    // No previous cache
+  }
+
   const accounts = await Promise.all(candidates.map(async (account) => {
     const base = {
       id: account.id,
@@ -66,22 +117,33 @@ export async function probeChatGPTAccountUsage({
       state: account.state,
       preferred: account.id === selectedId,
     };
+    const prev = prevAccountsById.get(account.id);
     try {
       const usage = await readUsage({ codexHome: accountHome(account.id, homesDir), timeoutMs });
+      const isAuthInvalid = usage?.authInvalid === true ||
+        Boolean(usage?.rateLimitError && /401|token_revoked|invalidated oauth token|invalid_token|unauthorized/i.test(usage.rateLimitError));
+      if (!isAuthInvalid) {
+        clearAccountAuthInvalid(account.id);
+      }
       return {
         ...base,
         planType: usage.planType ?? null,
         primary: usage.primary ?? null,
         secondary: usage.secondary ?? null,
         fetchedAt: usage.fetchedAt,
+        ...(isAuthInvalid ? { authInvalid: true, authErrorCode: usage.authErrorCode || "token_revoked" } : {}),
+        ...(usage?.rateLimitError ? { error: usage.rateLimitError } : {}),
       };
     } catch (error) {
+      const msg = error instanceof Error ? error.message : "Usage unavailable.";
+      const isAuthInvalid = /401|token_revoked|invalidated oauth token|invalid_token|unauthorized/i.test(msg);
       return {
         ...base,
         planType: null,
-        primary: null,
-        secondary: null,
-        error: error instanceof Error ? error.message : "Usage unavailable.",
+        primary: !isAuthInvalid && prev?.primary ? prev.primary : null,
+        secondary: !isAuthInvalid && prev?.secondary ? prev.secondary : null,
+        error: msg,
+        ...(isAuthInvalid ? { authInvalid: true, authErrorCode: "token_revoked" } : {}),
       };
     }
   }));
@@ -91,12 +153,25 @@ export async function probeChatGPTAccountUsage({
       // The snapshot names accounts and their remaining quota, which is
       // operator metadata rather than a credential, but it lives beside the
       // credential store and is held to the same bound.
-      writeFileSync(cachePath, `${JSON.stringify(snapshot, null, 2)}\n`, { mode: 0o600 });
-      protectPrivateFile(cachePath);
+      writeAtomicPrivateJson(cachePath, snapshot);
     } catch {
       // A snapshot that cannot be written degrades rotation to order-only
       // ranking; it must not fail the caller that asked for a probe.
     }
   }
   return snapshot;
+}
+
+const inFlightProbes = new Map();
+
+export async function probeChatGPTAccountUsage(options = {}) {
+  const key = options.cachePath || CHATGPT_ACCOUNT_USAGE_CACHE_PATH;
+  if (inFlightProbes.has(key)) {
+    return inFlightProbes.get(key);
+  }
+  const promise = executeProbeChatGPTAccountUsage(options).finally(() => {
+    inFlightProbes.delete(key);
+  });
+  inFlightProbes.set(key, promise);
+  return promise;
 }

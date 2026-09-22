@@ -87,6 +87,14 @@ export function normalizeCodexAccountUsage(rateLimitResponse, usageResponse, now
     : [];
   const limits = rateLimitResponse?.rateLimits || {};
   const summary = usageResponse?.summary || {};
+  const rateLimitError = rateLimitResponse?.error;
+  const rateLimitErrorMsg = typeof rateLimitError === "string"
+    ? rateLimitError
+    : rateLimitError?.message || (rateLimitError ? JSON.stringify(rateLimitError) : "");
+  const isAuthInvalid = Boolean(
+    rateLimitError &&
+    /401|token_revoked|invalidated oauth token|invalid_token|unauthorized/i.test(rateLimitErrorMsg),
+  );
   return {
     fetchedAt: now.toISOString(),
     planType: typeof limits.planType === "string" ? limits.planType : null,
@@ -101,6 +109,8 @@ export function normalizeCodexAccountUsage(rateLimitResponse, usageResponse, now
         ? summary.currentStreakDays
         : null,
     },
+    ...(rateLimitErrorMsg ? { rateLimitError: rateLimitErrorMsg } : {}),
+    ...(isAuthInvalid ? { authInvalid: true, authErrorCode: "token_revoked" } : {}),
   };
 }
 
@@ -256,7 +266,7 @@ export function readCodexAccountUsage({
       // app-server races). Hard-failing rateLimits used to paint the whole
       // Models page with a stack trace while the snapshot itself was fine.
       if (message.error) {
-        responses.set(message.id, emptyResponse(message.id));
+        responses.set(message.id, { ...emptyResponse(message.id), error: message.error });
       } else {
         responses.set(message.id, message.result);
       }

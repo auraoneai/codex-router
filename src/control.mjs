@@ -3783,7 +3783,7 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
     // the resulting order. This is the only place that probe is driven: the
     // request path reads the snapshot and never spawns an app-server itself.
     const { probeChatGPTAccountUsage } = await import("./chatgpt-usage-probe.mjs");
-    const { rotationCandidates, leftoverHealth } = await import("./chatgpt-rotation.mjs");
+    const { rotationCandidates, leftoverHealth, accountCooldownUntil } = await import("./chatgpt-rotation.mjs");
     // `cached` reports what rotation is deciding on right now without spending
     // a probe; the default refreshes first. Reading the file in both cases is
     // what makes the two agree about the ranking.
@@ -3800,6 +3800,7 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
     }
     const usageById = new Map((snapshot?.accounts || []).map((entry) => [entry.id, entry]));
     const order = rotationCandidates({ usageById }).map((entry) => entry.id);
+    const now = Date.now();
     process.stdout.write(`${JSON.stringify({
       fetchedAt: snapshot?.fetchedAt,
       rotation: order,
@@ -3809,9 +3810,12 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
         preferred: entry.preferred,
         planType: entry.planType,
         health: leftoverHealth(entry),
+        cooling: (accountCooldownUntil(entry.id) || 0) > now,
+        cooldownUntil: accountCooldownUntil(entry.id) || null,
         primaryRemainingPercent: entry.primary?.remainingPercent ?? null,
         secondaryRemainingPercent: entry.secondary?.remainingPercent ?? null,
         resetsAt: entry.secondary?.resetsAt ?? entry.primary?.resetsAt ?? null,
+        ...(entry.authInvalid ? { authInvalid: true, authErrorCode: entry.authErrorCode || "token_revoked" } : {}),
         ...(entry.error ? { error: entry.error } : {}),
       })),
     })}\n`);

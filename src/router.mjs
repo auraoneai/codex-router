@@ -260,13 +260,21 @@ import {
   rememberOperatorModel,
 } from "./operator-model.mjs";
 import {
+  accountSession,
+  clearAccountAuthInvalid,
   coolAccount,
+  findAccountByChatGPTAccountId,
   forgetAccountAffinities,
+  isAccountAuthInvalid,
+  markAccountAuthInvalid,
+  poolExhaustionReport,
   rememberAccount,
   rotationCandidates,
   COOLDOWN_MS,
   USAGE_CACHE_MAX_AGE_MS,
 } from "./chatgpt-rotation.mjs";
+import { readChatGPTAccountPoolState } from "./chatgpt-account-pool.mjs";
+import { nextKnownResetAt } from "./chatgpt-usage-probe.mjs";
 import { CHATGPT_ACCOUNT_USAGE_CACHE_PATH } from "./paths.mjs";
 import {
   installStableFetchTransport,
@@ -929,7 +937,12 @@ function nativeHeaders(request) {
   // after a 429.
   if (hasNativeSession(headers)) {
     const rotated = rotatedNativeHeaders(headers, conversationKey(request));
-    if (rotated) Object.assign(headers, rotated);
+    if (rotated) {
+      Object.assign(headers, rotated);
+      if (!rotated["chatgpt-account-id"]) {
+        delete headers["chatgpt-account-id"];
+      }
+    }
   }
   return headers;
 }
@@ -943,6 +956,32 @@ function conversationKey(request) {
     if (typeof text === "string" && text) return text;
   }
   return undefined;
+}
+
+let resetProbeTimeout = null;
+
+export function scheduleResetAwareProbe(resetsAtMs) {
+  if (!resetsAtMs || resetsAtMs <= Date.now()) return;
+  if (resetProbeTimeout) clearTimeout(resetProbeTimeout);
+  const delay = Math.max(1000, resetsAtMs - Date.now() + 5000); // 5s after reset
+  if (delay > 24 * 60 * 60_000) return; // Cap to 24h
+  resetProbeTimeout = setTimeout(async () => {
+    try {
+      const { probeChatGPTAccountUsage } = await import("./chatgpt-usage-probe.mjs");
+      await probeChatGPTAccountUsage();
+    } catch {}
+  }, delay);
+  resetProbeTimeout.unref?.();
+}
+
+let lastEmergencyProbeAt = 0;
+export function triggerEmergencyDepletionProbe() {
+  const now = Date.now();
+  if (now - lastEmergencyProbeAt < 30_000) return; // 30s debounce
+  lastEmergencyProbeAt = now;
+  import("./chatgpt-usage-probe.mjs").then(({ probeChatGPTAccountUsage }) => {
+    probeChatGPTAccountUsage().catch(() => {});
+  });
 }
 
 // Per-account quota, as last probed. Read from disk rather than probed inline:
@@ -959,35 +998,75 @@ function cachedAccountUsageById({ now = Date.now() } = {}) {
     const fetchedAt = Date.parse(parsed?.fetchedAt);
     const fresh =
       Number.isFinite(fetchedAt) && now - fetchedAt <= USAGE_CACHE_MAX_AGE_MS;
-    if (fresh) {
-      for (const account of parsed?.accounts || []) {
-        if (account?.id) byId.set(account.id, account);
+    for (const account of parsed?.accounts || []) {
+      if (account?.id) {
+        if (fresh) {
+          byId.set(account.id, account);
+        } else if (
+          account.primary?.remainingPercent === 0 ||
+          account.secondary?.remainingPercent === 0 ||
+          account.authInvalid === true
+        ) {
+          // Retain drained/auth-invalid status even if cache is slightly stale
+          // rather than re-admitting an exhausted or invalid account into rotation.
+          byId.set(account.id, account);
+        }
       }
     }
   } catch {
     // No cache yet, or an unreadable one. Rotation degrades to order-only.
   }
   usageCache = { at: now, byId };
+  try {
+    const nextReset = nextKnownResetAt(byId, { now });
+    if (nextReset) scheduleResetAwareProbe(nextReset);
+  } catch {}
   return byId;
 }
 
-// Called when upstream refuses a native turn for quota. Passing the account over
-// for a cooldown window is what turns a hard 429 into a switch to another
-// subscription on the next turn.
-export function coolNativeAccountAfterRateLimit(headers, { now = Date.now() } = {}) {
+// Called when upstream refuses a native turn for quota or authorization.
+// Passing the account over for a cooldown window or invalidating auth is what
+// turns a hard 429/401 into a switch to another subscription on the next turn or retry.
+export function coolNativeAccount(headers, statusCode = 429, { now = Date.now() } = {}) {
   const account = nativeAccountKey(headers);
-  if (!account) return;
+  const authHeader = typeof headers?.authorization === "string" ? headers.authorization : "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : "";
+  const tokenFingerprint = token ? createHash("sha256").update(token).digest("hex") : undefined;
+
+  const cooldownMs = statusCode === 401 ? 15 * 60_000 : COOLDOWN_MS;
   try {
-    for (const candidate of rotationCandidates({ usageById: cachedAccountUsageById({ now }) })) {
-      if (candidate.headers?.["chatgpt-account-id"] === account) {
-        coolAccount(candidate.id, now + COOLDOWN_MS);
-        forgetAccountAffinities(candidate.id);
-        return;
+    let targetId = undefined;
+    if (account) {
+      const matched = findAccountByChatGPTAccountId(account);
+      if (matched?.id) targetId = matched.id;
+    }
+    if (!targetId && tokenFingerprint) {
+      try {
+        const pool = readChatGPTAccountPoolState();
+        for (const entry of Object.values(pool?.accounts || {})) {
+          const session = accountSession(entry.id);
+          if (session?.tokenFingerprint === tokenFingerprint) {
+            targetId = entry.id;
+            break;
+          }
+        }
+      } catch {}
+    }
+    if (targetId) {
+      if (statusCode === 401) {
+        markAccountAuthInvalid(targetId, { tokenFingerprint, reason: "401_unauthorized" });
+      } else {
+        coolAccount(targetId, now + cooldownMs);
       }
+      forgetAccountAffinities(targetId);
     }
   } catch {
     // A cooldown that cannot be recorded is not worth failing anything over.
   }
+}
+
+export function coolNativeAccountAfterRateLimit(headers, options) {
+  return coolNativeAccount(headers, 429, options);
 }
 
 // Picks the account for this turn and returns its headers, or undefined to keep
@@ -1000,12 +1079,15 @@ function rotatedNativeHeaders(headers, conversationId) {
       conversationId,
       usageById: cachedAccountUsageById(),
     });
-    if (candidates.length < 2) return undefined;
+    if (!candidates.length) return undefined;
     const current = nativeAccountKey(headers);
     const chosen = candidates[0];
     if (!chosen?.headers) return undefined;
     const chosenAccount = chosen.headers["chatgpt-account-id"] || "";
-    if (current && chosenAccount && current === chosenAccount) {
+    const isSameAccount = current && chosenAccount
+      ? current === chosenAccount
+      : headers?.authorization === chosen.headers.authorization;
+    if (isSameAccount) {
       // Already on the account rotation would pick. Recording the affinity
       // still matters: it is what keeps the rest of this conversation here.
       rememberAccount(conversationId, chosen.id);
@@ -2134,6 +2216,21 @@ const nativeCatalogDriftCheckTimer = setInterval(
   5 * 60_000, // Every 5 minutes
 );
 nativeCatalogDriftCheckTimer.unref?.();
+
+// Periodically probe ChatGPT account usage in the background so that spent
+// accounts drop out of rotation proactively before any turn hits a 429.
+const chatgptUsageProbeTimer = setInterval(
+  async () => {
+    try {
+      const { probeChatGPTAccountUsage } = await import("./chatgpt-usage-probe.mjs");
+      await probeChatGPTAccountUsage();
+    } catch {
+      // Usage probing is best-effort; failures must never affect router health.
+    }
+  },
+  10 * 60_000, // Every 10 minutes
+);
+chatgptUsageProbeTimer.unref?.();
 
 async function relayEncryptedAgentPayloadOnce(
   item,
@@ -4821,6 +4918,33 @@ async function handleResponses(request, response, requestUrl) {
       );
     }
 
+    if (!route) {
+      const exhaustion = poolExhaustionReport({
+        usageById: cachedAccountUsageById(),
+      });
+      if (exhaustion?.exhausted) {
+        triggerEmergencyDepletionProbe();
+        console.error(`[codex-router] native pool exhausted: ${exhaustion.message}`);
+        writeJson(response, 429, {
+          error: {
+            message: exhaustion.message,
+            type: "chatgpt_account_pool_exhausted",
+            param: null,
+            code: "pool_exhausted",
+            pool_state: {
+              total: exhaustion.total,
+              healthy: exhaustion.healthy,
+              drained: exhaustion.drained,
+              auth_invalid: exhaustion.authInvalid,
+              cooling: exhaustion.cooling,
+              next_reset_at: exhaustion.nextResetAt,
+            },
+          },
+        });
+        return;
+      }
+    }
+
     // `routedBody` is a fully materialized Buffer -- plain JSON, or the zstd
     // frame `compressedNativeBody` produced together with the matching
     // `Content-Encoding` header. Both are computed once, above, so every
@@ -4854,12 +4978,71 @@ async function handleResponses(request, response, requestUrl) {
     );
     upstreamRetries = retries;
     upstreamStatus = upstream.status;
-    // A native 429 is a spent subscription, not a transient fault: the same
-    // credential will keep refusing until its window resets. Cooling the
-    // account here is what lets the next turn pick a different one instead of
-    // returning the operator to the same wall.
-    if (upstream.status === 429 && !route) {
-      coolNativeAccountAfterRateLimit(headers);
+    // A native 429 (rate limited / quota exhausted) or 401 (invalid/revoked token)
+    // means this account cannot serve the turn. Cool the account, forget its
+    // affinities, and automatically fail over to the next healthy account in the
+    // pool so the turn completes seamlessly without surfacing an error.
+    if (!route && (upstream.status === 429 || upstream.status === 401)) {
+      coolNativeAccount(headers, upstream.status);
+      if (nothingRelayed(response) && !controller.signal.aborted) {
+        const attemptedCandidateIds = new Set();
+        const currentKey = nativeAccountKey(headers);
+        const currentAccount = findAccountByChatGPTAccountId(currentKey);
+        if (currentAccount?.id) attemptedCandidateIds.add(currentAccount.id);
+
+        const convKey = conversationKey(request);
+        while (
+          (upstream.status === 429 || upstream.status === 401) &&
+          nothingRelayed(response) &&
+          !controller.signal.aborted
+        ) {
+          const candidates = rotationCandidates({
+            conversationId: convKey,
+            usageById: cachedAccountUsageById(),
+          });
+          const nextCandidate = candidates.find((c) => !attemptedCandidateIds.has(c.id));
+          if (!nextCandidate) break;
+          attemptedCandidateIds.add(nextCandidate.id);
+
+          const nextAcctId = nextCandidate.headers["chatgpt-account-id"];
+          console.error(
+            `[codex-router] native account failover to ${nextCandidate.id} (${nextAcctId || "personal"}) previous_status=${upstream.status}`,
+          );
+
+          const nextHeaders = {
+            ...headers,
+            ...nextCandidate.headers,
+          };
+          if (!nextCandidate.headers["chatgpt-account-id"]) {
+            delete nextHeaders["chatgpt-account-id"];
+          }
+          if (headers["Content-Encoding"]) {
+            nextHeaders["Content-Encoding"] = headers["Content-Encoding"];
+          }
+
+          upstream = await fetchObservedUpstream(target, {
+            method: "POST",
+            headers: nextHeaders,
+            body: routedBody,
+            signal: controller.signal,
+          });
+          upstreamRetries = (upstreamRetries || 0) + 1;
+          upstreamStatus = upstream.status;
+          upstreamLatencyMs = Date.now() - startedAt;
+
+          if (upstream.status === 429 || upstream.status === 401) {
+            coolNativeAccount(nextHeaders, upstream.status);
+          } else {
+            headers = nextHeaders;
+            rememberAccount(convKey, nextCandidate.id);
+            break;
+          }
+        }
+
+        if (upstream.status === 429 || upstream.status === 401) {
+          triggerEmergencyDepletionProbe();
+        }
+      }
     }
     // Time until the upstream chain answered the request. Everything before
     // this is router-side work (body read, normalization, flattening, vision

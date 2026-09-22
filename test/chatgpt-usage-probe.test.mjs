@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { probeChatGPTAccountUsage } from "../src/chatgpt-usage-probe.mjs";
+import { nextKnownResetAt, probeChatGPTAccountUsage } from "../src/chatgpt-usage-probe.mjs";
 import { privateFileIsProtected } from "../src/file-security.mjs";
+import { isAccountAuthInvalid, markAccountAuthInvalid, resetRotationStateForTests } from "../src/chatgpt-rotation.mjs";
 
 function box() {
   const root = mkdtempSync(path.join(tmpdir(), "usage-probe-"));
@@ -150,3 +151,145 @@ test("paused accounts are not probed and a missing pool yields an empty snapshot
     assert.deepEqual(absent.accounts, []);
   } finally { b.cleanup(); }
 });
+
+test("nextKnownResetAt finds the earliest upcoming reset timestamp across accounts", () => {
+  const now = 1700000000000;
+  const accounts = [
+    { id: "acct_1", primary: { resetsAt: 1700005000000 }, secondary: { resetsAt: 1700050000000 } },
+    { id: "acct_2", primary: { resetsAt: 1700002000000 }, secondary: null },
+    { id: "acct_3", primary: { resetsAt: 1699999000000 } }, // past, should be ignored
+  ];
+  const earliest = nextKnownResetAt(accounts, { now });
+  assert.equal(earliest, 1700002000000);
+
+  // Works on Map too
+  const map = new Map(accounts.map((a) => [a.id, a]));
+  assert.equal(nextKnownResetAt(map, { now }), 1700002000000);
+});
+
+test("transient network probe error preserves previous known reset and quota windows", async () => {
+  const b = box();
+  try {
+    writePool(b.pool, ["acct_transient1"]);
+
+    // First probe succeeds
+    await probeChatGPTAccountUsage({
+      poolPath: b.pool,
+      homesDir: b.homes,
+      cachePath: b.cache,
+      readUsage: async () => ({
+        fetchedAt: new Date().toISOString(),
+        planType: "pro",
+        primary: { remainingPercent: 40, resetsAt: 1800000000000 },
+        secondary: { remainingPercent: 10, resetsAt: 1850000000000 },
+      }),
+    });
+
+    // Second probe encounters a transient network timeout
+    const secondSnapshot = await probeChatGPTAccountUsage({
+      poolPath: b.pool,
+      homesDir: b.homes,
+      cachePath: b.cache,
+      readUsage: async () => {
+        throw new Error("ETIMEDOUT network socket hangup");
+      },
+    });
+
+    const acct = secondSnapshot.accounts[0];
+    // Previous quota and reset window are preserved rather than destroyed
+    assert.equal(acct.primary?.remainingPercent, 40);
+    assert.equal(acct.primary?.resetsAt, 1800000000000);
+    assert.match(acct.error, /ETIMEDOUT/);
+  } finally { b.cleanup(); }
+});
+
+test("concurrent probe requests are deduplicated to a single in-flight execution", async () => {
+  const b = box();
+  try {
+    writePool(b.pool, ["acct_dedup1111", "acct_dedup2222"]);
+    let readCount = 0;
+    const slowReadUsage = async () => {
+      readCount++;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      return {
+        fetchedAt: new Date().toISOString(),
+        planType: "plus",
+        primary: { remainingPercent: 80, resetsAt: Date.now() + 3600000 },
+        secondary: null,
+      };
+    };
+
+    // Fire 3 simultaneous probe calls
+    const [snap1, snap2, snap3] = await Promise.all([
+      probeChatGPTAccountUsage({ poolPath: b.pool, homesDir: b.homes, cachePath: b.cache, readUsage: slowReadUsage }),
+      probeChatGPTAccountUsage({ poolPath: b.pool, homesDir: b.homes, cachePath: b.cache, readUsage: slowReadUsage }),
+      probeChatGPTAccountUsage({ poolPath: b.pool, homesDir: b.homes, cachePath: b.cache, readUsage: slowReadUsage }),
+    ]);
+
+    // Exactly 2 read calls occurred (1 for each of the 2 accounts in the single run), NOT 6!
+    assert.equal(readCount, 2);
+    assert.equal(snap1.fetchedAt, snap2.fetchedAt);
+    assert.equal(snap2.fetchedAt, snap3.fetchedAt);
+  } finally { b.cleanup(); }
+});
+
+test("cache corruption resilience: truncated or invalid JSON is handled safely and overwritten atomically", async () => {
+  const b = box();
+  try {
+    writePool(b.pool, ["acct_resilient1"]);
+
+    // Write corrupted truncated JSON into cache file
+    writeFileSync(b.cache, '{"accounts": [ {"id": "acct_resilient1", "primary": {');
+
+    // Probing should NOT crash with JSON parse error; it should proceed and atomically replace it
+    const snapshot = await probeChatGPTAccountUsage({
+      poolPath: b.pool,
+      homesDir: b.homes,
+      cachePath: b.cache,
+      readUsage: async () => ({
+        fetchedAt: new Date().toISOString(),
+        planType: "team",
+        primary: { remainingPercent: 95, resetsAt: Date.now() + 10000 },
+        secondary: null,
+      }),
+    });
+
+    assert.equal(snapshot.accounts.length, 1);
+    assert.equal(snapshot.accounts[0].primary.remainingPercent, 95);
+
+    // Verify cache file was atomically written as valid JSON
+    const repairedCache = JSON.parse(readFileSync(b.cache, "utf8"));
+    assert.equal(repairedCache.accounts[0].id, "acct_resilient1");
+    assert.equal(repairedCache.accounts[0].primary.remainingPercent, 95);
+  } finally { b.cleanup(); }
+});
+
+test("probe-driven auth healing (Path B): successful probe clears auth-invalid state", async () => {
+  const b = box();
+  resetRotationStateForTests();
+  try {
+    writePool(b.pool, ["acct_healauth1"]);
+
+    // Mark account auth-invalid prior to probe
+    markAccountAuthInvalid("acct_healauth1");
+    assert.equal(isAccountAuthInvalid("acct_healauth1"), true);
+
+    // Run usage probe that succeeds
+    await probeChatGPTAccountUsage({
+      poolPath: b.pool,
+      homesDir: b.homes,
+      cachePath: b.cache,
+      readUsage: async () => ({
+        fetchedAt: new Date().toISOString(),
+        planType: "pro",
+        primary: { remainingPercent: 50, resetsAt: Date.now() + 3600000 },
+        secondary: null,
+      }),
+    });
+
+    // Probe cleared the auth-invalid exclusion!
+    assert.equal(isAccountAuthInvalid("acct_healauth1"), false);
+  } finally { b.cleanup(); resetRotationStateForTests(); }
+});
+
+

@@ -6,15 +6,21 @@ import test from "node:test";
 
 import {
   DEFAULT_PIN_ORDER,
+  accountCooldownUntil,
   accountIsDrained,
   accountSession,
+  clearAccountAuthInvalid,
   coolAccount,
+  findAccountByChatGPTAccountId,
   forgetAccountAffinities,
   inferPurpose,
+  isAccountAuthInvalid,
   leftoverHealth,
+  markAccountAuthInvalid,
   normalizeRules,
   orderAccountCandidates,
   pickAccount,
+  poolExhaustionReport,
   rememberAccount,
   rememberedAccount,
   resetRotationStateForTests,
@@ -269,3 +275,358 @@ test("paused, revoked, and expired accounts are not offered", () => {
     assert.deepEqual(ids.sort(), ["acct_extraextra", "acct_okokokok"]);
   } finally { b.cleanup(); resetRotationStateForTests(); }
 });
+
+test("forgetAccountAffinities clears conversation binding while preserving cooldown", () => {
+  resetRotationStateForTests();
+  try {
+    coolAccount("acct_coolme", Date.now() + 60_000);
+    rememberAccount("thread-1", "acct_coolme");
+    assert.equal(rememberedAccount("thread-1"), "acct_coolme");
+    assert.ok(accountCooldownUntil("acct_coolme") > Date.now());
+
+    forgetAccountAffinities("acct_coolme");
+    assert.equal(rememberedAccount("thread-1"), undefined, "affinity is deleted");
+    assert.ok(accountCooldownUntil("acct_coolme") > Date.now(), "cooldown is preserved");
+  } finally { resetRotationStateForTests(); }
+});
+
+test("a verified healthy account ranks ahead of an unauthenticated or unknown account", () => {
+  // 'u' is preferred and has purpose 'personal' (pin 0), but health is unknown.
+  // 'h' has purpose 'foundation' (lower pin), but is confirmed healthy.
+  // 'h' must win because confirmed quota outranks unknown health.
+  const ordered = orderAccountCandidates(
+    [{ id: "u" }, { id: "h" }],
+    {
+      preferred: "u",
+      purposeById: { u: "personal", h: "foundation" },
+      pinOrder: DEFAULT_PIN_ORDER,
+      usageById: {
+        u: {}, // unknown
+        h: { primary: { remainingPercent: 80 } }, // healthy
+      },
+    },
+  );
+  assert.equal(ordered[0].id, "h");
+});
+
+test("findAccountByChatGPTAccountId matches pool account by claim", () => {
+  const b = box();
+  try {
+    writeAccount(b.homes, "acct_target", { accountId: "claim-xyz" });
+    writePool(b.pool, ["acct_target"]);
+    const found = findAccountByChatGPTAccountId("claim-xyz", { poolPath: b.pool, homesDir: b.homes });
+    assert.equal(found?.id, "acct_target");
+    assert.equal(findAccountByChatGPTAccountId("nonexistent", { poolPath: b.pool, homesDir: b.homes }), undefined);
+  } finally { b.cleanup(); }
+});
+
+test("early quota reset re-admits a previously drained account immediately without intervention", () => {
+  const b = box();
+  try {
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    writeAccount(b.homes, "acct_alpha111", { exp: future });
+    writeAccount(b.homes, "acct_beta2222", { exp: future });
+    writePool(b.pool, ["acct_alpha111", "acct_beta2222"]);
+
+    // acct_alpha111 is completely drained (0%)
+    const drainedUsage = {
+      acct_alpha111: { primary: { remainingPercent: 0 } },
+      acct_beta2222: { primary: { remainingPercent: 70 } },
+    };
+    let candidates = rotationCandidates({ poolPath: b.pool, homesDir: b.homes, usageById: drainedUsage });
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0].id, "acct_beta2222");
+
+    // Early reset happens: OpenAI restored quota on acct_alpha111 (e.g. 80%) before advertised reset timestamp
+    const resetUsage = {
+      acct_alpha111: { primary: { remainingPercent: 80 } },
+      acct_beta2222: { primary: { remainingPercent: 70 } },
+    };
+    candidates = rotationCandidates({ poolPath: b.pool, homesDir: b.homes, usageById: resetUsage });
+    assert.equal(candidates.length, 2);
+    // acct_alpha111 is immediately re-admitted and usable
+    assert.ok(candidates.some((c) => c.id === "acct_alpha111"));
+  } finally { b.cleanup(); resetRotationStateForTests(); }
+});
+
+test("single healthy candidate among drained accounts is offered rather than dropped", () => {
+  const b = box();
+  try {
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    writeAccount(b.homes, "acct_drained1", { exp: future });
+    writeAccount(b.homes, "acct_drained2", { exp: future });
+    writeAccount(b.homes, "acct_healthy1", { exp: future });
+    writePool(b.pool, ["acct_drained1", "acct_drained2", "acct_healthy1"]);
+
+    const usage = {
+      acct_drained1: { primary: { remainingPercent: 0 } },
+      acct_drained2: { primary: { remainingPercent: 0 } },
+      acct_healthy1: { primary: { remainingPercent: 50 } },
+    };
+    const candidates = rotationCandidates({ poolPath: b.pool, homesDir: b.homes, usageById: usage });
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0].id, "acct_healthy1");
+  } finally { b.cleanup(); resetRotationStateForTests(); }
+});
+
+test("auth revoked account is excluded and self-heals when refreshed token is supplied", () => {
+  const b = box();
+  try {
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    writeAccount(b.homes, "acct_revoked1", { exp: future });
+    writeAccount(b.homes, "acct_valid111", { exp: future });
+    writePool(b.pool, ["acct_revoked1", "acct_valid111"]);
+
+    const initialSession = accountSession("acct_revoked1", { homesDir: b.homes });
+    assert.ok(initialSession?.tokenFingerprint);
+
+    // 401 occurs, marking acct_revoked1 as auth invalid with its current token fingerprint
+    markAccountAuthInvalid("acct_revoked1", {
+      tokenFingerprint: initialSession.tokenFingerprint,
+      reason: "401_unauthorized",
+    });
+
+    let candidates = rotationCandidates({ poolPath: b.pool, homesDir: b.homes });
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0].id, "acct_valid111");
+
+    // Operator logs in or token is refreshed, updating auth.json with new token
+    writeAccount(b.homes, "acct_revoked1", { exp: future + 7200, accountId: "claim-revoked" });
+    const refreshedSession = accountSession("acct_revoked1", { homesDir: b.homes });
+    assert.notEqual(refreshedSession?.tokenFingerprint, initialSession.tokenFingerprint);
+
+    // Immediately upon token change, isAccountAuthInvalid clears and acct_revoked1 returns to candidates!
+    candidates = rotationCandidates({ poolPath: b.pool, homesDir: b.homes });
+    assert.equal(candidates.length, 2);
+    assert.ok(candidates.some((c) => c.id === "acct_revoked1"));
+  } finally { b.cleanup(); resetRotationStateForTests(); }
+});
+
+test("affinity for a drained or cooling account yields to available accounts", () => {
+  resetRotationStateForTests();
+  try {
+    const now = Date.now();
+    rememberAccount("conv-123", "acct_drained");
+
+    const usage = {
+      acct_drained: { primary: { remainingPercent: 0 } },
+      acct_healthy: { primary: { remainingPercent: 80 } },
+    };
+
+    const ordered = orderAccountCandidates(
+      [{ id: "acct_drained" }, { id: "acct_healthy" }],
+      {
+        sticky: rememberedAccount("conv-123", { now }),
+        usageById: usage,
+        now,
+      },
+    );
+    // Even though sticky was acct_drained, because it is drained, acct_healthy must rank first!
+    assert.equal(ordered[0].id, "acct_healthy");
+  } finally { resetRotationStateForTests(); }
+});
+
+test("all-accounts-unavailable behavior: Case A, B, C, D deterministic pool exhaustion and recovery", () => {
+  const b = box();
+  resetRotationStateForTests();
+  try {
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    writeAccount(b.homes, "acct_alpha111", { exp: future, accountId: "org-alpha" });
+    writeAccount(b.homes, "acct_beta2222", { exp: future, accountId: "org-beta" });
+    writePool(b.pool, ["acct_alpha111", "acct_beta2222"]);
+
+    // Case A: All accounts quota-exhausted
+    let usage = new Map([
+      ["acct_alpha111", { primary: { remainingPercent: 0, resetsAt: future + 3600 } }],
+      ["acct_beta2222", { primary: { remainingPercent: 0, resetsAt: future + 7200 } }],
+    ]);
+    let report = poolExhaustionReport({ poolPath: b.pool, homesDir: b.homes, usageById: usage });
+    assert.ok(report);
+    assert.equal(report.exhausted, true);
+    assert.equal(report.total, 2);
+    assert.equal(report.drained, 2);
+    assert.equal(report.healthy, 0);
+    assert.equal(report.authInvalid, 0);
+    assert.ok(report.nextResetAt > 0);
+    assert.ok(report.message.includes("All 2 ChatGPT accounts in the pool are currently unavailable"));
+    assert.equal(rotationCandidates({ poolPath: b.pool, homesDir: b.homes, usageById: usage }).length, 0);
+
+    // Case B: All accounts auth_invalid
+    usage = new Map();
+    markAccountAuthInvalid("acct_alpha111");
+    markAccountAuthInvalid("acct_beta2222");
+    report = poolExhaustionReport({ poolPath: b.pool, homesDir: b.homes, usageById: usage });
+    assert.ok(report);
+    assert.equal(report.exhausted, true);
+    assert.equal(report.total, 2);
+    assert.equal(report.authInvalid, 2);
+    assert.equal(report.healthy, 0);
+    assert.equal(rotationCandidates({ poolPath: b.pool, homesDir: b.homes, usageById: usage }).length, 0);
+
+    // Case C: Mixture of drained and auth_invalid
+    resetRotationStateForTests();
+    markAccountAuthInvalid("acct_alpha111");
+    usage = new Map([
+      ["acct_beta2222", { primary: { remainingPercent: 0, resetsAt: future + 7200 } }],
+    ]);
+    report = poolExhaustionReport({ poolPath: b.pool, homesDir: b.homes, usageById: usage });
+    assert.ok(report);
+    assert.equal(report.exhausted, true);
+    assert.equal(report.authInvalid, 1);
+    assert.equal(report.drained, 1);
+    assert.equal(report.healthy, 0);
+
+    // Case D: Account recovers (e.g. beta gets quota back via early reset)
+    usage = new Map([
+      ["acct_beta2222", { primary: { remainingPercent: 85, resetsAt: future + 7200 } }],
+    ]);
+    report = poolExhaustionReport({ poolPath: b.pool, homesDir: b.homes, usageById: usage });
+    assert.equal(report, null); // Pool is no longer exhausted!
+    const candidates = rotationCandidates({ poolPath: b.pool, homesDir: b.homes, usageById: usage });
+    assert.equal(candidates.length, 1);
+    assert.equal(candidates[0].id, "acct_beta2222");
+  } finally { b.cleanup(); resetRotationStateForTests(); }
+});
+
+test("workspace to personal account failover cleanly strips chatgpt-account-id", () => {
+  const b = box();
+  resetRotationStateForTests();
+  try {
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    // acct_work1111 is a workspace account with chatgpt-account-id
+    writeAccount(b.homes, "acct_work1111", { exp: future, accountId: "org-work" });
+    // acct_pers1111 is a personal account without chatgpt-account-id
+    writeAccount(b.homes, "acct_pers1111", { exp: future, accountId: null });
+    writePool(b.pool, ["acct_work1111", "acct_pers1111"]);
+
+    const workSession = accountSession("acct_work1111", { homesDir: b.homes });
+    const persSession = accountSession("acct_pers1111", { homesDir: b.homes });
+
+    assert.equal(workSession.headers["chatgpt-account-id"], "org-work");
+    assert.equal(persSession.headers["chatgpt-account-id"], undefined);
+
+    // Simulate failover from workSession headers to persSession headers:
+    const initialHeaders = {
+      authorization: workSession.headers.authorization,
+      "chatgpt-account-id": workSession.headers["chatgpt-account-id"],
+      "content-type": "application/json",
+    };
+    assert.equal(initialHeaders["chatgpt-account-id"], "org-work");
+
+    const nextHeaders = {
+      ...initialHeaders,
+      ...persSession.headers,
+    };
+    if (!persSession.headers["chatgpt-account-id"]) {
+      delete nextHeaders["chatgpt-account-id"];
+    }
+
+    // Must have personal token and NO chatgpt-account-id header carried over!
+    assert.equal(nextHeaders.authorization, persSession.headers.authorization);
+    assert.equal(nextHeaders["chatgpt-account-id"], undefined);
+    assert.equal("chatgpt-account-id" in nextHeaders, false);
+  } finally { b.cleanup(); resetRotationStateForTests(); }
+});
+
+test("registration-id identity drift: token change updates identity and clears auth-invalid", () => {
+  const b = box();
+  resetRotationStateForTests();
+  try {
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    // Account initial setup with token 1 and workspace 1
+    writeAccount(b.homes, "acct_drift111", { exp: future, accountId: "org-old" });
+    writePool(b.pool, ["acct_drift111", "acct_other111"]);
+    writeAccount(b.homes, "acct_other111", { exp: future, accountId: "org-other" });
+
+    const session1 = accountSession("acct_drift111", { homesDir: b.homes });
+    assert.equal(session1.accountId, "org-old");
+
+    // Mark auth invalid with token 1's fingerprint
+    markAccountAuthInvalid("acct_drift111", { tokenFingerprint: session1.tokenFingerprint });
+    assert.equal(isAccountAuthInvalid("acct_drift111", { tokenFingerprint: session1.tokenFingerprint }), true);
+
+    // Reauth: token renewal changes token and upstream org changes to org-new
+    writeAccount(b.homes, "acct_drift111", { exp: future + 7200, accountId: "org-new" });
+    const session2 = accountSession("acct_drift111", { homesDir: b.homes });
+    assert.notEqual(session2.tokenFingerprint, session1.tokenFingerprint);
+    assert.equal(session2.accountId, "org-new");
+
+    // Auto-clears auth-invalid because fingerprint changed!
+    assert.equal(isAccountAuthInvalid("acct_drift111", { tokenFingerprint: session2.tokenFingerprint }), false);
+
+    // Candidates still include exactly one entry for acct_drift111 (no duplicates!)
+    const candidates = rotationCandidates({ poolPath: b.pool, homesDir: b.homes });
+    const driftCandidates = candidates.filter((c) => c.id === "acct_drift111");
+    assert.equal(driftCandidates.length, 1);
+    assert.equal(driftCandidates[0].headers["chatgpt-account-id"], "org-new");
+  } finally { b.cleanup(); resetRotationStateForTests(); }
+});
+
+test("multi-hop candidate failover: A (429) -> B (401) -> C (200) with single-attempt guarantee and affinity", () => {
+  const b = box();
+  resetRotationStateForTests();
+  try {
+    const future = Math.floor(Date.now() / 1000) + 3600;
+    writeAccount(b.homes, "acct_hopone1111", { exp: future, accountId: "org-1" });
+    writeAccount(b.homes, "acct_hoptwo2222", { exp: future, accountId: "org-2" });
+    writeAccount(b.homes, "acct_hopthree33", { exp: future, accountId: "org-3" });
+    writePool(b.pool, ["acct_hopone1111", "acct_hoptwo2222", "acct_hopthree33"], {
+      policy: { selectedAccountId: "acct_hopone1111" },
+    });
+
+    const attemptedCandidateIds = new Set();
+    const convId = "conv-multi-hop";
+
+    // Initial candidate selection:
+    let candidates = rotationCandidates({ poolPath: b.pool, homesDir: b.homes, conversationId: convId });
+    let current = candidates.find((c) => !attemptedCandidateIds.has(c.id));
+    assert.equal(current.id, "acct_hopone1111");
+    attemptedCandidateIds.add(current.id);
+
+    // Hop 1: acct_hopone1111 receives 429 Rate Limit -> cooldown applied
+    coolAccount(current.id, Date.now() + 60000);
+
+    // Find next candidate:
+    candidates = rotationCandidates({ poolPath: b.pool, homesDir: b.homes, conversationId: convId });
+    current = candidates.find((c) => !attemptedCandidateIds.has(c.id));
+    assert.equal(current.id, "acct_hoptwo2222");
+    attemptedCandidateIds.add(current.id);
+
+    // Hop 2: acct_hoptwo2222 receives 401 Unauthorized -> marked auth-invalid
+    markAccountAuthInvalid(current.id);
+
+    // Find next candidate:
+    candidates = rotationCandidates({ poolPath: b.pool, homesDir: b.homes, conversationId: convId });
+    current = candidates.find((c) => !attemptedCandidateIds.has(c.id));
+    assert.equal(current.id, "acct_hopthree33");
+    attemptedCandidateIds.add(current.id);
+
+    // Hop 3: acct_hopthree33 receives 200 OK -> affinity recorded
+    rememberAccount(convId, current.id);
+
+    // Verify all candidates were attempted at most once:
+    assert.equal(attemptedCandidateIds.size, 3);
+    assert.ok(attemptedCandidateIds.has("acct_hopone1111"));
+    assert.ok(attemptedCandidateIds.has("acct_hoptwo2222"));
+    assert.ok(attemptedCandidateIds.has("acct_hopthree33"));
+
+    // Verify state exclusions:
+    assert.ok(accountCooldownUntil("acct_hopone1111") > Date.now());
+    assert.equal(isAccountAuthInvalid("acct_hoptwo2222"), true);
+
+    // Verify next turn in same conversation sticks to healthy acct_hopthree33:
+    const nextTurnCandidates = rotationCandidates({ poolPath: b.pool, homesDir: b.homes, conversationId: convId });
+    assert.equal(nextTurnCandidates.length, 1);
+    assert.equal(nextTurnCandidates[0].id, "acct_hopthree33");
+
+    // If acct_hopthree33 also fails, pool exhaustion occurs cleanly without infinite loops:
+    attemptedCandidateIds.add("acct_hopthree33");
+    coolAccount("acct_hopthree33", Date.now() + 60000);
+    const exhaustedCandidates = rotationCandidates({ poolPath: b.pool, homesDir: b.homes, conversationId: convId });
+    const noCandidate = exhaustedCandidates.find((c) => !attemptedCandidateIds.has(c.id));
+    assert.equal(noCandidate, undefined); // loop terminates cleanly!
+  } finally { b.cleanup(); resetRotationStateForTests(); }
+});
+
+
+

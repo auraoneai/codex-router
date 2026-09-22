@@ -29,6 +29,7 @@ import {
 } from "./paths.mjs";
 import { readChatGPTAccountPoolState } from "./chatgpt-account-pool.mjs";
 import { tokenExpiryMs } from "./codex-native-session.mjs";
+import { nextKnownResetAt } from "./chatgpt-usage-probe.mjs";
 
 export const ROTATION_STATE_VERSION = 1;
 
@@ -115,7 +116,12 @@ export function usageWindows(row) {
   );
 }
 
-export function leftoverHealth(row, softDrainPercent = SOFT_DRAIN_PERCENT) {
+export function leftoverHealth(row, softDrainPercent = SOFT_DRAIN_PERCENT, accountId = row?.id) {
+  if (accountId && isAccountAuthInvalid(accountId)) return "auth_invalid";
+  if (row?.authInvalid === true) return "auth_invalid";
+  if (row?.error && /401|token_revoked|invalidated oauth token|invalid_token|unauthorized/i.test(row.error)) {
+    return "auth_invalid";
+  }
   const windows = usageWindows(row);
   if (!windows.length) return "unknown";
   if (windows.some((window) => window.remainingPercent <= DRAINED_LEFTOVER_PERCENT)) return "drained";
@@ -123,8 +129,12 @@ export function leftoverHealth(row, softDrainPercent = SOFT_DRAIN_PERCENT) {
   return "healthy";
 }
 
-export function accountIsDrained(row, softDrainPercent = SOFT_DRAIN_PERCENT) {
-  return leftoverHealth(row, softDrainPercent) === "drained";
+export function accountIsDrained(row, softDrainPercent = SOFT_DRAIN_PERCENT, accountId = row?.id) {
+  return leftoverHealth(row, softDrainPercent, accountId) === "drained";
+}
+
+export function accountIsAuthInvalid(row, accountId = row?.id) {
+  return leftoverHealth(row, undefined, accountId) === "auth_invalid";
 }
 
 // A window that jumped up by a wide margin rolled over rather than drifted.
@@ -141,25 +151,37 @@ export function orderAccountCandidates(candidates, {
   purposeById,
   pinOrder = DEFAULT_PIN_ORDER,
   softDrainPercent = SOFT_DRAIN_PERCENT,
+  now = Date.now(),
 } = {}) {
   const usage = usageById instanceof Map ? usageById : new Map(Object.entries(usageById || {}));
   const purposes = purposeById instanceof Map ? purposeById : new Map(Object.entries(purposeById || {}));
   const orderIndex = new Map((order || []).map((id, index) => [id, index]));
   const pinIndex = new Map((pinOrder || DEFAULT_PIN_ORDER).map((purpose, index) => [purpose, index]));
-  const quotaRank = (id) => (leftoverHealth(usage.get(id), softDrainPercent) === "drained" ? 4 : 1);
+  const quotaRank = (id) => {
+    const health = leftoverHealth(usage.get(id), softDrainPercent, id);
+    if (health === "healthy") return 1;
+    if (health === "soft") return 2;
+    if (health === "unknown") return 3;
+    if (health === "drained") return 4;
+    return 5;
+  };
   const purposeRank = (id) => pinIndex.get(purposes.get(id)) ?? 50;
   return [...candidates].sort((left, right) => {
-    // An in-flight conversation outranks everything: moving a task mid-thread
-    // changes which subscription answers it, and the upstream caches keyed to
-    // the first account stop applying.
+    // An in-flight conversation outranks everything, provided the account
+    // is not currently cooling down, auth-invalid, or completely drained.
     const rank = (entry) => {
-      if (entry.id === sticky) return 0;
       const quota = quotaRank(entry.id);
+      const isCooled = (cooldowns.get(entry.id) || 0) > now;
+      const isAuthInv = isAccountAuthInvalid(entry.id);
+      if (entry.id === sticky && !isCooled && !isAuthInv && quota !== 4 && quota !== 5) return 0;
       const home = entry.id === preferred;
-      if (quota === 1 && home) return 1;
+      if ((quota === 1 || quota === 2) && home) return 1;
       if (quota === 1) return 2;
-      if (home) return 5;
-      return 6;
+      if (quota === 2) return 3;
+      if (quota === 3 && home) return 4;
+      if (quota === 3) return 5;
+      if (home) return 6;
+      return 7;
     };
     const delta = rank(left) - rank(right);
     if (delta !== 0) return delta;
@@ -195,18 +217,27 @@ export function accountSession(accountId, { homesDir = CHATGPT_ACCOUNT_HOMES_DIR
   if (!accessToken) return undefined;
   const expiry = tokenExpiryMs(accessToken);
   const accountIdClaim = typeof tokens?.account_id === "string" ? tokens.account_id : undefined;
+  const tokenFingerprint = createHash("sha256").update(accessToken).digest("hex");
+  const identityFingerprint = accountIdClaim
+    ? createHash("sha256").update(accountIdClaim).digest("hex")
+    : undefined;
   return {
     accountId: accountIdClaim,
     accessToken,
     expired: Number.isFinite(expiry) ? expiry <= now : false,
-    fingerprint: accountIdClaim
-      ? createHash("sha256").update(accountIdClaim).digest("hex")
-      : undefined,
+    tokenFingerprint,
+    identityFingerprint,
+    fingerprint: identityFingerprint,
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      ...(accountIdClaim ? { "chatgpt-account-id": accountIdClaim } : {}),
+    },
   };
 }
 
 const cooldowns = new Map();
 const affinities = new Map();
+const authInvalidAccounts = new Map();
 
 export function coolAccount(accountId, until) {
   if (!accountId) return;
@@ -215,6 +246,28 @@ export function coolAccount(accountId, until) {
 
 export function accountCooldownUntil(accountId) {
   return cooldowns.get(accountId) || 0;
+}
+
+export function markAccountAuthInvalid(accountId, { tokenFingerprint, reason } = {}) {
+  if (!accountId) return;
+  authInvalidAccounts.set(accountId, { at: Date.now(), tokenFingerprint, reason });
+  forgetAccountAffinities(accountId);
+}
+
+export function clearAccountAuthInvalid(accountId) {
+  if (!accountId) return;
+  authInvalidAccounts.delete(accountId);
+}
+
+export function isAccountAuthInvalid(accountId, { tokenFingerprint } = {}) {
+  if (!accountId) return false;
+  const entry = authInvalidAccounts.get(accountId);
+  if (!entry) return false;
+  if (tokenFingerprint && entry.tokenFingerprint && tokenFingerprint !== entry.tokenFingerprint) {
+    authInvalidAccounts.delete(accountId);
+    return false;
+  }
+  return true;
 }
 
 export function rememberAccount(conversationId, accountId) {
@@ -241,7 +294,30 @@ export function forgetAccountAffinities(accountId) {
   for (const [key, entry] of affinities) {
     if (entry.accountId === accountId) affinities.delete(key);
   }
-  cooldowns.delete(accountId);
+}
+
+export function findAccountByChatGPTAccountId(accountKey, {
+  poolPath = CHATGPT_ACCOUNT_POOL_PATH,
+  homesDir = CHATGPT_ACCOUNT_HOMES_DIR,
+} = {}) {
+  if (!accountKey) return undefined;
+  let pool;
+  try {
+    pool = JSON.parse(readFileSync(poolPath, "utf8"));
+  } catch {
+    try {
+      pool = readChatGPTAccountPoolState(poolPath);
+    } catch {
+      return undefined;
+    }
+  }
+  for (const entry of Object.values(pool?.accounts || {})) {
+    if (entry?.id === accountKey) return entry;
+    if (entry?.identity?.accountId === accountKey) return entry;
+    const session = accountSession(entry?.id, { homesDir });
+    if (session?.accountId === accountKey) return entry;
+  }
+  return undefined;
 }
 
 // Exported for tests: rotation decisions must be reproducible without touching
@@ -249,6 +325,7 @@ export function forgetAccountAffinities(accountId) {
 export function resetRotationStateForTests() {
   cooldowns.clear();
   affinities.clear();
+  authInvalidAccounts.clear();
 }
 
 export function rotationCandidates({
@@ -268,6 +345,7 @@ export function rotationCandidates({
   const entries = Object.values(pool?.accounts || {});
   if (entries.length < 2) return [];
   const rules = normalizeRules(pool?.policy?.rules);
+  const usage = usageById instanceof Map ? usageById : new Map(Object.entries(usageById || {}));
   const purposeById = new Map();
   const candidates = [];
   const seenFingerprints = new Set();
@@ -275,10 +353,13 @@ export function rotationCandidates({
     if (entry?.state !== "active" || entry?.paused) continue;
     const session = accountSession(entry.id, { homesDir, now });
     if (!session || session.expired) continue;
+    if (isAccountAuthInvalid(entry.id, { tokenFingerprint: session.tokenFingerprint })) continue;
+    const cachedRow = usage.get(entry.id);
+    if (cachedRow && accountIsAuthInvalid(cachedRow, entry.id)) continue;
     // Two registrations resolving to one ChatGPT identity are one quota, so
     // ranking both would just retry the same subscription.
-    if (session.fingerprint && seenFingerprints.has(session.fingerprint)) continue;
-    if (session.fingerprint) seenFingerprints.add(session.fingerprint);
+    if (session.identityFingerprint && seenFingerprints.has(session.identityFingerprint)) continue;
+    if (session.identityFingerprint) seenFingerprints.add(session.identityFingerprint);
     purposeById.set(entry.id, normalizePurpose(entry.purpose) || inferPurpose(entry.label, entry));
     candidates.push({
       id: entry.id,
@@ -290,9 +371,9 @@ export function rotationCandidates({
   }
   if (!candidates.length) return [];
   const ordered = orderAccountCandidates(candidates, {
-    sticky: rememberedAccount(conversationId, { now }),
+    sticky: rememberedAccount(conversationId, { now, usageById: usage }),
     preferred: pool?.policy?.selectedAccountId,
-    usageById,
+    usageById: usage,
     order: entries.map((entry) => entry.id),
     purposeById,
     pinOrder: rules.pinOrder,
@@ -302,13 +383,92 @@ export function rotationCandidates({
   // drops out now and is admitted again by the next healthy probe, with no
   // operator action. With no usage data at all, every session stays eligible --
   // rotating blindly is still better than refusing to rotate.
-  const usage = usageById instanceof Map ? usageById : new Map(Object.entries(usageById || {}));
   const eligible = usage.size
-    ? ordered.filter((entry) => !accountIsDrained(usage.get(entry.id), rules.softDrainPercent))
+    ? ordered.filter((entry) => !accountIsDrained(usage.get(entry.id), rules.softDrainPercent, entry.id))
     : ordered;
   const ready = eligible.filter((entry) => (cooldowns.get(entry.id) || 0) <= now);
   // Falling back to `eligible` keeps a fully cooled-down pool usable: a stale
   // cooldown must not be the reason a request has no account at all.
   const usable = ready.length ? ready : eligible;
-  return usable.length ? usable : ordered;
+  return usable;
+}
+
+export function poolExhaustionReport({
+  poolPath = CHATGPT_ACCOUNT_POOL_PATH,
+  homesDir = CHATGPT_ACCOUNT_HOMES_DIR,
+  usageById,
+  now = Date.now(),
+} = {}) {
+  let pool;
+  try {
+    pool = readChatGPTAccountPoolState(poolPath);
+  } catch {
+    return null;
+  }
+  if (pool?.policy?.enabled === false) return null;
+  const entries = Object.values(pool?.accounts || {});
+  if (entries.length < 2) return null;
+  const rules = normalizeRules(pool?.policy?.rules);
+  const usage = usageById instanceof Map ? usageById : new Map(Object.entries(usageById || {}));
+
+  let healthy = 0;
+  let soft = 0;
+  let drained = 0;
+  let authInvalid = 0;
+  let cooling = 0;
+  let expired = 0;
+  let totalActive = 0;
+
+  for (const entry of entries) {
+    if (entry?.state !== "active" || entry?.paused) continue;
+    totalActive++;
+    const session = accountSession(entry.id, { homesDir, now });
+    if (!session || session.expired) {
+      expired++;
+      continue;
+    }
+    if (isAccountAuthInvalid(entry.id, { tokenFingerprint: session.tokenFingerprint })) {
+      authInvalid++;
+      continue;
+    }
+    const cachedRow = usage.get(entry.id);
+    if (cachedRow && accountIsAuthInvalid(cachedRow, entry.id)) {
+      authInvalid++;
+      continue;
+    }
+    if (cachedRow && accountIsDrained(cachedRow, rules.softDrainPercent, entry.id)) {
+      drained++;
+      continue;
+    }
+    const isCooling = (cooldowns.get(entry.id) || 0) > now;
+    if (isCooling) {
+      cooling++;
+      continue;
+    }
+    const health = cachedRow ? leftoverHealth(cachedRow, rules.softDrainPercent, entry.id) : "unknown";
+    if (health === "soft") soft++;
+    else healthy++;
+  }
+
+  // If there are accounts that are healthy, soft, or unknown (not drained, cooling, or invalid)
+  if (healthy > 0 || soft > 0 || totalActive === 0) {
+    return null;
+  }
+
+  const nextReset = nextKnownResetAt(usage, { now });
+  const resetIso = nextReset ? new Date(nextReset).toISOString() : null;
+
+  return {
+    exhausted: true,
+    total: totalActive,
+    healthy,
+    soft,
+    drained,
+    authInvalid,
+    cooling,
+    expired,
+    nextResetAt: nextReset,
+    resetIso,
+    message: `All ${totalActive} ChatGPT accounts in the pool are currently unavailable (${drained} quota-exhausted, ${authInvalid} auth invalid, ${cooling} cooling). Earliest quota reset: ${resetIso || "unknown"}.`,
+  };
 }
