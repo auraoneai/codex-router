@@ -42,7 +42,7 @@ test("policy rejects unknown roles, routes, aliases, efforts, and duplicate cand
 
   const unsupportedEffort = enabledPolicy((policy) => {
     policy.workspace.roles.complex_coder = {
-      candidates: [{ model: "gemini-api/models/gemini-3.8-flash", effort: "max" }],
+      candidates: [{ model: "openrouter/gemini-3.8-flash", effort: "max" }],
     };
   });
   assert.throws(() => validateEngineeringPolicy(unsupportedEffort), /not advertised/u);

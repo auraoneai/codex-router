@@ -61,7 +61,13 @@ test("every checked-in GLM-5.3-Flash route records its static metadata", () => {
 // failure here rather than a silent one.
 test("the ROUTES inventory names every checked-in GLM-5.3-Flash route", () => {
   const shipped = [...MODEL_BY_SLUG.keys()].filter((slug) => /(^|\/)glm-5\.3-flash$/.test(slug));
-  assert.deepEqual(shipped.sort(), ROUTES.map(([slug]) => slug).sort());
+  const inventoried = [
+    ...ROUTES.map(([slug]) => slug),
+    // Cloudflare has provider-specific effort and context metadata asserted in
+    // registry.test.mjs; it still belongs in the exhaustive route inventory.
+    "cloudflare-workers-ai/glm-5.3-flash",
+  ];
+  assert.deepEqual(shipped.sort(), inventoried.sort());
 });
 
 test("withdrawn or uncertified reseller routes stay absent while direct-proven routes remain", () => {
