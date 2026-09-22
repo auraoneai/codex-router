@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import http from "node:http";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -131,5 +131,90 @@ test("a compaction against a silent provider fails on its own deadline", async (
       router.kill("SIGTERM");
       await new Promise((resolve) => router.once("exit", resolve));
     }
+  }
+});
+
+test("explicit native compaction keeps its model despite another conversation's routed hint", async () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "compaction-route-state-"));
+  const operatorModelPath = path.join(stateDir, "operator-model.json");
+  writeFileSync(operatorModelPath, JSON.stringify({
+    version: 1, slug: "deepseek/deepseek-v4-pro", native: false,
+  }));
+  const nativeRequests = [];
+  const routedRequests = [];
+  const native = await mockServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    nativeRequests.push({ url: request.url, body: JSON.parse(Buffer.concat(chunks)) });
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ id: "native-compaction", output: [] }));
+  });
+  const gateway = await mockServer(async (request, response) => {
+    if (request.method === "GET") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    routedRequests.push(JSON.parse(Buffer.concat(chunks)));
+    response.writeHead(400, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ error: { message: "routed mock reached", type: "invalid_request_error" } }));
+  });
+  const routerPort = await openPort();
+  const healthUrl = `http://127.0.0.1:${gateway.port}/health`;
+  const router = run({
+    MODEL_ROUTER_STATE_DIR: stateDir,
+    MODEL_ROUTER_OPERATOR_MODEL: operatorModelPath,
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_NATIVE_BASE_URL: `http://127.0.0.1:${native.port}/backend-api/codex`,
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_OAUTH_HEALTH_URL: healthUrl,
+    CODEX_ROUTER_API_HEALTH_URL: healthUrl,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: healthUrl,
+    CODEX_ROUTER_GATEWAY_HEALTH_URL: healthUrl,
+  });
+  const post = (endpoint, body) => fetch(`${routerBase(routerPort)}${endpoint}`, {
+    method: "POST",
+    headers: { Authorization: "Bearer TEST_NATIVE_SESSION", "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const input = [{ type: "message", role: "user", content: [{ type: "input_text", text: "Keep my original model." }] }];
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    for (const endpoint of ["/responses/compact", "/responses"]) {
+      const response = await post(endpoint, {
+        model: "gpt-6-astra", stream: false,
+        input: endpoint.endsWith("/compact") ? input : [...input, { type: "compaction_trigger" }],
+      });
+      assert.equal(response.status, 200, await response.text());
+    }
+    assert.equal(nativeRequests.length, 2);
+    assert.ok(nativeRequests.every(({ body }) => body.model === "gpt-6-astra"));
+    assert.equal(routedRequests.length, 0, "another conversation's hint must not receive explicit native history");
+
+    const routedResponse = await post("/responses/compact", { model: "deepseek/deepseek-v4-pro", input });
+    await routedResponse.text();
+    assert.equal(routedResponse.status, 400);
+    assert.equal(routedRequests.length, 1, "explicit routed compaction still reaches its provider");
+
+    // The hint remains useful when a compaction genuinely supplies no model.
+    const response = await post("/responses/compact", { input });
+    await response.text();
+    assert.equal(response.status, 400);
+    assert.equal(routedRequests.length, 2);
+    assert.equal(nativeRequests.length, 2);
+  } finally {
+    if (router.exitCode === null && router.signalCode === null) {
+      router.kill("SIGTERM");
+      await new Promise((resolve) => router.once("exit", resolve));
+    }
+    native.server.closeAllConnections();
+    gateway.server.closeAllConnections();
+    await Promise.all([
+      new Promise((resolve) => native.server.close(resolve)),
+      new Promise((resolve) => gateway.server.close(resolve)),
+    ]);
+    rmSync(stateDir, { recursive: true, force: true });
   }
 });

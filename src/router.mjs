@@ -4504,9 +4504,9 @@ async function handleResponses(request, response, requestUrl) {
       /\/responses\/compact$/.test(requestUrl.pathname) ||
       (Array.isArray(payload.input) && payload.input.at(-1)?.type === "compaction_trigger");
     // A real turn on a routed model records what the operator is actually
-    // using. A threadless compaction later inherits it instead of falling back
-    // to native GPT, which is what used to strand such a turn on an account
-    // holding no native quota.
+    // using. A compaction without a model can inherit that hint. An explicit
+    // model, including a native one, belongs to this request: the shared hint
+    // may have been written by an unrelated concurrent conversation.
     if (registeredRoute && !isNativeOpenAIRoute(registeredRoute) && !compactingTurn) {
       try {
         rememberOperatorModel(registeredRoute);
@@ -4514,7 +4514,7 @@ async function handleResponses(request, response, requestUrl) {
         // Following a remembered model still works if the hint cannot be written.
       }
     }
-    if (compactingTurn) {
+    if (compactingTurn && !requestedModel) {
       const followed = followOperatorModel(registeredRoute, {
         modelsBySlug: MODEL_BY_SLUG,
         fallbackSlug: readNativeRedirect(),
