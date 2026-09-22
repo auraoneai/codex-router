@@ -69,7 +69,9 @@ test("production runtime composes durable state, artifacts, Prism, app-server, c
 
     const reference = storeArtifact(runtime.paths.artifactRoot, "run/runtime-proof.json", "{}\n");
     assert.equal(reference.path, "run/runtime-proof.json");
-    assert.equal(statSync(runtime.paths.artifactRoot).mode & 0o077, 0);
+    if (process.platform !== "win32") {
+      assert.equal(statSync(runtime.paths.artifactRoot).mode & 0o077, 0);
+    }
 
     const graph = compileSingle({ task: { id: "work", ownedPaths: ["src/runtime.mjs"] } });
     const result = await runEngineeringWorkflow(runtime, {
@@ -254,8 +256,10 @@ test("default production node adapter durably binds a route and worktree before 
     const [task] = await runtime.state.listTasks("real-adapter-run");
     assert.equal(task.workerResult.resultRevision.length >= 40, true);
     assert.equal(task.executionBinding.bindingId, dispatchedBinding.bindingId);
-    assert.equal(statSync(runtime.paths.statePath).mode & 0o077, 0);
-    assert.equal(statSync(runtime.paths.worktreeStatePath).mode & 0o077, 0);
+    if (process.platform !== "win32") {
+      assert.equal(statSync(runtime.paths.statePath).mode & 0o077, 0);
+      assert.equal(statSync(runtime.paths.worktreeStatePath).mode & 0o077, 0);
+    }
   } finally {
     rmSync(environment.root, { recursive: true, force: true });
   }
