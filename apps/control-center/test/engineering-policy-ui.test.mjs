@@ -131,6 +131,13 @@ test("settings fail closed for absent or degraded engineering snapshots", async 
   assert.match(source, /optimisticToggles\.mutate\(/u);
 });
 
+test("settings gets native Codex models alongside the shared routed catalog", async () => {
+  const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.match(app, /const nativeModels = \(target\?\.models \?\? \[\]\)\.filter\(\(model\) => model\.native === true\)/u);
+  assert.match(app, /\.\.\.\(snapshot\?\.catalog\?\.models \?\? \[\]\)\.filter\(\(model\) => !nativeSlugs\.has\(model\.slug\)\)/u);
+  assert.match(app, /engineering=\{snapshot\?\.catalog\?\.engineering\} models=\{settingsModels\}/u);
+});
+
 test("settings exposes editable models, efforts, ordered fallbacks, reset, and usage confidence", async () => {
   const [settings, types, messages] = await Promise.all([
     readFile(new URL("../src/pages/SettingsPage.tsx", import.meta.url), "utf8"),

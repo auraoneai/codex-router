@@ -6403,6 +6403,7 @@ async function handleEngineeringControlRequest(request, response, requestUrl) {
   const rawBody = hasRequestBody
     ? await readRequestBody(request, { maxBytes: ENGINEERING_CONTROL_MAX_BODY_BYTES })
     : undefined;
+  const { nativeEngineeringModelInventory } = await import("./engineering/native-model-inventory.mjs");
   const result = engineeringControlHttpResponse({
     method: request.method,
     url: requestUrl.pathname,
@@ -6410,6 +6411,7 @@ async function handleEngineeringControlRequest(request, response, requestUrl) {
   }, {
     usageEvents: recentEngineeringUsageEvents(),
     modelBySlug: MODEL_BY_SLUG,
+    modelInventory: nativeEngineeringModelInventory(),
   });
   if (result.headers?.allow) response.setHeader("Allow", result.headers.allow);
   writeJson(response, result.status, result.body);

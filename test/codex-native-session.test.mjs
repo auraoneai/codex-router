@@ -202,7 +202,7 @@ test("an unrecognized consent marker fails closed", () => {
   assert.equal(nativeSessionAvailable(), false);
 });
 
-test("native models map for the harness, minus Codex's internal variants", () => {
+test("native models map for the harness with GPT-6 effort choices, minus internal variants", () => {
   const mapped = dshNativeModels([
     {
       slug: "gpt-5.6-sol",
@@ -213,12 +213,30 @@ test("native models map for the harness, minus Codex's internal variants", () =>
       supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }],
       priority: 1,
     },
+    {
+      slug: "gpt-6-sol",
+      display_name: "GPT-6-Sol",
+      visibility: "list",
+      context_window: 1_050_000,
+      supported_reasoning_levels: ["none", "low", "medium", "high", "xhigh", "max"]
+        .map((effort) => ({ effort })),
+      priority: 2,
+    },
+    {
+      slug: "gpt-6-luna",
+      display_name: "GPT-6-Luna",
+      visibility: "list",
+      context_window: 1_050_000,
+      supported_reasoning_levels: ["none", "low", "medium", "high", "xhigh", "max"]
+        .map((effort) => ({ effort })),
+      priority: 3,
+    },
     // A watermarked build and the auto-review model are Codex's own internals.
     { slug: "gpt-5.6-sol-wm", display_name: "watermarked", visibility: "hide" },
     { slug: "codex-auto-review", visibility: "hide" },
   ]);
 
-  assert.equal(mapped.length, 1);
+  assert.equal(mapped.length, 3);
   assert.deepEqual(mapped[0], {
     slug: "gpt-5.6-sol",
     displayName: "GPT-5.6-Sol (Codex)",
@@ -229,6 +247,28 @@ test("native models map for the harness, minus Codex's internal variants", () =>
     priority: -1,
     native: true,
   });
+  assert.deepEqual(mapped.slice(1), [
+    {
+      slug: "gpt-6-sol",
+      displayName: "GPT-6-Sol (Codex)",
+      contextWindow: 1_050_000,
+      inputModalities: ["text"],
+      reasoningLevels: ["none", "low", "medium", "high", "xhigh", "max"]
+        .map((effort) => ({ effort })),
+      priority: -2,
+      native: true,
+    },
+    {
+      slug: "gpt-6-luna",
+      displayName: "GPT-6-Luna (Codex)",
+      contextWindow: 1_050_000,
+      inputModalities: ["text"],
+      reasoningLevels: ["none", "low", "medium", "high", "xhigh", "max"]
+        .map((effort) => ({ effort })),
+      priority: -3,
+      native: true,
+    },
+  ]);
 });
 
 test("an empty or malformed native catalog publishes nothing", () => {

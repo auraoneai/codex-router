@@ -10,6 +10,7 @@ import { STATE_DIR } from "../paths.mjs";
 import { credentialStatus, resolveProviderCredential } from "../provider-credentials.mjs";
 import { EngineeringCapacityCircuits, normalizeEngineeringFailure } from "./capacity.mjs";
 import { immutableSnapshot } from "./contracts.mjs";
+import { nativeEngineeringModelInventory } from "./native-model-inventory.mjs";
 import {
   CodexAppServerClient,
   CodexAppServerExecutor,
@@ -129,8 +130,8 @@ class DurableWorktreeState {
   }
 }
 
-function defaultRouteAvailability(route) {
-  const model = engineeringModel(route);
+function defaultRouteAvailability(route, modelInventory = []) {
+  const model = engineeringModel(route, modelInventory);
   if (!model || model.slug !== route || model.hidden === true || model.listed === false) {
     return { available: false, reason: "route is not an exact listed model" };
   }
@@ -632,6 +633,11 @@ export function createEngineeringRuntime({
   }
   if (typeof monotonicNow !== "function") throw new TypeError("monotonicNow must be a function.");
 
+  const nativeModelInventory = nativeEngineeringModelInventory();
+  const routeAvailabilityForRun = routeAvailability === defaultRouteAvailability
+    ? (route) => defaultRouteAvailability(route, nativeModelInventory)
+    : routeAvailability;
+
   const state = createDurableSchedulerState(statePath, { ...(clock ? { clock } : {}) });
   const transport = appServerTransport || (!appServerClient && !appServerExecutor ? new StdioAppServerTransport() : undefined);
   const client = appServerClient || (!appServerExecutor ? new CodexAppServerClient({ transport }) : undefined);
@@ -659,7 +665,7 @@ export function createEngineeringRuntime({
     executor,
     worktrees: worktreeManager,
     policyStateForRun,
-    routeAvailability,
+    routeAvailability: routeAvailabilityForRun,
     circuits: fallbackCircuits,
     now: monotonicNow,
     dispatchDeadlineMs,
@@ -690,9 +696,9 @@ export function createEngineeringRuntime({
     const configuredModels = [];
     const offeredBindings = [];
     for (const route of policyRouteSlugs(policyState.policy)) {
-      const availability = normalizeAvailability(await routeAvailability(route));
+      const availability = normalizeAvailability(await routeAvailabilityForRun(route));
       if (!availability.available) continue;
-      const model = engineeringModel(route);
+      const model = engineeringModel(route, nativeModelInventory);
       if (!model || model.slug !== route) continue;
       configuredModels.push(route);
       offeredBindings.push({
@@ -714,6 +720,7 @@ export function createEngineeringRuntime({
       highRisk: task.highRisk === true,
       configuredModels,
       offeredBindings,
+      modelInventory: nativeModelInventory,
     });
     if (resolution.status !== "resolved") {
       throw new Error(`No available engineering route for ${role}: ${(resolution.rejectedCandidates || []).map((item) => `${item.model}: ${item.reason}`).join("; ")}`);
@@ -892,7 +899,7 @@ export function createEngineeringRuntime({
     worktreeState: durableWorktreeState,
     prism: decisions,
     prismClient: decisions,
-    routeAvailability,
+    routeAvailability: routeAvailabilityForRun,
     nodeAdapter: nodeAdapter || productionNodeAdapter,
     paths,
   };
@@ -904,7 +911,7 @@ export function createEngineeringRuntime({
 
   async function assertRoutesAvailable(routes) {
     for (const route of routes) {
-      const availability = normalizeAvailability(await routeAvailability(route));
+      const availability = normalizeAvailability(await routeAvailabilityForRun(route));
       if (!availability.available) {
         throw new Error(`Engineering route ${route} is unavailable${availability.reason ? `: ${availability.reason}` : ""}.`);
       }

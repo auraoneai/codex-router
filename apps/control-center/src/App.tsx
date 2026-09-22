@@ -167,6 +167,16 @@ export default function App() {
   }, []);
 
   const target = snapshot?.targets.codex;
+  // Native Codex models live in the target adapter catalog rather than the
+  // shared routed catalog. Engineering role selection can use both.
+  const settingsModels = useMemo(() => {
+    const nativeModels = (target?.models ?? []).filter((model) => model.native === true);
+    const nativeSlugs = new Set(nativeModels.map((model) => model.slug));
+    return [
+      ...nativeModels,
+      ...(snapshot?.catalog?.models ?? []).filter((model) => !nativeSlugs.has(model.slug)),
+    ];
+  }, [snapshot?.catalog?.models, target?.models]);
   const localDownloadActive = target?.modelSettings?.localModels?.download?.status === "downloading";
   const mlxOperationActive = ACTIVE_MLX_STATES.has(target?.modelSettings?.localModels?.mlx?.operation?.status || "idle");
   const visionDownloadActive = target?.modelSettings?.visionBridge?.download?.status === "downloading";
@@ -454,7 +464,7 @@ export default function App() {
       case "local": return <LocalPage {...shared} operation={operation} />;
       case "harness": return <HarnessPage {...shared} operation={operation} onNavigate={navigateTo} />;
       case "context": return <ContextPage {...shared} />;
-      case "settings": return <SettingsPage {...shared} onRefresh={refreshAll} health={health} presence={presence} chatgptSession={chatgptSession ?? snapshot?.chatgptSession} accountPool={accountPool} accountPoolError={readErrors.accountPool} engineering={snapshot?.catalog?.engineering} models={snapshot?.catalog?.models || []} theme={theme} onTheme={setTheme} language={language} onLanguage={setLanguage} t={t} />;
+      case "settings": return <SettingsPage {...shared} onRefresh={refreshAll} health={health} presence={presence} chatgptSession={chatgptSession ?? snapshot?.chatgptSession} accountPool={accountPool} accountPoolError={readErrors.accountPool} engineering={snapshot?.catalog?.engineering} models={settingsModels} theme={theme} onTheme={setTheme} language={language} onLanguage={setLanguage} t={t} />;
     }
   })();
 

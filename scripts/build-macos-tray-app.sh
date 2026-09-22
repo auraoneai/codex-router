@@ -50,6 +50,16 @@ node -e '
   exit 1
 }
 
+# The tray transaction may install an app produced by the repository's remote
+# macOS CI job. Keep the exact same staging, drain, swap, rollback, and launchd
+# transaction; only replace the expensive local compilation/package step.
+if [ -n "${MODEL_ROUTER_PREBUILT_TRAY_BUNDLE:-}" ]; then
+  /bin/sh "$repo_dir/scripts/prepare-macos-tray-bundle.sh" \
+    "$MODEL_ROUTER_PREBUILT_TRAY_BUNDLE" "$bundle_dir" "$repo_dir"
+  printf '%s\n' "$bundle_dir"
+  exit 0
+fi
+
 # Callers capture this script's stdout as the bundle path, so compiler
 # progress must not land there.
 if [ "${MODEL_ROUTER_TRAY_UNIVERSAL:-0}" = "1" ]; then

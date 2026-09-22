@@ -8267,14 +8267,14 @@ test("router refuses a provider-prefixed slug it has no route for instead of for
     MODEL_ROUTER_USER_MODELS: userModels,
     CODEX_ROUTER_QUIET: "1",
   });
-  const post = (pathname, model, input = "turn") =>
+  const post = (pathname, model, input = "turn", extra = {}) =>
     fetch(`${routerBase(routerPort)}${pathname}`, {
       method: "POST",
       headers: {
         Authorization: "Bearer CODEX_CALLER_SECRET",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ model, input }),
+      body: JSON.stringify({ model, input, ...extra }),
     });
 
   try {
@@ -8319,6 +8319,21 @@ test("router refuses a provider-prefixed slug it has no route for instead of for
     assert.equal(nativeRequests[0].body.model, "gpt-6-astra");
     assert.equal(gatewayRequests.length, 1);
 
+    // Newly listed native models use the same passthrough path. Keep their
+    // reasoning choice intact instead of translating it as a routed-provider
+    // effort or requiring a checked-in registry entry.
+    for (const [model, effort] of [
+      ["gpt-6-sol", "none"],
+      ["gpt-6-luna", "max"],
+    ]) {
+      const nativeModelTurn = await post("/responses", model, "turn", {
+        reasoning: { effort },
+      });
+      assert.equal(nativeModelTurn.status, 200);
+      assert.equal(nativeRequests.at(-1).body.model, model);
+      assert.deepEqual(nativeRequests.at(-1).body.reasoning, { effort });
+    }
+
     // Native aliases and the native redirect are read per request and keep
     // serving unprefixed slugs; the redirect does not swallow an unrouted
     // prefixed slug.
@@ -8340,7 +8355,7 @@ test("router refuses a provider-prefixed slug it has no route for instead of for
     assert.equal(stillRefused.status, 400);
     assert.equal((await stillRefused.json()).error.code, "unrouted_model");
     assert.equal(gatewayRequests.length, 3);
-    assert.equal(nativeRequests.length, 1);
+    assert.equal(nativeRequests.length, 3);
     assert.ok(nativeRequests.every((entry) => !String(entry.body.model).includes("/")));
   } finally {
     await stopChild(router);

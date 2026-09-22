@@ -6,6 +6,7 @@ import { privateFileIsProtected, writePrivateJson } from "../file-security.mjs";
 import { SOURCE_ROOT, STATE_DIR } from "../paths.mjs";
 import { assertStateOwnership } from "../state-owner.mjs";
 import { immutableSnapshot } from "./contracts.mjs";
+import { nativeEngineeringModelInventory } from "./native-model-inventory.mjs";
 import { validateEngineeringPolicy } from "./policy.mjs";
 
 export const ENGINEERING_POLICY_STATE_VERSION = 1;
@@ -17,6 +18,19 @@ export const ENGINEERING_POLICY_DEFAULTS_PATH = path.join(
 
 export function engineeringPolicyStatePath(stateDir = STATE_DIR) {
   return path.join(stateDir, "engineering-policy.json");
+}
+
+function registryWithNativeCatalog(registry) {
+  if (registry?.modelInventory !== undefined && !Array.isArray(registry.modelInventory)) {
+    return { ...(registry || {}) };
+  }
+  const models = new Map();
+  for (const model of nativeEngineeringModelInventory()) models.set(model.slug, model);
+  for (const model of registry?.modelInventory || []) models.set(model.slug, model);
+  return {
+    ...(registry || {}),
+    modelInventory: [...models.values()],
+  };
 }
 
 function readJson(filePath, label) {
@@ -31,6 +45,7 @@ export function readEngineeringPolicyDefaults(
   defaultsPath = ENGINEERING_POLICY_DEFAULTS_PATH,
   registry,
 ) {
+  registry = registryWithNativeCatalog(registry);
   const policy = validateEngineeringPolicy(readJson(defaultsPath, "Engineering policy defaults"), registry);
   if (policy.enabled !== false) {
     throw new Error("Checked-in engineering policy defaults must be disabled.");
@@ -84,6 +99,7 @@ export function readEngineeringPolicyState({
   defaultsPath = ENGINEERING_POLICY_DEFAULTS_PATH,
   registry,
 } = {}) {
+  registry = registryWithNativeCatalog(registry);
   try {
     const state = readStrict({ stateDir, defaultsPath, registry });
     return immutableSnapshot({
@@ -148,6 +164,7 @@ export function updateEngineeringPolicy(
   if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
     throw new TypeError("expectedRevision must be a non-negative safe integer.");
   }
+  registry = registryWithNativeCatalog(registry);
   if (stateDir === STATE_DIR) assertStateOwnership("update engineering policy");
   const filePath = engineeringPolicyStatePath(stateDir);
   return withAtomicStateLock(filePath, () => {

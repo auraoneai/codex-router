@@ -340,6 +340,15 @@ jobs:
         env:
           MODEL_ROUTER_TRAY_UNIVERSAL: "1"
         run: scripts/build-macos-tray-app.sh "$RUNNER_TEMP/Codex Router.app"
+      - name: Verify prebuilt app rebinding path
+        run: |
+          /bin/sh scripts/prepare-macos-tray-bundle.sh \
+            "$RUNNER_TEMP/Codex Router.app" \
+            "$RUNNER_TEMP/Codex Router Prepared.app" \
+            "$GITHUB_WORKSPACE"
+          codesign --verify --deep --strict "$RUNNER_TEMP/Codex Router Prepared.app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :ModelRouterSourceRoot' \
+            "$RUNNER_TEMP/Codex Router Prepared.app/Contents/Info.plist")" = "$GITHUB_WORKSPACE"
       - name: Save electron-builder downloads
         if: ${{ !cancelled() && steps.electron-downloads.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v6

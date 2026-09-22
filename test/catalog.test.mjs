@@ -1108,6 +1108,44 @@ test("native catalog merge preserves account visibility and bundled-only models"
   ]);
 });
 
+test("native GPT-6 model reasoning ladders stay account-authoritative", () => {
+  const reasoningLevels = ["none", "low", "medium", "high", "xhigh", "max"]
+    .map((effort) => ({ effort }));
+  const accountModels = [
+    {
+      slug: "gpt-6-sol",
+      visibility: "list",
+      context_window: 1_050_000,
+      max_output_tokens: 128_000,
+      supported_reasoning_levels: reasoningLevels,
+    },
+    {
+      slug: "gpt-6-luna",
+      visibility: "list",
+      context_window: 1_050_000,
+      max_output_tokens: 128_000,
+      supported_reasoning_levels: reasoningLevels,
+    },
+  ];
+  const merged = mergeNativeCatalogs(
+    { models: accountModels },
+    {
+      models: accountModels.map((model) => ({
+        ...model,
+        default_reasoning_level: "low",
+        supported_reasoning_levels: [{ effort: "low" }],
+      })),
+    },
+  );
+  const bySlug = new Map(merged.models.map((model) => [model.slug, model]));
+
+  for (const slug of ["gpt-6-sol", "gpt-6-luna"]) {
+    assert.deepEqual(bySlug.get(slug).supported_reasoning_levels, reasoningLevels);
+    assert.equal(bySlug.get(slug).context_window, 1_050_000);
+    assert.equal(bySlug.get(slug).max_output_tokens, 128_000);
+  }
+});
+
 test("an account catalog can be authoritative about model availability", () => {
   const merged = mergeNativeCatalogs(
     { models: [{ slug: "gpt-free", visibility: "list" }] },

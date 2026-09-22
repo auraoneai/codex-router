@@ -67,12 +67,22 @@ export function dshModelProfile(model) {
   const efforts = levels
     .map((level) => String(level?.effort || ""))
     .filter((effort) => PI_AI_THINKING_LEVELS.has(effort));
+  const mappedEfforts = Object.fromEntries(efforts.map((effort) => [effort, effort]));
+  // pi-ai calls the disabled-reasoning choice `off`; OpenAI's Responses wire
+  // value for that same choice is `none`. Keep the exact provider value while
+  // using the control name pi-ai understands.
+  if (
+    levels.some((level) => level?.effort === "none") &&
+    Object.keys(mappedEfforts).some((effort) => effort !== "off")
+  ) {
+    mappedEfforts.off = "none";
+  }
   // `false` is pi-ai's spelling for "this model does not reason", and it is the
   // right answer for a model the registry gives no levels: omitting the field
   // instead would inherit whatever the installed catalog happens to say about
   // an id that collides with one of its own.
-  profile.reasoningEfforts = efforts.length
-    ? Object.fromEntries(efforts.map((effort) => [effort, effort]))
+  profile.reasoningEfforts = Object.keys(mappedEfforts).length
+    ? mappedEfforts
     : false;
   return profile;
 }
@@ -81,8 +91,14 @@ export function dshModelProfile(model) {
 export function unmappableEfforts(models) {
   const dropped = new Map();
   for (const model of models) {
-    for (const level of model.reasoningLevels || []) {
+    const levels = model.reasoningLevels || [];
+    const noneCanBeMapped = levels.some((level) => level?.effort === "none") &&
+      levels.some((level) =>
+        level?.effort !== "off" && PI_AI_THINKING_LEVELS.has(String(level?.effort || "")),
+      );
+    for (const level of levels) {
       const effort = String(level?.effort || "");
+      if (effort === "none" && noneCanBeMapped) continue;
       if (!effort || PI_AI_THINKING_LEVELS.has(effort)) continue;
       if (!dropped.has(effort)) dropped.set(effort, []);
       dropped.get(effort).push(String(model.slug));

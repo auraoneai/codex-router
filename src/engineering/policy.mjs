@@ -109,8 +109,10 @@ function resolvedRegistry({
   return { modelBySlug: combinedMap, listedModels: [...combinedListed.values()].filter(Boolean) };
 }
 
-export function engineeringModel(slug) {
-  return MODEL_BY_SLUG.get(slug) || ENGINEERING_NATIVE_MODELS.find((model) => model.slug === slug);
+export function engineeringModel(slug, modelInventory = []) {
+  return MODEL_BY_SLUG.get(slug)
+    || modelInventory.find((model) => model.slug === slug)
+    || ENGINEERING_NATIVE_MODELS.find((model) => model.slug === slug);
 }
 
 export function engineeringAgentName(model) {

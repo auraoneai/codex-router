@@ -5,6 +5,7 @@ import {
   DSH_CREDENTIAL_REF,
   DSH_ROUTE_ID,
   buildDshRoute,
+  dshNativeModels,
   dshDefaultModel,
   dshModelProfile,
   renderDshRouteLines,
@@ -42,6 +43,29 @@ test("reasoning levels become pi-ai efforts with their own wire spelling", () =>
     model({ reasoningLevels: [{ effort: "low" }, { effort: "high" }, { effort: "max" }] }),
   );
   assert.deepEqual(profile.reasoningEfforts, { low: "low", high: "high", max: "max" });
+});
+
+test("GPT-6 none is available as pi-ai off and sends the OpenAI wire value", () => {
+  const [nativeModel] = dshNativeModels([{
+    slug: "gpt-6-sol",
+    display_name: "GPT-6-Sol",
+    visibility: "list",
+    context_window: 1_050_000,
+    supported_reasoning_levels: ["none", "low", "medium", "high", "xhigh", "max"]
+      .map((effort) => ({ effort })),
+  }]);
+  const profile = dshModelProfile(nativeModel);
+
+  assert.equal(profile.contextWindow, 1_050_000);
+  assert.deepEqual(profile.reasoningEfforts, {
+    off: "none",
+    low: "low",
+    medium: "medium",
+    high: "high",
+    xhigh: "xhigh",
+    max: "max",
+  });
+  assert.deepEqual([...unmappableEfforts([nativeModel])], []);
 });
 
 test("a model with no reasoning levels declares itself non-reasoning", () => {

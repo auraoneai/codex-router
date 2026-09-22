@@ -240,6 +240,15 @@ function nativeCodexModels(
         gatewayModel: model.slug,
         enabled: true,
         native: true,
+        ...(typeof model.default_reasoning_level === "string" && model.default_reasoning_level
+          ? { defaultEffort: model.default_reasoning_level }
+          : {}),
+        ...(Number.isSafeInteger(model.context_window) && model.context_window > 0
+          ? { contextWindow: model.context_window }
+          : {}),
+        ...(Array.isArray(model.input_modalities)
+          ? { inputModalities: model.input_modalities.filter((item) => typeof item === "string") }
+          : {}),
         // Omit the field for base entries for compatibility with existing
         // probe consumers; a false marker identifies synthesized variants.
         ...(nativeBaseSlugs.has(model.slug) ? {} : { nativeClientManaged: false }),
@@ -584,8 +593,12 @@ async function engineeringResolutionInventory() {
   const { verifiedSubagentTargets } = await import("./subagent-routing.mjs");
   const { routedAgentDefinition } = await import("./codex-agent-catalog.mjs");
   const { ENGINEERING_NATIVE_MODELS, engineeringAgentName } = await import("./engineering/policy.mjs");
+  const { nativeEngineeringModelInventory } = await import("./engineering/native-model-inventory.mjs");
   const routedModels = selectedConfiguredListedModels();
-  const models = [...routedModels, ...ENGINEERING_NATIVE_MODELS];
+  const nativeModelsBySlug = new Map(ENGINEERING_NATIVE_MODELS.map((model) => [model.slug, model]));
+  for (const model of nativeEngineeringModelInventory()) nativeModelsBySlug.set(model.slug, model);
+  const nativeModels = [...nativeModelsBySlug.values()];
+  const models = [...routedModels, ...nativeModels];
   const configured = new Set(models.map((model) => model.slug));
   const offeredBindings = verifiedSubagentTargets({ authority: routedModels })
     .filter((target) => configured.has(target.slug))
@@ -598,7 +611,7 @@ async function engineeringResolutionInventory() {
       capacityHost: model.provider,
       supportedEfforts: (model.reasoningLevels || []).map((level) => level.effort),
     }));
-  for (const model of ENGINEERING_NATIVE_MODELS) {
+  for (const model of nativeModels) {
     offeredBindings.push({
       model: model.slug,
       provider: model.provider,
@@ -606,10 +619,11 @@ async function engineeringResolutionInventory() {
       eligible: true,
       healthy: true,
       capacityHost: model.provider,
+      ...(model.defaultEffort ? { defaultEffort: model.defaultEffort } : {}),
       supportedEfforts: model.reasoningLevels.map((level) => level.effort),
     });
   }
-  return { configuredModels: [...configured], offeredBindings, modelInventory: ENGINEERING_NATIVE_MODELS };
+  return { configuredModels: [...configured], offeredBindings, modelInventory: nativeModels };
 }
 
 function engineeringOption(commandArgs, name) {
