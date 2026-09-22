@@ -10,10 +10,13 @@ fail() {
 source_bundle=$1
 destination_bundle=$2
 repo_dir=$3
+expected_build_sha=${MODEL_ROUTER_PREBUILT_TRAY_EXPECTED_SHA:-}
 
 case $source_bundle in /*) ;; *) fail "the prebuilt app path must be absolute." ;; esac
 case $destination_bundle in /*) ;; *) fail "the staging app path must be absolute." ;; esac
 case $repo_dir in /*) ;; *) fail "the repository root must be absolute." ;; esac
+node -e 'if (!/^[0-9a-f]{40}$/.test(process.argv[1])) process.exit(1)' "$expected_build_sha" \
+  || fail "an exact 40-character CI source SHA is required for prebuilt installation."
 [ -d "$source_bundle" ] && [ ! -L "$source_bundle" ] \
   || fail "the prebuilt app must be a real .app directory."
 [ ! -e "$destination_bundle" ] && [ ! -L "$destination_bundle" ] \
@@ -45,6 +48,8 @@ read_plist() {
   || fail "the embedded Control Center has an unexpected bundle identifier."
 [ "$(read_plist "$source_info" ModelRouterControlVersion)" = "$(node -p 'require(process.argv[1]).version' "$repo_dir/apps/control-center/package.json")" ] \
   || fail "the prebuilt Control Center version does not match this checkout."
+[ "$(read_plist "$source_info" ModelRouterBuildSHA)" = "$expected_build_sha" ] \
+  || fail "the prebuilt app was not built from the expected CI source commit."
 /usr/bin/codesign --verify --deep --strict "$source_bundle" >/dev/null 2>&1 \
   || fail "the prebuilt app signature is invalid."
 

@@ -5,13 +5,6 @@ repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 tray_dir="$repo_dir/apps/macos/ModelRouterTray"
 widget_dir="$repo_dir/apps/macos/RouterUsageWidget"
 control_center_dir="$repo_dir/apps/control-center"
-# The macOS 27 SDK exposes SwiftUI state through platform macro plug-ins that
-# the standalone Command Line Tools do not ship. The bundled widget has always
-# needed xcodebuild as well. Honor an explicit or selected full Xcode first,
-# then use a standard Xcode installation for this child build only; never
-# change the machine-wide xcode-select setting as an installer side effect.
-developer_dir=$(node "$repo_dir/src/macos-developer-tools.mjs")
-export DEVELOPER_DIR="$developer_dir"
 signing_identity=${MODEL_ROUTER_CODESIGN_IDENTITY:--}
 if [ "$signing_identity" = "-" ]; then
   widget_storage_mode=local
@@ -41,14 +34,24 @@ control_protocol=$(node -e '
 ' "$control_center_dir/package.json")
 short_version=${app_version%%-*}
 bundle_version=${MODEL_ROUTER_BUILD_NUMBER:-${GITHUB_RUN_NUMBER:-1}}
+build_source_sha=${MODEL_ROUTER_BUILD_SHA:-${GITHUB_SHA:-unknown}}
 node -e '
   const [shortVersion, buildVersion] = process.argv.slice(1);
   if (!/^\d+(?:\.\d+){0,2}$/.test(shortVersion)) process.exit(2);
   if (!/^\d+(?:\.\d+){0,2}$/.test(buildVersion)) process.exit(3);
-' "$short_version" "$bundle_version" || {
+' "$short_version" "$bundle_version" "$build_source_sha" || {
   printf 'Invalid macOS bundle versions: short=%s build=%s\n' "$short_version" "$bundle_version" >&2
   exit 1
 }
+case $build_source_sha in
+  unknown) ;;
+  * )
+    node -e 'if (!/^[0-9a-f]{40}$/.test(process.argv[1])) process.exit(1)' "$build_source_sha" || {
+      printf 'Invalid macOS build source SHA.\n' >&2
+      exit 1
+    }
+    ;;
+esac
 
 # The tray transaction may install an app produced by the repository's remote
 # macOS CI job. Keep the exact same staging, drain, swap, rollback, and launchd
@@ -59,6 +62,13 @@ if [ -n "${MODEL_ROUTER_PREBUILT_TRAY_BUNDLE:-}" ]; then
   printf '%s\n' "$bundle_dir"
   exit 0
 fi
+
+# The macOS 27 SDK exposes SwiftUI state through platform macro plug-ins that
+# the standalone Command Line Tools do not ship. The bundled widget has always
+# needed xcodebuild as well. Resolve full Xcode only for a source build, honoring
+# explicit or selected Xcode without changing the machine-wide xcode-select.
+developer_dir=$(node "$repo_dir/src/macos-developer-tools.mjs")
+export DEVELOPER_DIR="$developer_dir"
 
 # Callers capture this script's stdout as the bundle path, so compiler
 # progress must not land there.
@@ -151,6 +161,8 @@ printf '%s\n' "$repo_dir" > "$bundle_dir/Contents/Resources/Control Center.app/C
 # be executable-path input. This value is covered by the final signature, so
 # changing the selected checkout also invalidates verification.
 /usr/libexec/PlistBuddy -c "Add :ModelRouterSourceRoot string $repo_dir" \
+  "$bundle_dir/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :ModelRouterBuildSHA string $build_source_sha" \
   "$bundle_dir/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :ModelRouterWidgetStorageMode $widget_storage_mode" \
   "$bundle_dir/Contents/Info.plist"
