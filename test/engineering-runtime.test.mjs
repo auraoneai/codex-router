@@ -273,7 +273,7 @@ test("DeepSeek 429 falls through the immutable snapshot, skips unavailable GLM, 
     defaults.executionSelectionMode = "pinned";
     const deepseek = "kiro-prism/deepseek-v4.1-flash";
     const glm = "cloudflare-workers-ai/glm-5.3";
-    const sol = "kiro-prism/gpt-5.6-sol";
+    const sol = "gpt-5.6-sol";
     const sonnet = "kiro-prism/claude-sonnet-5";
     const dispatches = [];
     let committed = false;

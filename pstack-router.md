@@ -218,7 +218,8 @@ Observed usable publication identities (live inference remains untested here):
 - Debugger: `kiro-prism/deepseek-v4.1-flash`, upstream `deepseek-v4.1-flash`.
 - Balanced coder/integrator: `kiro-prism/claude-sonnet-5`, upstream
   `claude-sonnet-5`.
-- Deputy/integrator/reviewer: `kiro-prism/gpt-5.6-sol`, upstream `gpt-5.6-sol`.
+- Deputy/integrator/reviewer: native Codex `gpt-5.6-sol` through the signed-in
+  OpenAI path. It does not traverse Kiro Prism.
 - Premium reviewer: `kiro-prism/claude-opus-5`, upstream `claude-opus-5`.
 - Additional worker tiers: `kiro-prism/gpt-5.6-luna` and
   `kiro-prism/gpt-5.6-terra`, when eligible for the task.
@@ -228,6 +229,12 @@ agent type was not offered in this session. Full GLM 5.3 has other offered route
 verify its intended Cloudflare lane in Prism and publish/prove the matching
 Router route if required. Treat direct and Prism-served versions as distinct
 routes to potentially the same model family, not independent reviewers.
+
+The engineering preview must show the native `gpt-6-astra` lead explicitly.
+Every exact `gpt-5.6-sol` candidate in the engineering policy is a native Codex
+child route with an independently editable effort. Claude Opus 5 and Claude
+Sonnet 5 retain their `kiro-prism/` route identities. A native child launch uses
+Codex's `openai` model provider and must not attach router provider headers.
 
 Prism's adaptive ten-model pool already includes the requested worker families.
 Its existing Qwen/Grok adaptive exclusions remain unchanged. The Router's
@@ -300,14 +307,14 @@ Example **proposed engineering configuration**, not an already installed schema:
     "complex_coder": {
       "primary": { "model": "kiro-prism/claude-sonnet-5", "effort": "high" },
       "fallbacks": [
-        { "model": "kiro-prism/gpt-5.6-sol", "effort": "default" }
+        { "model": "gpt-5.6-sol", "effort": "default" }
       ]
     },
     "debugger": {
       "primary": { "model": "kiro-prism/deepseek-v4.1-flash", "effort": "default" },
       "fallbacks": [
         { "model": "cloudflare-workers-ai/glm-5.3", "effort": "high" },
-        { "model": "kiro-prism/gpt-5.6-sol", "effort": "default" },
+        { "model": "gpt-5.6-sol", "effort": "default" },
         { "model": "kiro-prism/claude-sonnet-5", "effort": "high" }
       ],
       "capacityFailurePolicy": "deepseek-non-modal-fallback"

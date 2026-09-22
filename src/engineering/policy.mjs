@@ -5,6 +5,23 @@ import { immutableSnapshot } from "./contracts.mjs";
 export const ENGINEERING_POLICY_SCHEMA_VERSION = 1;
 export const DEEPSEEK_CAPACITY_POLICY = "deepseek-non-modal-fallback";
 export const ENGINEERING_EXECUTION_SELECTION_MODES = Object.freeze(["pinned", "adaptive"]);
+export const ENGINEERING_NATIVE_MODELS = Object.freeze([
+  Object.freeze({
+    slug: "gpt-5.6-sol",
+    displayName: "GPT-5.6-Sol (Codex native)",
+    provider: "openai",
+    upstreamModel: "gpt-5.6-sol",
+    gatewayModel: "gpt-5.6-sol",
+    native: true,
+    listed: true,
+    multiAgentVersion: "v2",
+    defaultEffort: "low",
+    reasoningLevels: Object.freeze(
+      ["low", "medium", "high", "xhigh", "max", "ultra"]
+        .map((effort) => Object.freeze({ effort })),
+    ),
+  }),
+]);
 export const ENGINEERING_ROLE_NAMES = Object.freeze([
   "lead_engineer",
   "architecture",
@@ -72,7 +89,8 @@ function resolvedRegistry({
   if (!Array.isArray(modelInventory)) throw new TypeError("Engineering modelInventory must be an array.");
   const combinedMap = new Map(modelBySlug);
   const combinedListed = new Map(listedModels.map((model) => [model?.slug, model]));
-  for (const [index, model] of modelInventory.entries()) {
+  const inventory = [...ENGINEERING_NATIVE_MODELS, ...modelInventory];
+  for (const [index, model] of inventory.entries()) {
     if (!plainObject(model) || typeof model.slug !== "string" || !model.slug.trim()) {
       throw new TypeError(`Engineering modelInventory[${index}] must have a non-empty slug.`);
     }
@@ -89,6 +107,15 @@ function resolvedRegistry({
     combinedListed.set(model.slug, model);
   }
   return { modelBySlug: combinedMap, listedModels: [...combinedListed.values()].filter(Boolean) };
+}
+
+export function engineeringModel(slug) {
+  return MODEL_BY_SLUG.get(slug) || ENGINEERING_NATIVE_MODELS.find((model) => model.slug === slug);
+}
+
+export function engineeringAgentName(model) {
+  if (model?.native === true) return `native_${String(model.slug).replace(/[^a-z0-9]+/giu, "_").replace(/^_|_$/gu, "")}`;
+  return routedAgentDefinition(model).agentName;
 }
 
 function effortSupport(model, effort) {
@@ -447,12 +474,12 @@ function evaluateCandidate(candidate, context) {
   if (resolved.error) return { rejected: resolved.error };
   const model = resolved.model;
   if (!configured.has(model.slug)) return { rejected: "route is not selected and credential-configured" };
-  const expected = routedAgentDefinition(model);
+  const expectedAgentName = engineeringAgentName(model);
   const binding = offered.get(model.slug);
-  if (!binding) return { rejected: `agent type ${expected.agentName} is not currently offered` };
+  if (!binding) return { rejected: `agent type ${expectedAgentName} is not currently offered` };
   if (binding.duplicate) return { rejected: "multiple offered bindings claim the same exact route" };
-  if (binding.agentType !== expected.agentName || binding.model !== model.slug) {
-    return { rejected: `offered binding does not exactly match ${expected.agentName} -> ${model.slug}` };
+  if (binding.agentType !== expectedAgentName || binding.model !== model.slug) {
+    return { rejected: `offered binding does not exactly match ${expectedAgentName} -> ${model.slug}` };
   }
   if (binding.eligible !== true) return { rejected: binding.reason || "offered binding eligibility is not proven" };
   if (binding.healthy !== true) return { rejected: binding.reason || "offered binding health is not proven" };
@@ -475,6 +502,7 @@ function evaluateCandidate(candidate, context) {
       requestedSlug: candidate.model,
       model: model.slug,
       provider: model.provider,
+      codexProvider: model.native === true ? "openai" : "codex-router",
       upstreamModel: model.upstreamModel,
       gatewayModel: model.gatewayModel,
       family,

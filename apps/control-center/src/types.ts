@@ -111,6 +111,11 @@ export interface EngineeringPolicySnapshot {
   configured: boolean;
   healthy: boolean;
   activePreset: string;
+  lead?: {
+    executionMode: "native-parent" | string;
+    model: string;
+    effort: string;
+  };
   roles: Record<string, EngineeringRolePolicy>;
   gates: {
     codexTargetOnly: boolean;

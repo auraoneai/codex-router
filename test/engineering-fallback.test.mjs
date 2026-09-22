@@ -25,7 +25,7 @@ function deepSeekSnapshot(overrides = {}) {
   );
   const fallbacks = [
     candidate("cloudflare-workers-ai/glm-5.3", "cloudflare-workers-ai", "glm", "cloudflare", "medium"),
-    candidate("kiro-prism/gpt-5.6-sol", "kiro-prism", "gpt-5.6", "kiro-prism", "max"),
+    candidate("gpt-5.6-sol", "openai", "gpt-5.6", "openai", "max"),
     candidate("kiro-prism/claude-sonnet-5", "kiro-prism", "claude", "kiro-prism", "high"),
   ];
   return immutableSnapshot({
@@ -44,7 +44,7 @@ function deepSeekSnapshot(overrides = {}) {
 test("the default DeepSeek chain is full Cloudflare GLM, Sol, then Sonnet with Kimi absent", () => {
   assert.deepEqual(DEFAULT_DEEPSEEK_RECOVERY_CHAIN, [
     "cloudflare-workers-ai/glm-5.3",
-    "kiro-prism/gpt-5.6-sol",
+    "gpt-5.6-sol",
     "kiro-prism/claude-sonnet-5",
   ]);
   assert.equal(DEFAULT_DEEPSEEK_RECOVERY_CHAIN.some((slug) => slug.includes("kimi")), false);
@@ -87,7 +87,7 @@ test("an open full-GLM route is skipped cross-task in favor of Sol", () => {
     taskId: "new-task",
     at: 0,
   });
-  assert.equal(result.selected.model, "kiro-prism/gpt-5.6-sol");
+  assert.equal(result.selected.model, "gpt-5.6-sol");
   assert.deepEqual(result.rejectedCandidates, [{
     model: "cloudflare-workers-ai/glm-5.3",
     reason: "circuit_open",

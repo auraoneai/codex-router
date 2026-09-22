@@ -4596,6 +4596,7 @@ struct RouterEngineeringSnapshot: Decodable, Equatable {
   let healthy: Bool
   let degraded: Bool
   let activePreset: String
+  let lead: RouterEngineeringCandidateSnapshot?
   let roles: [String: RouterEngineeringRoleSnapshot]
   let updatedAt: String?
 }
@@ -6310,12 +6311,13 @@ private struct TrayView: View {
   }
 
   private var engineeringPreviewRows: [(role: String, model: String, effort: String)] {
-    guard let roles = store.snapshot.engineering?.roles else { return [] }
+    guard let engineering = store.snapshot.engineering else { return [] }
+    let roles = engineering.roles
     let priority = [
       "architecture", "complex_coder", "debugger", "reviewer", "integrator",
       "general_coder", "test_author", "synthesizer",
     ]
-    return roles.compactMap { role, value in
+    let workers = roles.compactMap { role, value in
       guard let candidate = value.candidates.first else { return nil }
       return (role: role, model: candidate.model, effort: candidate.effort)
     }
@@ -6325,8 +6327,12 @@ private struct TrayView: View {
       if left != right { return left < right }
       return lhs.role < rhs.role
     }
-    .prefix(4)
+    .prefix(engineering.lead == nil ? 4 : 3)
     .map { $0 }
+    if let lead = engineering.lead {
+      return [(role: "lead_engineer", model: lead.model, effort: lead.effort)] + workers
+    }
+    return workers
   }
 
   private func engineeringRoleLabel(_ role: String) -> String {

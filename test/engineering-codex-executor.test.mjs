@@ -94,6 +94,36 @@ test("app-server executor initializes once and binds start/turn lifecycle parame
   );
 });
 
+test("native Codex children use the OpenAI provider without router binding headers", async () => {
+  const transport = new FakeTransport((message, fake) => {
+    if (message.method === "initialize") fake.reply(message.id, {});
+    if (message.method === "thread/start") fake.reply(message.id, { thread: { id: "native-thread" } });
+    if (message.method === "turn/start") fake.reply(message.id, { turn: { id: "native-turn", status: "inProgress" } });
+  });
+  const executor = new CodexAppServerExecutor({
+    client: new CodexAppServerClient({ transport, timeoutMs: 200 }),
+    timeoutMs: 200,
+  });
+  const native = createExecutionBinding({
+    runId: "run-native", taskId: "task-native", attemptId: "attempt-native",
+    dispatchOperationId: "dispatch-native", role: "deputy_lead", preset: "balanced",
+    policyRevision: 2, attempt: 1, worktree: "/tmp/native-worktree", branch: "native-task",
+    leaseToken: "lease-native",
+    assignment: {
+      agentType: "native_gpt_5_6_sol", model: "gpt-5.6-sol", provider: "openai",
+      codexProvider: "openai", family: "gpt-5.6", requestedEffort: "high",
+      effectiveEffort: "high", effortSource: "role",
+    },
+  });
+  await executor.dispatch({ task: { objective: "Use native Sol.", executionBinding: native }, binding: {} });
+  const start = transport.sent.find((message) => message.method === "thread/start");
+  assert.equal(start.params.model, "gpt-5.6-sol");
+  assert.equal(start.params.modelProvider, "openai");
+  assert.equal(Object.hasOwn(start.params, "config"), false);
+  const turn = transport.sent.find((message) => message.method === "turn/start");
+  assert.equal(turn.params.effort, "high");
+});
+
 test("turn completion waits for the exact thread and turn", async () => {
   const transport = new FakeTransport((message, fake) => {
     if (message.method === "initialize") fake.reply(message.id, {});

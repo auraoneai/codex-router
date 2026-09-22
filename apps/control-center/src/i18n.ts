@@ -99,6 +99,8 @@ const EN = {
   "settings.engineering.revision": "Policy revision {revision}",
   "settings.engineering.roles.title": "Role routing preview",
   "settings.engineering.roles.description": "Read-only routes for the active preset, including each model's effort and ordered fallbacks.",
+  "settings.engineering.lead.native": "Native Codex lead",
+  "settings.engineering.lead.detail": "Primary: {route}",
   "settings.engineering.role.primary": "Primary: {route}",
   "settings.engineering.role.fallbacks": "Fallbacks: {routes}",
   "settings.engineering.role.optional": "Optional specialists: {routes}",

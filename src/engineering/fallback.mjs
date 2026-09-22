@@ -4,7 +4,7 @@ import { normalizeEngineeringFailure } from "./capacity.mjs";
 export const DEEPSEEK_NON_MODAL_FALLBACK = "deepseek-non-modal-fallback";
 export const DEFAULT_DEEPSEEK_RECOVERY_CHAIN = Object.freeze([
   "cloudflare-workers-ai/glm-5.3",
-  "kiro-prism/gpt-5.6-sol",
+  "gpt-5.6-sol",
   "kiro-prism/claude-sonnet-5",
 ]);
 

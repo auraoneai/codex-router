@@ -148,6 +148,13 @@ export function engineeringControlSnapshot({ state, usageEvents = [] } = {}) {
     healthy: !degraded,
     degraded,
     activePreset: state.policy.activePreset,
+    lead: object(state.policy.lead)
+      ? {
+          executionMode: state.policy.lead.executionMode,
+          model: state.policy.lead.model,
+          effort: state.policy.lead.effort,
+        }
+      : undefined,
     roles: effectiveRoleSnapshots(state.policy),
     usage: usage.summary,
     gates: {

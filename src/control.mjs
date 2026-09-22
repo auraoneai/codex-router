@@ -583,9 +583,11 @@ async function engineeringResolutionInventory() {
   const { selectedConfiguredListedModels } = await import("./provider-selection.mjs");
   const { verifiedSubagentTargets } = await import("./subagent-routing.mjs");
   const { routedAgentDefinition } = await import("./codex-agent-catalog.mjs");
-  const models = selectedConfiguredListedModels();
+  const { ENGINEERING_NATIVE_MODELS, engineeringAgentName } = await import("./engineering/policy.mjs");
+  const routedModels = selectedConfiguredListedModels();
+  const models = [...routedModels, ...ENGINEERING_NATIVE_MODELS];
   const configured = new Set(models.map((model) => model.slug));
-  const offeredBindings = verifiedSubagentTargets({ authority: models })
+  const offeredBindings = verifiedSubagentTargets({ authority: routedModels })
     .filter((target) => configured.has(target.slug))
     .map(({ model }) => ({
       model: model.slug,
@@ -596,7 +598,18 @@ async function engineeringResolutionInventory() {
       capacityHost: model.provider,
       supportedEfforts: (model.reasoningLevels || []).map((level) => level.effort),
     }));
-  return { configuredModels: [...configured], offeredBindings };
+  for (const model of ENGINEERING_NATIVE_MODELS) {
+    offeredBindings.push({
+      model: model.slug,
+      provider: model.provider,
+      agentType: engineeringAgentName(model),
+      eligible: true,
+      healthy: true,
+      capacityHost: model.provider,
+      supportedEfforts: model.reasoningLevels.map((level) => level.effort),
+    });
+  }
+  return { configuredModels: [...configured], offeredBindings, modelInventory: ENGINEERING_NATIVE_MODELS };
 }
 
 function engineeringOption(commandArgs, name) {

@@ -72,11 +72,16 @@ test("sanitized control snapshot is off by default and exposes only stable contr
   });
   assert.deepEqual(Object.keys(snapshot), [
     "version", "revision", "status", "fresh", "configured", "enabled", "healthy",
-    "degraded", "activePreset", "roles", "usage", "gates", "updatedAt",
+    "degraded", "activePreset", "lead", "roles", "usage", "gates", "updatedAt",
   ]);
   assert.equal(snapshot.enabled, false);
   assert.equal(snapshot.revision, 0);
   assert.equal(snapshot.configured, false);
+  assert.deepEqual(snapshot.lead, {
+    executionMode: "native-parent",
+    model: "gpt-6-astra",
+    effort: "default",
+  });
   assert.equal(snapshot.usage.requests, 1);
   const encoded = JSON.stringify(snapshot);
   assert.doesNotMatch(encoded, /private\/state|internal diagnostic|futureSecret|providerRequestId|authorization/u);

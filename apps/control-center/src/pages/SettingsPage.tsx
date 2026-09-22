@@ -458,6 +458,16 @@ export function SettingsPage({ target, engineering, health, presence, chatgptSes
               <>
                 <SectionHeading title={t("settings.engineering.roles.title")} description={t("settings.engineering.roles.description")} />
                 <div className="settings-list">
+                  {engineering?.lead ? (
+                    <div className="setting-row static-row">
+                      <div>
+                        <strong>{t("settings.engineering.lead.native")}</strong>
+                        <small>{t("settings.engineering.lead.detail", {
+                          route: candidateLabel(engineering.lead, t),
+                        })}</small>
+                      </div>
+                    </div>
+                  ) : null}
                   {engineeringRoles.map(([roleName, role]) => {
                     const candidates = (role.candidates || []).filter((candidate) => candidate.disabled !== true);
                     const optionalCandidates = (role.optionalCandidates || []).filter((candidate) => candidate.disabled !== true);

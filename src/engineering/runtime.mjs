@@ -3,9 +3,9 @@ import { existsSync, lstatSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { withAtomicStateLock } from "../atomic-state-lock.mjs";
-import { routedAgentDefinition } from "../codex-agent-catalog.mjs";
 import { privateFileIsProtected, writePrivateJson } from "../file-security.mjs";
-import { MODEL_BY_SLUG, providerForModel } from "../model-registry.mjs";
+import { providerForModel } from "../model-registry.mjs";
+import { nativeSessionStatus } from "../codex-native-session.mjs";
 import { STATE_DIR } from "../paths.mjs";
 import { credentialStatus, resolveProviderCredential } from "../provider-credentials.mjs";
 import { EngineeringCapacityCircuits, normalizeEngineeringFailure } from "./capacity.mjs";
@@ -18,7 +18,11 @@ import {
 import { createExecutionBinding } from "./execution-binding.mjs";
 import { selectEngineeringFallback } from "./fallback.mjs";
 import { readEngineeringPolicyState } from "./policy-state.mjs";
-import { resolveEngineeringAssignment } from "./policy.mjs";
+import {
+  engineeringAgentName,
+  engineeringModel,
+  resolveEngineeringAssignment,
+} from "./policy.mjs";
 import { PrismDecisionsClient } from "./prism-decisions.mjs";
 import { EngineeringRunController } from "./run-controller.mjs";
 import {
@@ -126,9 +130,15 @@ class DurableWorktreeState {
 }
 
 function defaultRouteAvailability(route) {
-  const model = MODEL_BY_SLUG.get(route);
+  const model = engineeringModel(route);
   if (!model || model.slug !== route || model.hidden === true || model.listed === false) {
     return { available: false, reason: "route is not an exact listed model" };
+  }
+  if (model.native === true) {
+    const session = nativeSessionStatus();
+    return session.usable
+      ? { available: true, provider: "openai", capacityHost: "openai" }
+      : { available: false, provider: "openai", reason: "native Codex session is unavailable" };
   }
   const provider = providerForModel(model);
   if (!provider) return { available: false, reason: "route provider is unavailable" };
@@ -682,12 +692,11 @@ export function createEngineeringRuntime({
     for (const route of policyRouteSlugs(policyState.policy)) {
       const availability = normalizeAvailability(await routeAvailability(route));
       if (!availability.available) continue;
-      const model = MODEL_BY_SLUG.get(route);
+      const model = engineeringModel(route);
       if (!model || model.slug !== route) continue;
-      const agent = routedAgentDefinition(model);
       configuredModels.push(route);
       offeredBindings.push({
-        agentType: agent.agentName,
+        agentType: engineeringAgentName(model),
         model: route,
         eligible: true,
         healthy: true,

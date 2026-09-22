@@ -7,6 +7,8 @@ import { readEngineeringPolicyDefaults } from "../src/engineering/policy-state.m
 import {
   createEngineeringAssignmentSnapshot,
   DEEPSEEK_CAPACITY_POLICY,
+  engineeringAgentName,
+  engineeringModel,
   resolveEngineeringAssignment,
   resolveEngineeringLead,
   validateEngineeringPolicy,
@@ -19,10 +21,10 @@ function enabledPolicy(mutator = (policy) => policy) {
 }
 
 function offered(slug, extra = {}) {
-  const model = MODEL_BY_SLUG.get(slug);
+  const model = engineeringModel(slug);
   return {
     model: slug,
-    agentType: routedAgentDefinition(model).agentName,
+    agentType: engineeringAgentName(model),
     eligible: true,
     healthy: true,
     ...extra,
@@ -269,7 +271,7 @@ test("catalog presence alone is insufficient; the exact offered agent binding mu
 });
 
 test("high-risk reviewer resolution excludes the author's model family", () => {
-  const sol = "kiro-prism/gpt-5.6-sol";
+  const sol = "gpt-5.6-sol";
   const opus = "kiro-prism/claude-opus-5";
   const result = resolveEngineeringAssignment({
     policy: enabledPolicy(),
@@ -286,13 +288,13 @@ test("high-risk reviewer resolution excludes the author's model family", () => {
 test("every DeepSeek assignment inherits ordered non-Modal recovery and is rejected without it", () => {
   const deepseek = "kiro-prism/deepseek-v4.1-flash";
   const glm = "cloudflare-workers-ai/glm-5.3";
-  const sol = "kiro-prism/gpt-5.6-sol";
+  const sol = "gpt-5.6-sol";
   const sonnet = "kiro-prism/claude-sonnet-5";
   const configuredModels = [deepseek, glm, sol, sonnet];
   const offeredBindings = [
     offered(deepseek, { capacityHost: "modal" }),
     offered(glm, { capacityHost: "cloudflare-workers-ai" }),
-    offered(sol, { capacityHost: "kiro-prism" }),
+    offered(sol, { capacityHost: "openai" }),
     offered(sonnet, { capacityHost: "kiro-prism" }),
   ];
   const result = resolveEngineeringAssignment({

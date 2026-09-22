@@ -248,6 +248,7 @@ export class CodexAppServerExecutor {
     const safeOptions = validatedThreadOptions(options);
     const correlation = threadSource(binding);
     await this.discover();
+    const routedProvider = binding.codexProvider === "codex-router";
     return this.client.request("thread/start", {
       approvalPolicy: "never",
       sandbox: "workspace-write",
@@ -257,15 +258,19 @@ export class CodexAppServerExecutor {
       model: binding.model,
       modelProvider: binding.codexProvider,
       threadSource: correlation,
-      config: {
-        model_providers: {
-          [binding.codexProvider]: {
-            http_headers: {
-              [ENGINEERING_BINDING_HEADER]: binding.bindingId,
+      ...(routedProvider
+        ? {
+            config: {
+              model_providers: {
+                [binding.codexProvider]: {
+                  http_headers: {
+                    [ENGINEERING_BINDING_HEADER]: binding.bindingId,
+                  },
+                },
+              },
             },
-          },
-        },
-      },
+          }
+        : {}),
     });
   }
 
