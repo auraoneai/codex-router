@@ -994,16 +994,15 @@ test("the production renderer exposes model discovery and picker actions", { tim
     assert.equal(await page.getByText("Measured", { exact: true }).count(), 1);
     const engineeringUsage = page.locator(".surface-summary").filter({ hasText: "Measured" });
     assert.match(await engineeringUsage.innerText(), /13k recorded tokens across 4 requests/);
-    const reviewer = page.locator(".setting-row").filter({ hasText: "Reviewer" });
-    await reviewer.getByRole("button", { name: "Edit", exact: true }).click();
-    await reviewer.getByRole("combobox", { name: "Reviewer primary effort", exact: true }).selectOption("low");
-    await reviewer.getByRole("button", { name: "Save", exact: true }).click();
+    await complexCoder.getByRole("button", { name: "Edit Complex Coder routing", exact: true }).click();
+    await complexCoder.getByRole("combobox", { name: "Complex Coder primary effort", exact: true }).selectOption("low");
+    await complexCoder.getByRole("button", { name: "Save", exact: true }).click();
     await page.waitForFunction(() => window.routerControlTest.calls()
       .some((call) => call.name === "setEngineeringRole"));
     const roleCall = await page.evaluate(() => window.routerControlTest.calls()
       .find((call) => call.name === "setEngineeringRole"));
-    assert.equal(roleCall?.args[0], "reviewer");
-    assert.equal(roleCall?.args[1][0].model, "gpt-5.6-sol");
+    assert.equal(roleCall?.args[0], "complex_coder");
+    assert.equal(roleCall?.args[1][0].model, "kiro-prism/claude-sonnet-5");
     assert.equal(roleCall?.args[1][0].effort, "low");
     assert.equal(roleCall?.args[3], 3);
     const engineeringToggle = page.getByRole("checkbox", { name: "Use engineering orchestration", exact: true });

@@ -591,7 +591,7 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
                               route: candidateLabel(engineering.lead, t, engineeringModels),
                             })}</small>
                           </div>
-                          <Button variant="secondary" disabled={!api || engineeringMutationPending} onClick={() => setEngineeringEditor({ kind: "lead", model: engineering.lead!.model, effort: engineering.lead!.effort })}><Pencil aria-hidden size={13} /> {t("common.edit")}</Button>
+                          <Button aria-label="Edit native Codex lead" variant="secondary" disabled={!api || engineeringMutationPending} onClick={() => setEngineeringEditor({ kind: "lead", model: engineering.lead!.model, effort: engineering.lead!.effort })}><Pencil aria-hidden size={13} /> {t("common.edit")}</Button>
                         </>
                       )}
                     </div>
@@ -689,7 +689,7 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
                                 })}</small>
                               ) : null}
                             </div>
-                            <Button variant="secondary" disabled={!api || engineeringMutationPending || engineeringEditor !== null} onClick={() => setEngineeringEditor({
+                            <Button aria-label={`Edit ${roleLabel(roleName)} routing`} variant="secondary" disabled={!api || engineeringMutationPending || engineeringEditor !== null} onClick={() => setEngineeringEditor({
                               kind: "role",
                               role: roleName,
                               candidates: candidates.map((candidate) => ({ ...candidate })),
