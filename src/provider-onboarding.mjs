@@ -383,7 +383,7 @@ export async function removeApiCredential(providerId) {
   };
 }
 
-// Catalog-only providers (gemini-api, openrouter, groq, ...) ship no
+// Catalog-only providers (openrouter, groq, ...) may ship no
 // preselected models, so a stored key still leaves the picker empty. Callers
 // use this to name the curation step instead of reporting a provider that
 // looks enabled but shows nothing.

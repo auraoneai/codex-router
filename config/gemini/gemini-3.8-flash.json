@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "slug": "gemini-api/models/gemini-3.8-flash",
+      "gatewayModel": "gemini-api-models-gemini-3-8-flash",
+      "upstreamModel": "models/gemini-3.8-flash",
+      "provider": "gemini-api",
+      "listed": true,
+      "displayName": "Gemini 3.8 Flash (Google API)",
+      "description": "Google Gemini 3.8 Flash through the direct Google Gemini API.",
+      "priority": 100,
+      "defaultEffort": "medium",
+      "reasoningLevels": [
+        {
+          "effort": "low",
+          "description": "Low reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Medium reasoning"
+        },
+        {
+          "effort": "high",
+          "description": "High reasoning"
+        }
+      ],
+      "contextWindow": 1048576,
+      "autoCompact": 900000,
+      "inputModalities": [
+        "text",
+        "image"
+      ],
+      "compHash": "gemini-api-models-gemini-3-8-flash-v1"
+    }
+  ]
+}

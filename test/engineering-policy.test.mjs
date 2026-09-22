@@ -42,7 +42,7 @@ test("policy rejects unknown roles, routes, aliases, efforts, and duplicate cand
 
   const unsupportedEffort = enabledPolicy((policy) => {
     policy.workspace.roles.complex_coder = {
-      candidates: [{ model: "openrouter/gemini-3.8-flash", effort: "max" }],
+      candidates: [{ model: "gemini-api/models/gemini-3.8-flash", effort: "max" }],
     };
   });
   assert.throws(() => validateEngineeringPolicy(unsupportedEffort), /not advertised/u);
@@ -164,7 +164,7 @@ test("runtime model inventory can add an exact offered Codex child route", () =>
 });
 
 test("catalog presence alone is insufficient; the exact offered agent binding must match", () => {
-  const slug = "openrouter/gemini-3.8-flash";
+  const slug = "gemini-api/models/gemini-3.8-flash";
   const result = resolveEngineeringAssignment({
     policy: enabledPolicy(),
     role: "general_coder",

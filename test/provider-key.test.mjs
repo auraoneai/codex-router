@@ -217,11 +217,11 @@ raise SystemExit(os.waitstatus_to_exitcode(status))
 );
 
 test("a catalog-only provider points the user at curation after a key is stored", () => {
-  // gemini-api and the other catalog-only providers register zero models, so
+  // A provider with no reviewed defaults registers zero models, so
   // "the provider is enabled" alone leaves an empty picker and the key reads
   // as broken. This is what PR #76 tried to solve by hardcoding models.
   const models = [{ provider: "deepseek" }, { provider: "deepseek" }];
-  assert.equal(providerNeedsCuration("gemini-api", models), true);
+  assert.equal(providerNeedsCuration("groq", models), true);
   assert.equal(providerNeedsCuration("deepseek", models), false);
 });
 

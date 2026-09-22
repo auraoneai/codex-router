@@ -977,7 +977,7 @@ test("the production renderer exposes model discovery and picker actions", { tim
     assert.match(await complexCoder.innerText(), /gpt-5\.6-sol · high → opencode-go\/glm-5\.3 · model default effort/);
     assert.match(await complexCoder.innerText(), /Optional specialists: kiro-prism\/kimi-k3 · high/);
     assert.equal(await page.getByText("Measured", { exact: true }).count(), 1);
-    const engineeringUsage = page.locator(".setting-row").filter({ hasText: "Measured" });
+    const engineeringUsage = page.locator(".surface-summary").filter({ hasText: "Measured" });
     assert.match(await engineeringUsage.innerText(), /12\.5k recorded tokens across 4 requests/);
     const engineeringToggle = page.getByRole("checkbox", { name: "Use engineering orchestration", exact: true });
     assert.equal(await engineeringToggle.isChecked(), true);

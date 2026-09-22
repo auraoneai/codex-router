@@ -18,6 +18,7 @@ const OPENCODE_FREE_MUSE_SLUG =
 
 // Gemini 3.8 Flash routes confirmed 2026-09-03.
 const GEMINI_38_FLASH_ROUTES = [
+  ["gemini-api/models/gemini-3.8-flash", "models/gemini-3.8-flash", 1_048_576, 900_000],
   ["openrouter/gemini-3.8-flash", "google/gemini-3.8-flash", 1_048_576, 943_000],
   ["commandcode/gemini-3.8-flash", "google/gemini-3.8-flash", 1_000_000, 900_000],
   ["nousresearch/gemini-3.8-flash", "google/gemini-3.8-flash", 1_048_576, 943_000],
@@ -115,7 +116,7 @@ test("additional routes record their static metadata", () => {
 });
 
 test("Gemini 3.8 Flash input modalities match catalog documentation", () => {
-  // OpenRouter and Nous are text-only; Command Code is text-only; Venice has vision.
+  // OpenRouter, Nous, and Command Code are text-only; Google and Venice have vision.
   const textOnlySlugs = [
     "openrouter/gemini-3.8-flash",
     "commandcode/gemini-3.8-flash",
@@ -126,8 +127,9 @@ test("Gemini 3.8 Flash input modalities match catalog documentation", () => {
     assert.deepEqual(model.inputModalities, ["text"]);
   }
 
-  const veniceModel = MODEL_BY_SLUG.get("venice/gemini-3.8-flash");
-  assert.deepEqual(veniceModel.inputModalities, ["text", "image"]);
+  for (const slug of ["gemini-api/models/gemini-3.8-flash", "venice/gemini-3.8-flash"]) {
+    assert.deepEqual(MODEL_BY_SLUG.get(slug).inputModalities, ["text", "image"]);
+  }
 });
 
 test("Muse Spark 1.3 routes use auto-tool-choice request profile", () => {

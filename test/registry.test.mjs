@@ -108,6 +108,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "deepseek/deepseek-v4-flash-vision-exp",
       "deepseek/deepseek-v4-pro",
       "deepseek/deepseek-v4.1-flash",
+      "gemini-api/models/gemini-3.8-flash",
       "grok-api/grok-4.5",
       "grok-oauth/grok-4.5",
       "grok-oauth/grok-4.6",

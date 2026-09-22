@@ -78,7 +78,7 @@ user.
    environment API key; it has no router-managed CLI sign-in path. The
    catalog-only providers `groq`, `together`, `fireworks`,
    `cerebras`, `mistral`, `nvidia-nim`, `siliconflow`, `huggingface`,
-   `gemini-api`, `github-copilot`, `chutes`, `orca`, and `vertex` are also selectable, but they ship no
+   `github-copilot`, `chutes`, `orca`, and `vertex` are also selectable, but they ship no
    preselected models: after
    the credential is stored, the user must run `bin/curate-models PROVIDER` in an
    interactive terminal to choose models. Vertex uses Application Default
@@ -87,6 +87,8 @@ user.
    it is never selected by `defaultProviderIds()`. If they did not specify and
    credentials already exist, use
    `configured` rather than showing providers that cannot authenticate.
+   `gemini-api` ships the reviewed direct `models/gemini-3.8-flash` route;
+   additional Google models still require `bin/curate-models gemini-api`.
    `openrouter`, `venice`, and `nousresearch` also ship live-reviewed checked-in
    presets, so their picker is not empty after the key is stored; anything else
    on their current account catalogs still has to be curated.

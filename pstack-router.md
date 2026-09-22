@@ -207,9 +207,9 @@ credential readiness from existing catalogs. Do not infer capability from a name
 Observed usable publication identities (live inference remains untested here):
 
 - Native lead: `gpt-6-astra` through the signed-in native Codex path.
-- Fast worker: `openrouter/gemini-3.8-flash` in the clean-install policy, with an
-  exact dynamically offered Gemini 3.8 Flash agent binding also eligible when
-  the current Codex catalog advertises it;
+- Fast worker: `gemini-api/models/gemini-3.8-flash` through Google's direct
+  Gemini API. The route is checked in for clean installs and becomes an exact
+  Codex agent binding after its local collaboration proof is current;
   Prism also documents upstream `gemini-3.8-flash`.
 - Mechanical worker: `cloudflare-workers-ai/glm-5.3-flash` in the current agent
   list; Prism also documents upstream `glm-5.3-flash` and `glm-5.3`.
@@ -894,14 +894,19 @@ all pass. The installed Codex plane reports engineering revision `0`, preset
 agents. This is the intended clean-install state: the workflow is available but
 does not replace ordinary Codex behavior until explicitly enabled.
 
-The bounded live pass on 2026-09-22 did not certify any of the newly selected
-worker routes. OpenRouter returned HTTP 402 for Gemini 3.8 Flash, both
+The bounded live pass on 2026-09-22 certified the direct Google Gemini 3.8
+Flash route for ordinary response, streaming, tool calling, stateless
+tool-result replay and compaction; every check returned HTTP 200. Both
 Cloudflare GLM 5.3 routes returned HTTP 401 from the stored Cloudflare
 credential, and the deployed Kiro Prism model surface returned HTTP 502 for
 DeepSeek V4.1 Flash, Kimi K3, Opus 5, Sonnet 5, GPT-5.6 Sol and GPT-5.6 Luna.
 Those routes remain explicitly unavailable in the rollout checklist. Catalog
 presence, unit tests and an installed healthy Router are not treated as a live
-model proof. DeepSeek assignments still carry their mandatory ordered
+model proof. The stricter Gemini native-child certification was deferred
+because the current ChatGPT-signed-in Codex session refused to spawn the
+external route as a subagent, so Gemini remains unverified for that exact host
+binding even though its direct API compatibility is proven. DeepSeek
+assignments still carry their mandatory ordered
 non-Modal recovery policy, so a Modal capacity failure can select a healthy
 full GLM route, Sol or Sonnet once one of those providers is live.
 
@@ -2804,7 +2809,7 @@ Do not report completion until all applicable items are proven.
 * [ ] Astra can remain the parent/lead model.
 * [ ] Jev produces structured routing decisions.
 * [ ] Codex Router executes alternate models.
-* [ ] Gemini 3.8 Flash works as a default fast worker.
+* [ ] Gemini 3.8 Flash works as a default fast worker. Direct API compatibility is proven; native Codex child spawning is deferred by the current ChatGPT account mode.
 * [ ] GLM 5.3 works through Cloudflare Workers AI.
 * [ ] GLM 5.3 Flash works through Cloudflare Workers AI.
 * [ ] Kimi K3 works through the existing Kiro Prism/Modal path.
