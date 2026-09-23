@@ -1531,6 +1531,10 @@ function writeCatalogCodexStub(directory) {
   const models = JSON.stringify({
     models: [
       { slug: "gpt-5.6-sol", display_name: "GPT-5.6 Sol", visibility: "list", priority: 10 },
+      { slug: "gpt-5.6-terra", display_name: "GPT-5.6 Terra", visibility: "list", priority: 11 },
+      { slug: "gpt-5.6-luna", display_name: "GPT-5.6 Luna", visibility: "list", priority: 12 },
+      { slug: "gpt-6-sol", display_name: "GPT-6 Sol", visibility: "list", priority: 13 },
+      { slug: "gpt-6-luna", display_name: "GPT-6 Luna", visibility: "list", priority: 14 },
     ],
   });
   writeFileSync(
@@ -1610,7 +1614,14 @@ test(
       assert.equal(visibility.get("deepseek/deepseek-v4-flash"), "list");
       assert.equal(visibility.get("deepseek/deepseek-v4-flash-vision-exp"), "list");
       assert.equal(visibility.get("deepseek/deepseek-v4-pro"), "hide");
-      assert.equal(visibility.get("gpt-5.6-sol-1m"), "hide");
+      for (const slug of [
+        "gpt-5.6-sol",
+        "gpt-5.6-sol-1m",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+      ]) assert.equal(visibility.has(slug), false, `${slug} is retired from the published catalog`);
+      assert.equal(visibility.get("gpt-6-sol"), "list");
+      assert.equal(visibility.get("gpt-6-luna"), "list");
 
       const picker = JSON.parse(
         readFileSync(path.join(stateDir, "model-picker.json"), "utf8"),

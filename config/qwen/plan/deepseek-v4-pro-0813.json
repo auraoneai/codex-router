@@ -6,7 +6,7 @@
       "gatewayModel": "qwen-plan-deepseek-v4-pro-0813",
       "upstreamModel": "deepseek-v4-pro-0813",
       "provider": "qwen-plan",
-      "listed": true,
+      "listed": false,
       "displayName": "DeepSeek V4 Pro 0813 (Qwen Plan)",
       "description": "DeepSeek V4 Pro (0813 snapshot) served through an Alibaba Model Studio Token or Coding Plan subscription; Alibaba lists it separately from the original deepseek-v4-pro.",
       "priority": 18,

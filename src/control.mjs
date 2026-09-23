@@ -13,6 +13,10 @@ import {
 } from "./model-overlay-publication.mjs";
 import { withModelOverlayLock } from "./model-overlay-lock.mjs";
 import { withNativeContextVariants } from "./native-context-variants.mjs";
+import {
+  filterExcludedNativeCodexModels,
+  isExcludedNativeCodexModelSlug,
+} from "./native-model-exclusions.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
 // The publish marker lives under the shared state directory, which does not
 // vary by target, so reading it here does not disturb the per-target probes
@@ -210,8 +214,9 @@ function nativeCodexModels(
   if (!existsSync(catalogPath)) return [];
   try {
     const parsed = JSON.parse(readFileSync(catalogPath, "utf8"));
+    const listedNativeModels = filterExcludedNativeCodexModels(parsed.models);
     const nativeBaseSlugs = new Set(
-      (Array.isArray(parsed.models) ? parsed.models : [])
+      listedNativeModels
         .map((model) => String(model?.slug || ""))
         .filter(Boolean),
     );
@@ -221,7 +226,7 @@ function nativeCodexModels(
       // where they are switched on, so they have to be drawn here too. The
       // catalog build derives them from this same list, so the rows the
       // operator sees and the entries Codex reads cannot drift apart.
-      Array.isArray(parsed.models) ? parsed.models : [],
+      listedNativeModels,
       { enabled: contextVariants },
     );
     const certificationBySlug = new Map(
@@ -1743,6 +1748,7 @@ async function finalizeLocalModelPublication() {
 // so the answer matches what would actually be sent. An empty list means the
 // catalog could not be read, and the caller treats that as "do not block".
 async function modelReasoningLevels(slug) {
+  if (isExcludedNativeCodexModelSlug(slug)) return [];
   try {
     const { MERGED_CATALOG_PATH } = await import("./paths.mjs");
     const parsed = JSON.parse(readFileSync(MERGED_CATALOG_PATH, "utf8"));
@@ -1758,6 +1764,7 @@ async function modelReasoningLevels(slug) {
 }
 
 async function knownModelSlug(slug) {
+  if (isExcludedNativeCodexModelSlug(slug)) return false;
   try {
     const { MERGED_CATALOG_PATH } = await import("./paths.mjs");
     const parsed = JSON.parse(readFileSync(MERGED_CATALOG_PATH, "utf8"));
@@ -1779,6 +1786,7 @@ async function knownModelSubagentVersion(slug) {
   // catalog deliberately serializes an unknown route as conservative v1, so
   // consulting it first would mislabel every still-uncertified route as a
   // reviewed v1 verdict and make the compatibility-test workflow unreachable.
+  if (isExcludedNativeCodexModelSlug(slug)) return undefined;
   const { MODEL_BY_SLUG } = await import("./model-registry.mjs");
   const registryModel = MODEL_BY_SLUG.get(slug);
   if (registryModel) return registryModel.multiAgentVersion;
@@ -1792,7 +1800,7 @@ async function knownModelSubagentVersion(slug) {
     const { NATIVE_CATALOG_PATH } = await import("./paths.mjs");
     const parsed = JSON.parse(readFileSync(NATIVE_CATALOG_PATH, "utf8"));
     const model = Array.isArray(parsed.models)
-      ? parsed.models.find((candidate) => String(candidate?.slug) === slug)
+      ? filterExcludedNativeCodexModels(parsed.models).find((candidate) => String(candidate?.slug) === slug)
       : undefined;
     // Finding the route is itself decisive: an omitted version is genuinely
     // unknown and must stay eligible for the compatibility workflow. Falling
@@ -1826,7 +1834,7 @@ async function nativeCodexBaseSlugs() {
   try {
     const parsed = JSON.parse(readFileSync(NATIVE_CATALOG_PATH, "utf8"));
     return new Set(
-      (Array.isArray(parsed.models) ? parsed.models : [])
+      filterExcludedNativeCodexModels(parsed.models)
         .map((model) => String(model?.slug || ""))
         .filter(Boolean),
     );

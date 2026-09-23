@@ -10,6 +10,7 @@
 import { existsSync, readFileSync } from "node:fs";
 
 import { NATIVE_CATALOG_PATH } from "./paths.mjs";
+import { filterExcludedNativeCodexModels } from "./native-model-exclusions.mjs";
 import { nativeSessionAvailable } from "./codex-native-session.mjs";
 import { MODEL_SLUG_ALIASES } from "./model-registry.mjs";
 import { migrateModelVisibility } from "./model-picker-state.mjs";
@@ -27,7 +28,7 @@ function readNativeCatalogModels() {
   if (!existsSync(NATIVE_CATALOG_PATH)) return [];
   try {
     const parsed = JSON.parse(readFileSync(NATIVE_CATALOG_PATH, "utf8"));
-    return Array.isArray(parsed?.models) ? parsed.models : [];
+    return filterExcludedNativeCodexModels(parsed?.models);
   } catch {
     return [];
   }
@@ -44,7 +45,7 @@ function readNativeCatalogModels() {
  * build, the auto-review model) and are not offered to anybody.
  */
 export function nativeClientModels(nativeCatalogModels) {
-  return (nativeCatalogModels || [])
+  return filterExcludedNativeCodexModels(nativeCatalogModels)
     .filter((model) => model?.slug && model.visibility !== "hide")
     .map((model) => ({
       slug: String(model.slug),

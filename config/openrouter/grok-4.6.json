@@ -6,7 +6,7 @@
       "gatewayModel": "openrouter-grok-4-6",
       "upstreamModel": "x-ai/grok-4.6",
       "provider": "openrouter",
-      "listed": true,
+      "listed": false,
       "displayName": "Grok 4.6 (OpenRouter)",
       "description": "xAI Grok 4.6 through OpenRouter.",
       "priority": 72,

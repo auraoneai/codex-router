@@ -2141,7 +2141,7 @@ const GO_FLASH = {
   slug: "opencode-go/glm-5.3-flash",
   gatewayModel: "opencode-go-glm-5-3-flash",
 };
-const GO_SMALL_CHAIN = "opencode-go-messages/qwen3.8-max";
+const GO_SMALL_CHAIN = "opencode-go-messages/qwen3.7-max";
 
 function consoleGoNumericOverflowBody() {
   const inner = JSON.stringify({

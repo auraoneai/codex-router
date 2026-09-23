@@ -193,6 +193,8 @@ test("the delegation run is configured to reach the router at all", () => {
   );
   assert.match(control, /codexHome: CODEX_HOME/);
   assert.match(control, /catalogPath: MERGED_CATALOG_PATH/);
+  // The default parent must remain a native route published by the current catalog.
+  assert.match(source, /parentModel = "gpt-6-sol"/);
 });
 
 test("a run that got no answer is not a refusal either", () => {

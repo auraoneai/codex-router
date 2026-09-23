@@ -51,7 +51,7 @@ test("confirmed and candidate GLM-5.3 full routes record their static metadata",
     const model = MODEL_BY_SLUG.get(slug);
     assert.ok(model, `${slug} is missing from the registry`);
     assert.equal(model.upstreamModel, upstreamModel);
-    assert.equal(model.listed, true);
+    assert.equal(model.listed, slug !== "openrouter/glm-5.3");
     assert.equal(model.contextWindow, contextWindow);
     assert.equal(model.autoCompact, autoCompact);
   }

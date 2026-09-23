@@ -429,9 +429,9 @@ test("rankFailoverCandidates admits a same-family 1M sibling only when asked", (
     contextWindow: 1_000_000,
     priority: 29,
   });
-  const smallSibling = model("opencode-go-messages/qwen3.8-max", "opencode-go-messages", {
+  const smallSibling = model("opencode-go-messages/qwen3.7-max", "opencode-go-messages", {
     contextWindow: 262_144,
-    priority: 42,
+    priority: 43,
   });
   const other = model("kimi/k3", "kimi", { contextWindow: 1_000_000, priority: 10 });
   const models = [largeSibling, smallSibling, other];

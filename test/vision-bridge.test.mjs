@@ -1461,12 +1461,12 @@ test("a native transcript is keyed to the account that bought it", () => {
 });
 
 test("the shared gate ships nothing until a caller names its evidence", () => {
-  const models = [NATIVE_LUNA];
+  const models = [NATIVE_LUNA, { ...NATIVE_LUNA, slug: "gpt-6-luna", display_name: "GPT-6 Luna" }];
   assert.deepEqual(
     nativeVisionEngines({ models, hidden: new Set(), authorized: true }).map(
       (engine) => engine.slug,
     ),
-    ["gpt-5.6-luna"],
+    ["gpt-6-luna"],
   );
   // A closed gate, and -- the point of the design -- a gate nobody supplied. A
   // call site that forgets one ships nothing rather than everything, which is

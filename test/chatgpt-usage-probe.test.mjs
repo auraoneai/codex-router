@@ -291,5 +291,3 @@ test("probe-driven auth healing (Path B): successful probe clears auth-invalid s
     assert.equal(isAccountAuthInvalid("acct_healauth1"), false);
   } finally { b.cleanup(); resetRotationStateForTests(); }
 });
-
-

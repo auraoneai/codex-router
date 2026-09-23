@@ -238,48 +238,6 @@
       "compHash": "kiro-prism-gpt-5-6-luna-v1"
     },
     {
-      "slug": "kiro-prism/qwen3.8-max",
-      "gatewayModel": "kiro-prism-qwen3-8-max",
-      "upstreamModel": "qwen3.8-max",
-      "provider": "kiro-prism",
-      "listed": true,
-      "displayName": "Qwen 3.8 Max \u00b7 Token Plan (Kiro Prism)",
-      "description": "QwenCloud Token Plan subscription model qwen3.8-max",
-      "priority": 99,
-      "defaultEffort": "medium",
-      "reasoningLevels": [
-        {
-          "effort": "low",
-          "description": "Low reasoning effort"
-        },
-        {
-          "effort": "medium",
-          "description": "Medium reasoning effort"
-        },
-        {
-          "effort": "high",
-          "description": "High reasoning effort"
-        },
-        {
-          "effort": "xhigh",
-          "description": "Extra high reasoning effort"
-        },
-        {
-          "effort": "max",
-          "description": "Maximum reasoning effort"
-        }
-      ],
-      "contextWindow": 1000000,
-      "autoCompact": 900000,
-      "inputModalities": [
-        "text",
-        "image"
-      ],
-      "supportsReasoningSummaries": true,
-      "supportsImageDetailOriginal": true,
-      "compHash": "kiro-prism-qwen3-8-max-v1"
-    },
-    {
       "slug": "kiro-prism/kimi-k3",
       "gatewayModel": "kiro-prism-kimi-k3",
       "upstreamModel": "kimi-k3",

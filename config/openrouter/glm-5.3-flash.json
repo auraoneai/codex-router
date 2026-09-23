@@ -6,7 +6,7 @@
       "gatewayModel": "openrouter-glm-5-3-flash",
       "upstreamModel": "z-ai/glm-5.3-flash",
       "provider": "openrouter",
-      "listed": true,
+      "listed": false,
       "displayName": "GLM-5.3-Flash (OpenRouter)",
       "description": "GLM-5.3-Flash through OpenRouter. The 1M-context route reads text and images and uses the model's low/high/max reasoning ladder.",
       "priority": 102,

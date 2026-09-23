@@ -1891,7 +1891,7 @@ esac
       const catalog = JSON.parse(
         readFileSync(path.join(stateDir, "merged-models.json"), "utf8"),
       );
-      assert.ok(catalog.models.some((model) => model.slug === "gpt-5.6-sol"));
+      assert.equal(catalog.models.some((model) => model.slug === "gpt-5.6-sol"), false);
       assert.ok(
         catalog.models.some((model) => model.slug === "deepseek/deepseek-v4-flash"),
       );

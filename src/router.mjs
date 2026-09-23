@@ -106,6 +106,10 @@ import { createHealthCache } from "./health-cache.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { readNativeAliases } from "./native-alias.mjs";
 import { nativeContextVariantBase } from "./native-context-variants.mjs";
+import {
+  filterExcludedNativeCodexModels,
+  isExcludedNativeCodexModelSlug,
+} from "./native-model-exclusions.mjs";
 import { readNativeRedirect } from "./native-redirect.mjs";
 import {
   executeSearchSidecar,
@@ -1968,18 +1972,18 @@ function normalizeRoutedInput(input) {
 
 function nativeAgentRelayModel() {
   const configured = String(process.env.MODEL_ROUTER_AGENT_RELAY_MODEL || "").trim();
-  if (configured) return configured;
+  if (configured && !isExcludedNativeCodexModelSlug(configured)) return configured;
   try {
     const parsed = JSON.parse(readFileSync(NATIVE_CATALOG_PATH, "utf8"));
-    const models = Array.isArray(parsed?.models) ? parsed.models : [];
-    const preferred = models.find((model) => model?.slug === "gpt-5.6-sol");
+    const models = filterExcludedNativeCodexModels(parsed?.models);
+    const preferred = models.find((model) => model?.slug === "gpt-6-sol");
     const listed = models.find(
       (model) => typeof model?.slug === "string" && model.visibility === "list",
     );
     const available = models.find((model) => typeof model?.slug === "string");
-    return preferred?.slug || listed?.slug || available?.slug || "gpt-5.6-sol";
+    return preferred?.slug || listed?.slug || available?.slug || "gpt-6-sol";
   } catch {
-    return "gpt-5.6-sol";
+    return "gpt-6-sol";
   }
 }
 

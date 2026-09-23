@@ -24,8 +24,8 @@ function writeSignedOutCodexStub(directory) {
   const target = path.join(directory, windows ? "codex-signed-out.cmd" : "codex-signed-out");
   const catalog = JSON.stringify({
     models: [{
-      slug: "gpt-5.6-sol",
-      display_name: "GPT-5.6-Sol",
+      slug: "gpt-6-sol",
+      display_name: "GPT-6-Sol",
       visibility: "list",
       priority: 10,
     }],
@@ -186,11 +186,26 @@ test("codex probe exposes only privacy-safe recent usage events", () => {
 
 test("codex probe includes native GPT models and the configured default", () => {
   const slice = probe("codex", ["grok-oauth"], [], {
-    selectedModel: "gpt-5.6-terra",
+    selectedModel: "gpt-6-luna",
     nativeModels: [
       {
         slug: "gpt-5.6-terra",
         display_name: "GPT-5.6-Terra",
+        visibility: "list",
+      },
+      {
+        slug: "gpt-5.6-sol",
+        display_name: "GPT-5.6-Sol",
+        visibility: "list",
+      },
+      {
+        slug: "gpt-5.6-luna",
+        display_name: "GPT-5.6-Luna",
+        visibility: "list",
+      },
+      {
+        slug: "gpt-6-luna",
+        display_name: "GPT-6-Luna",
         visibility: "list",
       },
       {
@@ -201,14 +216,14 @@ test("codex probe includes native GPT models and the configured default", () => 
     ],
   });
 
-  assert.equal(slice.selectedModel, "gpt-5.6-terra");
+  assert.equal(slice.selectedModel, "gpt-6-luna");
   assert.deepEqual(
-    slice.models.find((model) => model.slug === "gpt-5.6-terra"),
+    slice.models.find((model) => model.slug === "gpt-6-luna"),
     {
-      slug: "gpt-5.6-terra",
-      displayName: "GPT-5.6-Terra",
+      slug: "gpt-6-luna",
+      displayName: "GPT-6-Luna",
       provider: "openai",
-      gatewayModel: "gpt-5.6-terra",
+      gatewayModel: "gpt-6-luna",
       enabled: true,
       native: true,
       multiAgentVersion: "v1",
@@ -216,6 +231,9 @@ test("codex probe includes native GPT models and the configured default", () => 
       visible: true,
     },
   );
+  for (const slug of ["gpt-5.6-sol", "gpt-5.6-sol-1m", "gpt-5.6-terra", "gpt-5.6-luna"]) {
+    assert.equal(slice.models.some((model) => model.slug === slug), false, `${slug} is omitted`);
+  }
   assert.equal(slice.models.some((model) => model.slug === "codex-auto-review"), false);
   assert.equal(slice.loginFree, false);
   assert.equal(slice.loginFreeManaged, false);
@@ -247,23 +265,18 @@ test("codex probe preserves an explicit repository v1 verdict", () => {
   assert.equal(model.subagentCertification, "v1");
 });
 
-// The row is the whole feature: an entry the operator cannot find is an entry
-// that ships off forever. It belongs in the OpenAI group, drawn unchecked.
-test("codex probe draws the extended-context variant under OpenAI, switched off", () => {
+test("codex probe omits retired native models and the Sol context variant", () => {
   const slice = probe("codex", [], [], {
     hiddenModels: ["gpt-5.6-sol-1m"],
     nativeModels: [
       { slug: "gpt-5.6-sol", display_name: "GPT-5.6-Sol", visibility: "list" },
+      { slug: "gpt-6-sol", display_name: "GPT-6-Sol", visibility: "list" },
     ],
   });
 
-  const variant = slice.models.find((model) => model.slug === "gpt-5.6-sol-1m");
-  assert.equal(variant.provider, "openai");
-  assert.equal(variant.native, true);
-  assert.equal(variant.visible, false);
-  assert.equal(variant.displayName, "GPT-5.6-Sol (1M context)");
-  // And it has not displaced the model it was derived from.
-  assert.equal(slice.models.find((model) => model.slug === "gpt-5.6-sol").visible, true);
+  assert.equal(slice.models.some((model) => model.slug === "gpt-5.6-sol-1m"), false);
+  assert.equal(slice.models.some((model) => model.slug === "gpt-5.6-sol"), false);
+  assert.equal(slice.models.some((model) => model.slug === "gpt-6-sol"), true);
 });
 
 test("a login-free probe draws no extended-context variant", () => {
@@ -271,6 +284,7 @@ test("a login-free probe draws no extended-context variant", () => {
     loginFree: true,
     nativeModels: [
       { slug: "gpt-5.6-sol", display_name: "GPT-5.6-Sol", visibility: "list" },
+      { slug: "gpt-6-sol", display_name: "GPT-6-Sol", visibility: "list" },
     ],
   });
 
@@ -278,39 +292,40 @@ test("a login-free probe draws no extended-context variant", () => {
   // Signed-out Codex only displays allowlisted native slugs, so the row would
   // offer a model the picker can never show.
   assert.equal(slice.models.some((model) => model.slug === "gpt-5.6-sol-1m"), false);
-  assert.ok(slice.models.some((model) => model.slug === "gpt-5.6-sol"));
+  assert.equal(slice.models.some((model) => model.slug === "gpt-5.6-sol"), false);
+  assert.equal(slice.models.some((model) => model.slug === "gpt-6-sol"), true);
 });
 
-test("codex probe does not turn a selected native v1 model into v2", () => {
+test("codex probe preserves the native model's declared v1 or v2 capability", () => {
   const slice = probe("codex", [], [], {
     nativeModels: [
       {
-        slug: "gpt-5.6-terra",
-        display_name: "GPT-5.6-Terra",
+        slug: "gpt-6-sol",
+        display_name: "GPT-6-Sol",
         visibility: "list",
-        multi_agent_version: "v1",
+        multi_agent_version: "v2",
       },
       {
-        slug: "gpt-5.6-luna",
-        display_name: "GPT-5.6-Luna",
+        slug: "gpt-6-luna",
+        display_name: "GPT-6-Luna",
         visibility: "list",
         multi_agent_version: "v1",
       },
     ],
     subagentSettings: {
       mode: "selected",
-      enabled: ["gpt-5.6-terra"],
+      enabled: ["gpt-6-sol", "gpt-6-luna"],
       disabled: [],
     },
   });
 
   assert.equal(
-    slice.models.find((model) => model.slug === "gpt-5.6-terra")?.multiAgentVersion,
-    "v1",
+    slice.models.find((model) => model.slug === "gpt-6-sol")?.multiAgentVersion,
+    "v2",
   );
   assert.equal(
-    slice.models.find((model) => model.slug === "gpt-5.6-luna")?.multiAgentVersion,
-    "v2",
+    slice.models.find((model) => model.slug === "gpt-6-luna")?.multiAgentVersion,
+    "v1",
   );
 });
 
@@ -387,7 +402,7 @@ test("control refuses to enable a repository-certified v1 model as a v2 subagent
 
 test("a disabled repository-certified native v2 model can be turned back on", () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "control-subagent-native-v2-"));
-  const slug = "gpt-5.6-luna";
+  const slug = "gpt-6-luna";
   const env = {
     ...process.env,
     CODEX_HOME: stateDir,
@@ -398,9 +413,9 @@ test("a disabled repository-certified native v2 model can be turned back on", ()
     path.join(stateDir, "native-models.json"),
     `${JSON.stringify({ models: [{
       slug,
-      display_name: "GPT-5.6-Luna",
+      display_name: "GPT-6-Luna",
       visibility: "list",
-      multi_agent_version: "v1",
+      multi_agent_version: "v2",
     }] })}\n`,
     { mode: 0o600 },
   );
@@ -417,10 +432,10 @@ test("a disabled repository-certified native v2 model can be turned back on", ()
   try {
     const snapshot = probe("codex", [], [], {
       nativeModels: [{
-        slug,
-        display_name: "GPT-5.6-Luna",
-        visibility: "list",
-        multi_agent_version: "v1",
+      slug,
+      display_name: "GPT-6-Luna",
+      visibility: "list",
+      multi_agent_version: "v2",
       }],
       subagentSettings: { mode: "selected", enabled: [], disabled: [slug] },
     });
@@ -637,7 +652,7 @@ test("Cursor client disconnect uses the Node uninstall path on every platform", 
 test("login-free control selects a ready external model and restores Codex defaults", () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "control-login-free-"));
   const signedOutCodex = writeSignedOutCodexStub(stateDir);
-  writeFileSync(path.join(stateDir, "config.toml"), `model = "gpt-5.6-sol"\n`, {
+  writeFileSync(path.join(stateDir, "config.toml"), `model = "gpt-6-sol"\n`, {
     mode: 0o600,
   });
   writeFileSync(
@@ -658,7 +673,7 @@ test("login-free control selects a ready external model and restores Codex defau
     `${JSON.stringify({
       models: [
         {
-          slug: "gpt-5.6-sol",
+          slug: "gpt-6-sol",
           display_name: "GPT-5.6-Sol",
           visibility: "list",
           priority: 10,
@@ -689,19 +704,19 @@ test("login-free control selects a ready external model and restores Codex defau
   try {
     const enabled = runMode("on");
     assert.equal(enabled.login_free, true);
-    assert.equal(enabled.model, "gpt-5.6-sol");
+    assert.equal(enabled.model, "gpt-6-sol");
     assert.equal(enabled.model_provider, "codex-router");
     const providerModePath = path.join(stateDir, "codex-provider-mode.json");
     const providerMode = JSON.parse(readFileSync(providerModePath, "utf8"));
     assert.equal(providerMode.version, 1);
     assert.equal(providerMode.previousPresent, false);
     assert.equal(providerMode.previousModelPresent, true);
-    assert.equal(providerMode.previousModel, "gpt-5.6-sol");
+    assert.equal(providerMode.previousModel, "gpt-6-sol");
     const loginFreeConfig = readFileSync(path.join(stateDir, "config.toml"), "utf8");
     assert.match(loginFreeConfig, /^model_provider = "codex-router"$/m);
     assert.match(loginFreeConfig, /\[model_providers\.codex-router\]/);
     const catalog = JSON.parse(readFileSync(path.join(stateDir, "merged-models.json"), "utf8"));
-    const aliasEntry = catalog.models.find((model) => model.slug === "gpt-5.6-sol");
+    const aliasEntry = catalog.models.find((model) => model.slug === "gpt-6-sol");
     assert.match(aliasEntry.display_name, /DeepSeek/);
     assert.equal(aliasEntry.visibility, "list");
     assert.deepEqual(
@@ -718,7 +733,7 @@ test("login-free control selects a ready external model and restores Codex defau
     const aliases = JSON.parse(readFileSync(path.join(stateDir, "native-aliases.json"), "utf8"));
     assert.deepEqual(aliases, {
       version: 1,
-      aliases: { "gpt-5.6-sol": "deepseek/deepseek-v4-flash" },
+      aliases: { "gpt-6-sol": "deepseek/deepseek-v4-flash" },
     });
 
     // A later catalog rebuild has no mode-toggle override. It must recover
@@ -766,11 +781,11 @@ test("login-free control selects a ready external model and restores Codex defau
     );
     assert.equal(afterRefresh.login_free, true);
     assert.equal(afterRefresh.model_provider, "codex-router");
-    assert.equal(afterRefresh.model, "gpt-5.6-sol");
+    assert.equal(afterRefresh.model, "gpt-6-sol");
 
     const disabled = runMode("off");
     assert.equal(disabled.login_free, false);
-    assert.equal(disabled.model, "gpt-5.6-sol");
+    assert.equal(disabled.model, "gpt-6-sol");
     assert.equal(disabled.model_provider, "openai");
   } finally {
     rmSync(stateDir, { recursive: true, force: true });
@@ -779,7 +794,7 @@ test("login-free control selects a ready external model and restores Codex defau
 
 test("login-free aliasing applies even when a ChatGPT credential is still stored", () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "control-login-free-auth-"));
-  writeFileSync(path.join(stateDir, "config.toml"), `model = "gpt-5.6-sol"\n`, {
+  writeFileSync(path.join(stateDir, "config.toml"), `model = "gpt-6-sol"\n`, {
     mode: 0o600,
   });
   writeFileSync(
@@ -799,7 +814,7 @@ test("login-free aliasing applies even when a ChatGPT credential is still stored
     path.join(stateDir, "native-models.json"),
     `${JSON.stringify({
       models: [
-        { slug: "gpt-5.6-sol", display_name: "GPT-5.6-Sol", visibility: "list", priority: 10 },
+        { slug: "gpt-6-sol", display_name: "GPT-5.6-Sol", visibility: "list", priority: 10 },
       ],
     })}\n`,
     { mode: 0o600 },
@@ -826,12 +841,12 @@ test("login-free aliasing applies even when a ChatGPT credential is still stored
       ),
     );
     assert.equal(enabled.login_free, true);
-    assert.equal(enabled.model, "gpt-5.6-sol");
+    assert.equal(enabled.model, "gpt-6-sol");
     const aliases = JSON.parse(readFileSync(path.join(stateDir, "native-aliases.json"), "utf8"));
-    assert.deepEqual(aliases.aliases, { "gpt-5.6-sol": "deepseek/deepseek-v4-flash" });
+    assert.deepEqual(aliases.aliases, { "gpt-6-sol": "deepseek/deepseek-v4-flash" });
     const catalog = JSON.parse(readFileSync(path.join(stateDir, "merged-models.json"), "utf8"));
     assert.match(
-      catalog.models.find((model) => model.slug === "gpt-5.6-sol").display_name,
+      catalog.models.find((model) => model.slug === "gpt-6-sol").display_name,
       /DeepSeek/,
     );
   } finally {
@@ -841,7 +856,7 @@ test("login-free aliasing applies even when a ChatGPT credential is still stored
 
 test("model-set switches the login-free model and rejects unavailable models", () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "control-model-set-"));
-  writeFileSync(path.join(stateDir, "config.toml"), `model = "gpt-5.6-sol"\n`, {
+  writeFileSync(path.join(stateDir, "config.toml"), `model = "gpt-6-sol"\n`, {
     mode: 0o600,
   });
   writeFileSync(
@@ -862,7 +877,7 @@ test("model-set switches the login-free model and rejects unavailable models", (
     `${JSON.stringify({
       models: [
         {
-          slug: "gpt-5.6-sol",
+          slug: "gpt-6-sol",
           display_name: "GPT-5.6-Sol",
           visibility: "list",
           priority: 10,
@@ -899,7 +914,7 @@ test("model-set switches the login-free model and rejects unavailable models", (
 
     runControl("auth-mode", "on");
     const switched = runControl("model-set", "deepseek/deepseek-v4-flash");
-    assert.equal(switched.model, "gpt-5.6-sol");
+    assert.equal(switched.model, "gpt-6-sol");
     // The built-in OpenAI identity takes the cross-version-safe provider switch.
     assert.equal(switched.model_provider, "codex-router");
     assert.equal(switched.login_free, true);
@@ -913,7 +928,7 @@ test("model-set switches the login-free model and rejects unavailable models", (
       "model-set must reject models from unauthenticated providers",
     );
     assert.throws(
-      () => runControl("model-set", "gpt-5.6-sol"),
+      () => runControl("model-set", "gpt-6-sol"),
       /enabled, authenticated/,
       "model-set must reject native models",
     );
@@ -928,7 +943,7 @@ test("signed routing rolls back catalog and config after a forced post-publicati
   const originalCatalog = {
     models: [
       {
-        slug: "gpt-5.6-sol",
+        slug: "gpt-6-sol",
         display_name: "GPT-5.6-Sol",
         visibility: "list",
         priority: 10,

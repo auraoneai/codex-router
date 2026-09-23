@@ -627,6 +627,3 @@ test("multi-hop candidate failover: A (429) -> B (401) -> C (200) with single-at
     assert.equal(noCandidate, undefined); // loop terminates cleanly!
   } finally { b.cleanup(); resetRotationStateForTests(); }
 });
-
-
-

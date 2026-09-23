@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 
 import { NATIVE_CATALOG_PATH } from "../paths.mjs";
+import { isExcludedNativeCodexModelSlug } from "../native-model-exclusions.mjs";
 
 const inventoryCache = new Map();
 
@@ -26,7 +27,7 @@ export function engineeringNativeModelsFromCatalog(catalog) {
   for (const source of catalog.models) {
     const slug = typeof source?.slug === "string" ? source.slug : "";
     if (
-      !slug || slug.includes("/") || seen.has(slug) ||
+      !slug || isExcludedNativeCodexModelSlug(slug) || slug.includes("/") || seen.has(slug) ||
       source?.visibility !== "list" || source?.multi_agent_version !== "v2"
     ) continue;
     const reasoningLevels = effortList(source.supported_reasoning_levels);

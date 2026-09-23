@@ -23,7 +23,7 @@ test("checked-in engineering policy defaults are valid and opt-in off", () => {
   assert.equal(policy.lead.executionMode, "native-parent");
   assert.deepEqual(policy.deepSeekRecovery.map(({ model }) => model), [
     "cloudflare-workers-ai/glm-5.3",
-    "gpt-5.6-sol",
+    "gpt-6-sol",
     "kiro-prism/claude-sonnet-5",
   ]);
 });

@@ -4,7 +4,7 @@ import { normalizeEngineeringFailure } from "./capacity.mjs";
 export const DEEPSEEK_NON_MODAL_FALLBACK = "deepseek-non-modal-fallback";
 export const DEFAULT_DEEPSEEK_RECOVERY_CHAIN = Object.freeze([
   "cloudflare-workers-ai/glm-5.3",
-  "gpt-5.6-sol",
+  "gpt-6-sol",
   "kiro-prism/claude-sonnet-5",
 ]);
 
@@ -24,7 +24,7 @@ function family(candidate) {
   if (identity.includes("kimi")) return "kimi";
   if (identity.includes("glm")) return "glm";
   if (identity.includes("claude")) return "claude";
-  if (identity.includes("gpt-5.6")) return "gpt-5.6";
+  if (identity.includes("gpt-6")) return "gpt-6";
   return `model:${identity}`;
 }
 

@@ -6,7 +6,7 @@
       "gatewayModel": "grok-oauth-grok-4-6",
       "upstreamModel": "grok-4.6",
       "provider": "grok-oauth",
-      "listed": true,
+      "listed": false,
       "displayName": "Grok 4.6 (OAuth)",
       "description": "Grok 4.6 through the official Grok CLI OAuth session with long-running agentic coding, tool calls, and hosted web/X search.",
       "priority": 1,

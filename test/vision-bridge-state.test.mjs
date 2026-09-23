@@ -28,6 +28,7 @@ function forgetState() {
 test("a machine that never configured the bridge gets it on", () => {
   forgetState();
   assert.equal(visionBridgeConfigured(), false);
+  assert.equal(DEFAULT_VISION_ENGINE, "gpt-6-luna");
   // The default names a model rather than ranking for one: "cheapest" was
   // scored by slug substring and matched nothing on a typical install, so the
   // winner fell out of alphabetical order.

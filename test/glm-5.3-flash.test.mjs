@@ -44,7 +44,7 @@ test("every checked-in GLM-5.3-Flash route records its static metadata", () => {
     const model = MODEL_BY_SLUG.get(slug);
     assert.ok(model, `${slug} is missing from the registry`);
     assert.equal(model.upstreamModel, upstreamModel);
-    assert.equal(model.listed, true);
+    assert.equal(model.listed, slug !== "openrouter/glm-5.3-flash");
     assert.deepEqual(model.reasoningLevels.map((level) => level.effort), ["low", "high", "max"]);
     assert.equal(model.defaultEffort, "max");
     assert.equal(model.contextWindow, 1_000_000);

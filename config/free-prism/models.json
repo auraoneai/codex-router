@@ -7,7 +7,7 @@
       "upstreamModel": "MiniMax-M3",
       "upstreamProvider": "Minimax",
       "provider": "free-prism",
-      "listed": true,
+      "listed": false,
       "displayName": "MiniMax M3 (Free Prism)",
       "description": "MiniMax M3 through the Free Prism gateway.",
       "priority": 10,

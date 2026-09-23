@@ -22,7 +22,7 @@
       "gatewayModel": "cloudflare-workers-ai-glm-5-2",
       "upstreamModel": "@cf/zai-org/glm-5.2",
       "provider": "cloudflare-workers-ai",
-      "listed": true,
+      "listed": false,
       "displayName": "GLM 5.2 (Cloudflare)",
       "description": "GLM 5.2 through Cloudflare Workers AI.",
       "priority": 21,

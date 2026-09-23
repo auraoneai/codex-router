@@ -69,6 +69,9 @@ import { routedModelSearchAvailable } from "./search-capability.mjs";
 import {
   readModelsCache,
 } from "./native-account-catalog.mjs";
+import {
+  filterExcludedNativeCodexModels,
+} from "./native-model-exclusions.mjs";
 
 export { readModelsCache } from "./native-account-catalog.mjs";
 
@@ -922,16 +925,12 @@ function sortCatalogModels(models) {
   });
 }
 
-// Native entries carry upstream's static multi_agent_version. One pinned
-// backend exception is maintained in the repository after upstream evidence;
-// local selection or a stream/tool probe must never promote any other v1
-// model. That avoids turning a UI toggle into an unreviewed v2 assertion.
-const NATIVE_V2_BACKEND_SLUGS = new Set(["gpt-5.6-luna"]);
-
 // Keep the repository/upstream verdict separate from the effective catalog
 // value. Hiding or disabling a certified native route correctly publishes it
 // as v1, but that opt-out must not erase the certificate the control surfaces
 // need in order to let the operator turn it back on.
+const NATIVE_V2_BACKEND_SLUGS = new Set(["gpt-5.6-luna"]);
+
 export function nativeSubagentCertification(model) {
   const slug = String(model?.slug || "");
   if (NATIVE_CONTEXT_VARIANT_SLUGS.includes(slug)) return "v1";
@@ -1146,7 +1145,11 @@ export function publishCatalog({ refreshNative = refresh, output = true } = {}) 
     userSlugs,
     Date.now(),
   );
-  const captured = nativeCatalog({ refreshNative });
+  const capturedSource = nativeCatalog({ refreshNative });
+  const captured = {
+    ...capturedSource,
+    models: filterExcludedNativeCodexModels(capturedSource.models),
+  };
   // Native entries ignore the routed positive allowlist, while explicit
   // native hide decisions remain effective across catalog refreshes.
   const nativeBaseSlugs = new Set(captured.models.map((model) => String(model.slug || "")));

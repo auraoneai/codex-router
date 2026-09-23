@@ -7,15 +7,17 @@ export const DEEPSEEK_CAPACITY_POLICY = "deepseek-non-modal-fallback";
 export const ENGINEERING_EXECUTION_SELECTION_MODES = Object.freeze(["pinned", "adaptive"]);
 export const ENGINEERING_NATIVE_MODELS = Object.freeze([
   Object.freeze({
-    slug: "gpt-5.6-sol",
-    displayName: "GPT-5.6-Sol (Codex native)",
+    slug: "gpt-6-sol",
+    displayName: "GPT-6-Sol (Codex native)",
     provider: "openai",
-    upstreamModel: "gpt-5.6-sol",
-    gatewayModel: "gpt-5.6-sol",
+    upstreamModel: "gpt-6-sol",
+    gatewayModel: "gpt-6-sol",
     native: true,
     listed: true,
     multiAgentVersion: "v2",
-    defaultEffort: "low",
+    defaultEffort: "medium",
+    contextWindow: 272000,
+    inputModalities: Object.freeze(["text", "image"]),
     reasoningLevels: Object.freeze(
       ["low", "medium", "high", "xhigh", "max", "ultra"]
         .map((effort) => Object.freeze({ effort })),

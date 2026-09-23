@@ -234,7 +234,6 @@ const CURATION_ROUTES = Object.freeze({
       "qwen3.7-max",
       "qwen3.7-plus",
       "qwen3.8-flash",
-      "qwen3.8-max",
       "union-alpha",
     ]),
     responsesProvider: "opencode-go-responses",

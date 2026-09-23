@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { modelPickerSnapshot } from "./model-picker-state.mjs";
 import { MERGED_CATALOG_PATH, NATIVE_CATALOG_PATH } from "./paths.mjs";
 import { nativeVisionCandidates } from "./vision-bridge.mjs";
+import { filterExcludedNativeCodexModels } from "./native-model-exclusions.mjs";
 
 // One rule, one place: which models from the signed-in ChatGPT plan may read an
 // image for a text-only model.
@@ -41,7 +42,7 @@ export function catalogModelsAt(catalogPath) {
 export function nativeVisionEngines({ models, hidden, authorized } = {}) {
   if (authorized !== true) return [];
   return nativeVisionCandidates(
-    models,
+    filterExcludedNativeCodexModels(models),
     hidden instanceof Set ? hidden : new Set(hidden || []),
   );
 }

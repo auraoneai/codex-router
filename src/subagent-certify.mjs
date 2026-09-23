@@ -455,7 +455,7 @@ export async function verifySubagentRoute(
     secret,
     codexBin,
     codexHome,
-    parentModel = "gpt-5.6-sol",
+    parentModel = "gpt-6-sol",
     catalogPath,
     routerVersion,
     timeoutMs = 120_000,

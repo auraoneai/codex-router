@@ -111,7 +111,6 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "gemini-api/models/gemini-3.8-flash",
       "grok-api/grok-4.5",
       "grok-oauth/grok-4.5",
-      "grok-oauth/grok-4.6",
       "kimi-api/kimi-k3",
       "kimi-api-cn/kimi-k3",
       "kimi-oauth/k3",
@@ -193,7 +192,6 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "opencode-go-messages/qwen3.7-max",
       "opencode-go-messages/qwen3.7-plus",
       "opencode-go-messages/qwen3.8-flash",
-      "opencode-go-messages/qwen3.8-max",
       "opencode-go-messages/union-alpha",
       "opencode-go-responses/gpt-5.6-luna",
       "opencode-go-responses/grok-4.5",
@@ -204,9 +202,6 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "openrouter/claude-fable-5.1",
       "openrouter/deepseek-v4.1-flash",
       "openrouter/gemini-3.8-flash",
-      "openrouter/glm-5.3-flash",
-      "openrouter/glm-5.3",
-      "openrouter/grok-4.6",
       "openrouter/tencent/hy4-preview",
       "openrouter/muse-spark-1.2-contributor",
       "openrouter/muse-spark-1.2",
@@ -215,15 +210,12 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "openrouter/qwen3.8-flash",
       "openrouter/union-alpha",
       "qwen-plan/deepseek-v4-flash-0731",
-      "qwen-plan/deepseek-v4-pro-0813",
       "qwen-plan/deepseek-v4-pro",
       "qwen-plan/glm-5.2",
       "qwen-plan/qwen3.6-flash",
       "qwen-plan/qwen3.7-max",
       "qwen-plan/qwen3.7-plus",
       "qwen-plan/qwen3.8-flash",
-      "qwen-plan/qwen3.8-max-preview",
-      "qwen-plan/qwen3.8-max",
       "venice/claude-fable-5.1",
       "venice/gemini-3.8-flash",
       "venice/glm-5.3",
@@ -240,7 +232,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
     ],
   );
   assert.equal(PROVIDERS.get("deepseek").baseUrl, "https://api.deepseek.com");
-  assert.equal(MODELS.filter((model) => model.provider === "kiro-prism").length, 10);
+  assert.equal(MODELS.filter((model) => model.provider === "kiro-prism").length, 9);
   // Fable 5.1 is defined and routable by explicit slug, but stays out of the
   // picker until Kiro model governance approves it for the organization.
   assert.equal(
@@ -1965,7 +1957,6 @@ test("opencode's DeepSeek models never receive a forced tool_choice", () => {
     "opencode-go-messages/qwen3.7-max",
     "opencode-go-messages/qwen3.7-plus",
     "opencode-go-messages/qwen3.8-flash",
-    "opencode-go-messages/qwen3.8-max",
   ]) {
     assert.equal(MODEL_BY_SLUG.get(slug).requestProfile, "omit-tool-choice", slug);
   }
