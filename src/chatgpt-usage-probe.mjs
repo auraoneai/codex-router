@@ -127,9 +127,10 @@ async function executeProbeChatGPTAccountUsage({
       }
       return {
         ...base,
-        planType: usage.planType ?? null,
+        planType: usage.planType ?? (!isAuthInvalid && !prev?.authInvalid ? prev?.planType ?? null : null),
         primary: usage.primary ?? null,
         secondary: usage.secondary ?? null,
+        resetCredits: usage.resetCredits ?? null,
         fetchedAt: usage.fetchedAt,
         ...(isAuthInvalid ? { authInvalid: true, authErrorCode: usage.authErrorCode || "token_revoked" } : {}),
         ...(usage?.rateLimitError ? { error: usage.rateLimitError } : {}),
@@ -139,9 +140,13 @@ async function executeProbeChatGPTAccountUsage({
       const isAuthInvalid = /401|token_revoked|invalidated oauth token|invalid_token|unauthorized/i.test(msg);
       return {
         ...base,
-        planType: null,
+        // A transient probe outage must not erase a previously verified plan
+        // tier: rotation uses it to spend Plus quota before Pro quota. An
+        // authentication failure invalidates that identity and its tier.
+        planType: !isAuthInvalid && !prev?.authInvalid ? prev?.planType ?? null : null,
         primary: !isAuthInvalid && prev?.primary ? prev.primary : null,
         secondary: !isAuthInvalid && prev?.secondary ? prev.secondary : null,
+        resetCredits: null,
         error: msg,
         ...(isAuthInvalid ? { authInvalid: true, authErrorCode: "token_revoked" } : {}),
       };
@@ -167,7 +172,10 @@ const inFlightProbes = new Map();
 export async function probeChatGPTAccountUsage(options = {}) {
   const key = options.cachePath || CHATGPT_ACCOUNT_USAGE_CACHE_PATH;
   if (inFlightProbes.has(key)) {
-    return inFlightProbes.get(key);
+    if (!options.freshAfterInFlight) return inFlightProbes.get(key);
+    // A reset needs a post-redemption read. Joining a poll that began before
+    // the consume request could report the old quota and credit count.
+    await inFlightProbes.get(key).catch(() => {});
   }
   const promise = executeProbeChatGPTAccountUsage(options).finally(() => {
     inFlightProbes.delete(key);

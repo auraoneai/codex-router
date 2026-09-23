@@ -98,6 +98,50 @@ test("a soft window stays selectable so the last slice of a plan is spendable", 
   assert.equal(pickAccount(["a", "b"], { preferred: "a", usageById: usage }), "a");
 });
 
+test("confirmed Plus quota is spent before Pro, even when Pro is preferred and Plus is soft", () => {
+  const usage = {
+    pro: { planType: "pro", primary: { remainingPercent: 90 } },
+    plus: { planType: " Plus ", primary: { remainingPercent: 2 } },
+  };
+  assert.equal(pickAccount(["pro", "plus"], { preferred: "pro", usageById: usage }), "plus");
+  assert.deepEqual(
+    orderAccountCandidates([{ id: "pro" }, { id: "plus" }], { preferred: "pro", usageById: usage })
+      .map((candidate) => candidate.id),
+    ["plus", "pro"],
+  );
+});
+
+test("confirmed Plus accounts precede Pro accounts while keeping same-tier preference", () => {
+  const usage = {
+    pro: { planType: "pro", primary: { remainingPercent: 90 } },
+    plusA: { planType: "plus", primary: { remainingPercent: 90 } },
+    plusB: { planType: "plus", primary: { remainingPercent: 3 } },
+  };
+  assert.deepEqual(
+    orderAccountCandidates([{ id: "pro" }, { id: "plusA" }, { id: "plusB" }], {
+      preferred: "plusB", usageById: usage,
+    }).map((candidate) => candidate.id),
+    ["plusB", "plusA", "pro"],
+  );
+});
+
+test("confirmed quota outranks an unprobed Plus account", () => {
+  const usage = {
+    plus: { planType: "plus" },
+    pro: { planType: "pro", primary: { remainingPercent: 80 } },
+  };
+  assert.equal(pickAccount(["plus", "pro"], { usageById: usage }), "pro");
+});
+
+test("an existing Pro conversation keeps affinity while new conversations choose Plus", () => {
+  const usage = {
+    plus: { planType: "plus", primary: { remainingPercent: 50 } },
+    pro: { planType: "pro", primary: { remainingPercent: 50 } },
+  };
+  assert.equal(pickAccount(["plus", "pro"], { usageById: usage }), "plus");
+  assert.equal(pickAccount(["plus", "pro"], { sticky: "pro", usageById: usage }), "pro");
+});
+
 test("a drained account sorts behind every account that still has quota", () => {
   const usage = { a: { primary: { remainingPercent: 0 } }, b: { primary: { remainingPercent: 50 } } };
   assert.equal(pickAccount(["a", "b"], { preferred: "a", usageById: usage }), "b");
@@ -191,6 +235,32 @@ test("a spent preferred account yields to one with quota", () => {
     });
     assert.equal(candidates[0].id, "acct_freshfresh");
     assert.ok(!candidates.some((entry) => entry.id === "acct_spentspent"), "a drained account is excluded");
+  } finally { b.cleanup(); resetRotationStateForTests(); }
+});
+
+test("the pool uses Plus first, then Pro when Plus drains or cools", () => {
+  const b = box();
+  resetRotationStateForTests();
+  try {
+    const plusId = "acct_plusplus";
+    const proId = "acct_propropro";
+    writeAccount(b.homes, plusId, { accountId: "ident-plus" });
+    writeAccount(b.homes, proId, { accountId: "ident-pro" });
+    writePool(b.pool, [proId, plusId], { policy: { selectedAccountId: proId } });
+    const usage = {
+      [plusId]: { planType: "plus", primary: { remainingPercent: 2 } },
+      [proId]: { planType: "pro", primary: { remainingPercent: 95 } },
+    };
+    const ids = (rows) => rotationCandidates({ poolPath: b.pool, homesDir: b.homes, usageById: rows })
+      .map((entry) => entry.id);
+    assert.deepEqual(ids(usage), [plusId, proId]);
+
+    usage[plusId].primary.remainingPercent = 0;
+    assert.deepEqual(ids(usage), [proId], "a drained Plus account leaves the candidate pool");
+
+    usage[plusId].primary.remainingPercent = 2;
+    coolAccount(plusId, Date.now() + 60_000);
+    assert.deepEqual(ids(usage), [proId], "a cooling Plus account yields to Pro");
   } finally { b.cleanup(); resetRotationStateForTests(); }
 });
 

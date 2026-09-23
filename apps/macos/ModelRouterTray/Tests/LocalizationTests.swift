@@ -128,6 +128,29 @@ struct LocalizationTests {
   }
 
   @Test(
+    "banked reset confirmation and spend feedback are translated",
+    arguments: [TrayLanguage.chinese, .arabic, .hindi, .japanese, .korean]
+  )
+  func bankedResetConsentIsLocalized(language: TrayLanguage) {
+    let original = RouterLanguage.selection
+    defer { RouterLanguage.setSelection(original) }
+    RouterLanguage.setSelection(language)
+    for english in [
+      "Use this banked reset?",
+      "A reset is available near a rate limit (at least 90% used). It immediately resets this account's usage limits, spends one banked reset credit, and cannot be undone.",
+      "Use reset credit",
+      "Reset credit used",
+      "Reset credit was not used",
+      "%@ is not near its rate limit, so no credit was used.",
+      "Reset credit status unknown",
+      "The reset for %@ may have used a credit. Retry checks the saved attempt; if limits recovered, inspect account usage.",
+      "Retry saved attempt",
+    ] {
+      #expect(routerLocalized(english) != english, "\(language.rawValue) did not translate \(english)")
+    }
+  }
+
+  @Test(
     "daily-usage fallback provenance is translated in every explicit locale",
     arguments: [TrayLanguage.chinese, .arabic, .hindi, .japanese, .korean]
   )

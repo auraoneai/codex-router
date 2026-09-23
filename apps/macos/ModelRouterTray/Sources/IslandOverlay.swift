@@ -223,6 +223,9 @@ final class IslandWindowController {
   private func updateMouseState() {
     let cursor = NSEvent.mouseLocation
     let frame = window.frame
+    let resetDialogOpen = store.chatGptResetCreditPrompt != nil
+      || store.chatGptResetCreditFeedback != nil
+    if resetDialogOpen, display.state != .expanded { display.setState(.expanded) }
     let visible = display.size
     let islandRect = NSRect(
       x: frame.midX - visible.width / 2,
@@ -232,6 +235,9 @@ final class IslandWindowController {
     )
     let inside = islandRect.contains(cursor)
     window.ignoresMouseEvents = !inside
+    // The pointer leaves the Island to reach other UI. Keep an in-progress
+    // credit confirmation visible until the user explicitly resolves it.
+    if resetDialogOpen { return }
     if inside, display.state == .compact {
       display.setState(.peek)
       store.setIslandInspecting(true)
@@ -273,6 +279,10 @@ private struct IslandOverlayView: View {
           }
         glow
         content
+        if store.chatGptResetCreditPrompt != nil || store.chatGptResetCreditFeedback != nil {
+          resetCreditDialog
+            .zIndex(20)
+        }
       }
       .frame(width: display.size.width, height: display.size.height)
       .contentShape(IslandSilhouette())
@@ -303,6 +313,89 @@ private struct IslandOverlayView: View {
     }
     .onChange(of: store.chatGptAccountUsage?.accounts.count) { count in
       display.setAccountRowCount(count ?? 0)
+    }
+    .onChange(of: store.chatGptResetCreditPrompt?.accountId) { accountId in
+      if accountId != nil {
+        display.setState(.expanded)
+        store.setIslandInspecting(true)
+      }
+    }
+  }
+
+  private var resetCreditDialog: some View {
+    ZStack {
+      islandBezel.opacity(0.84)
+        .contentShape(Rectangle())
+      VStack(alignment: .leading, spacing: 11) {
+        if let prompt = store.chatGptResetCreditPrompt {
+          Text(routerLocalized("Use this banked reset?"))
+            .font(.system(size: 16, weight: .bold, design: .rounded))
+          Text(prompt.accountLabel)
+            .font(.system(size: 12, weight: .semibold, design: .rounded))
+            .foregroundStyle(.white.opacity(0.9))
+            .lineLimit(2)
+            .truncationMode(.middle)
+          Text(routerLocalized("A reset is available near a rate limit (at least 90% used). It immediately resets this account's usage limits, spends one banked reset credit, and cannot be undone."))
+            .font(.system(size: 11))
+            .foregroundStyle(.white.opacity(0.75))
+            .fixedSize(horizontal: false, vertical: true)
+          HStack {
+            Text(routerFormat("%d available", prompt.availableCount))
+              .font(.system(size: 10, weight: .medium))
+              .foregroundStyle(routerMuted)
+            Spacer()
+            Button(routerLocalized("Cancel")) { store.cancelChatGptResetCredit() }
+              .disabled(store.chatGptAccountOperation != nil)
+            Button(routerLocalized("Use reset credit")) {
+              Task { await store.confirmChatGptResetCredit() }
+            }
+            .disabled(store.chatGptAccountOperation != nil)
+          }
+          .buttonStyle(.bordered)
+          .font(.system(size: 11, weight: .semibold))
+        } else if let feedback = store.chatGptResetCreditFeedback {
+          Text(resetCreditFeedbackTitle(feedback.status))
+            .font(.system(size: 15, weight: .bold, design: .rounded))
+            .foregroundStyle(feedback.status == .redeemed ? routerMint : routerYellow)
+          Text(feedback.text)
+            .font(.system(size: 11))
+            .fixedSize(horizontal: false, vertical: true)
+          HStack {
+            Spacer()
+            if feedback.status == .uncertain && feedback.canRetry {
+              Button(routerLocalized("Retry saved attempt")) {
+                Task { await store.retryUncertainChatGptResetCredit() }
+              }
+              .disabled(store.chatGptAccountOperation != nil)
+              .buttonStyle(.bordered)
+            }
+            Button(routerLocalized("Done")) { store.dismissChatGptResetCreditFeedback() }
+              .disabled(store.chatGptAccountOperation != nil)
+              .buttonStyle(.bordered)
+          }
+        }
+      }
+      .padding(16)
+      .frame(width: 350)
+      .background(
+        RoundedRectangle(cornerRadius: 15, style: .continuous)
+          .fill(Color(red: 0.075, green: 0.085, blue: 0.105))
+          .overlay {
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+              .stroke(Color.white.opacity(0.18), lineWidth: 1)
+          }
+      )
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .clipShape(IslandSilhouette())
+    .accessibilityElement(children: .contain)
+  }
+
+  private func resetCreditFeedbackTitle(_ status: ChatGptResetCreditStatus) -> String {
+    switch status {
+    case .redeemed: return routerLocalized("Reset credit used")
+    case .notRedeemed: return routerLocalized("Reset credit was not used")
+    case .uncertain: return routerLocalized("Reset credit status unknown")
     }
   }
 
@@ -2138,6 +2231,7 @@ enum IslandAccountQuotaPresentation {
   static let rankWidth: CGFloat = 12
   static let quotaWidth: CGFloat = 32
   static let countdownWidth: CGFloat = 36
+  static let bankedResetWidth: CGFloat = 34
 
   /// A null window is not a zero window: the probe could not read it, and
   /// rendering `0%` there would claim the subscription is spent.
@@ -2281,6 +2375,12 @@ private struct IslandAccountQuotaTable: View {
         .frame(width: IslandAccountQuotaPresentation.countdownWidth, alignment: .trailing)
       Text(longColumnTitle)
         .frame(width: IslandAccountQuotaPresentation.quotaWidth, alignment: .trailing)
+      if showsBankedResets {
+        Text(routerLocalized("RESET"))
+          .frame(width: IslandAccountQuotaPresentation.bankedResetWidth, alignment: .trailing)
+          .lineLimit(1)
+          .minimumScaleFactor(0.55)
+      }
     }
     .font(.system(size: 8, weight: .semibold, design: .monospaced))
     .foregroundStyle(routerMuted)
@@ -2297,6 +2397,13 @@ private struct IslandAccountQuotaTable: View {
 
   private var longColumnTitle: String {
     dominantLabel(store.chatGptAccountWindows.longWindow) ?? "7d"
+  }
+
+  private var showsBankedResets: Bool {
+    (store.chatGptAccountUsage?.accounts ?? []).contains {
+      $0.bankedResetCount > 0 || store.isResetCreditCountUnverified($0.id)
+        || store.canRetryPendingChatGptResetCredit($0.id)
+    }
   }
 
   /// The label shared by the most accounts. A pool whose accounts disagree about
@@ -2343,6 +2450,7 @@ private struct IslandAccountQuotaTable: View {
         )
         .help(rotationHelp(account, rank: rank))
         .accessibilityHidden(true)
+        .opacity(excluded ? 0.55 : 1)
 
       Button {
         Task { await store.preferChatGptAccount(account.id) }
@@ -2393,9 +2501,78 @@ private struct IslandAccountQuotaTable: View {
       .accessibilityHint(
         preferred ? "" : routerLocalized("Double-click to prefer this subscription")
       )
+      .opacity(excluded ? 0.55 : 1)
+      if showsBankedResets {
+        bankedResetControl(for: account)
+      }
     }
     .frame(height: IslandAccountQuotaPresentation.rowHeight)
-    .opacity(excluded ? 0.55 : 1)
+  }
+
+  @ViewBuilder
+  private func bankedResetControl(for account: ChatGptAccountPoolRow) -> some View {
+    if store.canRetryPendingChatGptResetCredit(account.id) {
+      Button {
+        store.showPendingChatGptResetCredit(account.id)
+      } label: {
+        Image(systemName: "questionmark.arrow.circlepath")
+          .font(.system(size: 10, weight: .semibold))
+          .frame(width: IslandAccountQuotaPresentation.bankedResetWidth,
+                 height: IslandAccountQuotaPresentation.rowHeight)
+      }
+      .buttonStyle(.plain)
+      .help(routerLocalized("Reset result unknown; reopen the saved attempt"))
+      .accessibilityLabel(routerLocalized("Review uncertain reset attempt"))
+    } else if store.isResetCreditCountUnverified(account.id) {
+      Image(systemName: "ellipsis")
+        .font(.system(size: 10, weight: .semibold))
+        .foregroundStyle(routerMuted)
+        .frame(width: IslandAccountQuotaPresentation.bankedResetWidth,
+               height: IslandAccountQuotaPresentation.rowHeight)
+        .help(routerLocalized("Waiting for a fresh reset credit balance"))
+        .accessibilityLabel(routerLocalized("Reset credit balance is being refreshed"))
+    } else if store.visibleBankedResetCount(for: account) > 0 {
+      Button {
+        store.requestChatGptResetCredit(account.id)
+      } label: {
+        HStack(spacing: 2) {
+          Image(systemName: "arrow.counterclockwise")
+            .font(.system(size: 9, weight: .bold))
+          Text("\(account.bankedResetCount)")
+            .font(.system(size: 9, weight: .bold, design: .rounded))
+            .monospacedDigit()
+        }
+        .foregroundStyle(.white.opacity(account.canRedeemBankedReset ? 0.95 : 0.5))
+        .frame(width: IslandAccountQuotaPresentation.bankedResetWidth,
+               height: IslandAccountQuotaPresentation.rowHeight)
+        .background(routerAccent.opacity(account.canRedeemBankedReset ? 0.40 : 0.16),
+                    in: RoundedRectangle(cornerRadius: 4, style: .continuous))
+        .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      .disabled(!account.canRedeemBankedReset || store.chatGptAccountOperation != nil)
+      .help(bankedResetHelp(for: account))
+      .accessibilityLabel(routerFormat("Use a banked reset credit on %@",
+                                       account.displayLabel))
+      .accessibilityHint(routerLocalized("Opens a confirmation; usable when a rate limit is at least 90% spent"))
+    } else {
+      Color.clear
+        .frame(width: IslandAccountQuotaPresentation.bankedResetWidth,
+               height: IslandAccountQuotaPresentation.rowHeight)
+        .accessibilityHidden(true)
+    }
+  }
+
+  private func bankedResetHelp(for account: ChatGptAccountPoolRow) -> String {
+    let available = routerFormat("%d banked reset credits available for %@",
+                                 account.bankedResetCount, account.displayLabel)
+    if account.authInvalid {
+      return "\(available). \(routerLocalized("Sign in to use a reset credit."))"
+    }
+    if !account.canRedeemBankedReset {
+      return "\(available). \(routerLocalized("A core rate limit must be at least 90% spent."))"
+    }
+    return available
   }
 
   /// Rotation excludes an account for reasons the snapshot does not always
@@ -2493,10 +2670,13 @@ private struct IslandAccountQuotaTable: View {
       .map { routerFormat("rotation position %d", $0) }
       ?? routerLocalized("out of rotation")
     let plan = IslandAccountQuotaPresentation.planTag(account.planType).map { ", \($0)" } ?? ""
+    let banked = account.bankedResetCount > 0
+      ? ", \(account.bankedResetCount) \(routerLocalized("banked reset credits available"))"
+      : ""
     let shortName = windows.short?.shortLabel ?? shortColumnTitle
     let longName = windows.long?.shortLabel ?? longColumnTitle
     return "\(account.displayLabel)\(plan), \(position), \(shortName) \(short), "
-      + "\(longName) \(long), resets in \(back)"
+      + "\(longName) \(long), resets in \(back)\(banked)"
   }
 }
 

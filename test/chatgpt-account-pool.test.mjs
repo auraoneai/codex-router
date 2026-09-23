@@ -15,9 +15,11 @@ import {
   chatGPTSubscriptionAccountAuthPath,
   chatGPTSubscriptionAccountHome,
   chatGPTSubscriptionAccountPoolSnapshot,
+  chatGPTSubscriptionAccountResetAttemptPending,
   chatGPTSubscriptionAccountStatus,
   createChatGPTSubscriptionAccount,
   readChatGPTAccountPoolState,
+  redeemChatGPTSubscriptionAccountResetCredit,
   refreshChatGPTSubscriptionAccount,
   refreshBoundedChatGPTSubscriptionAccounts,
   removeChatGPTSubscriptionAccount,
@@ -80,6 +82,18 @@ function fixture() {
   return { root, filePath: path.join(root, "accounts.json"), homesDir: path.join(root, "homes") };
 }
 
+function redeemableAccount(options) {
+  const account = createChatGPTSubscriptionAccount(options);
+  const state = readChatGPTAccountPoolState(options.filePath);
+  state.accounts[account.id].identity = { accountId: "backend-account", email: "owner@example.com" };
+  writeChatGPTAccountPoolState(state, options.filePath);
+  const payload = Buffer.from(JSON.stringify({ email: "owner@example.com" })).toString("base64url");
+  writeFileSync(chatGPTSubscriptionAccountAuthPath(account.id, options), JSON.stringify({
+    tokens: { access_token: "access-token", account_id: "backend-account", id_token: `header.${payload}.signature` },
+  }), { mode: 0o600 });
+  return account;
+}
+
 test("saved accounts use isolated homes and never persist credentials in pool state", () => {
   const options = fixture();
   const account = createChatGPTSubscriptionAccount(options);
@@ -113,6 +127,109 @@ test("snapshot exposes email and usable status from an isolated auth file", () =
   assert.equal(snapshot.accounts[account.id].subscription.email, "second@example.com");
   assert.equal(snapshot.accounts[account.id].subscription.usable, true);
   assert.equal(chatGPTSubscriptionAccountStatus(account.id, options).hasAccountId, true);
+});
+
+test("a reset retry reuses its durable idempotency key after an uncertain outcome", async () => {
+  const options = fixture();
+  const account = redeemableAccount(options);
+  assert.equal(chatGPTSubscriptionAccountResetAttemptPending(account.id, options), false);
+  const keys = [];
+  const consume = async ({ idempotencyKey, expectedAccountId, expectedEmail }) => {
+    keys.push(idempotencyKey);
+    assert.equal(expectedAccountId, "backend-account");
+    assert.equal(expectedEmail, "owner@example.com");
+    if (keys.length === 1) {
+      const error = new Error("Reset redemption status is uncertain");
+      error.resetRequestSent = true;
+      throw error;
+    }
+    return { outcome: "alreadyRedeemed" };
+  };
+  const call = () => redeemChatGPTSubscriptionAccountResetCredit(account.id, {
+    ...options,
+    consume,
+    refreshUsage: async () => ({ accounts: [{ id: account.id, resetCredits: { availableCount: 0 } }] }),
+  });
+  const uncertain = await call();
+  assert.deepEqual(uncertain, {
+    accountId: account.id,
+    label: account.label,
+    outcome: "uncertain",
+    redeemed: false,
+  });
+  const attemptPath = path.join(options.homesDir, account.id, "reset-credit-attempt.json");
+  assert.equal(existsSync(attemptPath), true);
+  assert.equal(chatGPTSubscriptionAccountResetAttemptPending(account.id, options), true);
+  const wrongIdentity = readChatGPTAccountPoolState(options.filePath);
+  wrongIdentity.accounts[account.id].identity.email = "changed@example.com";
+  assert.equal(chatGPTSubscriptionAccountResetAttemptPending(account.id, { ...options, state: wrongIdentity }), false);
+  const result = await call();
+  assert.equal(result.redeemed, true);
+  assert.equal(result.outcome, "alreadyRedeemed");
+  assert.deepEqual(result.resetCredits, { availableCount: 0 });
+  assert.equal(keys[0], keys[1]);
+  assert.equal(existsSync(attemptPath), true);
+  assert.equal(chatGPTSubscriptionAccountResetAttemptPending(account.id, options), false);
+  const replayed = await call();
+  assert.equal(replayed.replayed, true);
+  assert.equal(replayed.outcome, "alreadyRedeemed");
+  assert.equal(keys.length, 2, "a rapid third click must not send another consume");
+});
+
+test("a safe reset preflight rejection cannot turn the next attempt into a bypass", async () => {
+  const options = fixture();
+  const account = redeemableAccount(options);
+  const attempts = [];
+  const consume = async ({ idempotencyKey }) => {
+    attempts.push({ idempotencyKey });
+    const error = new Error("A banked reset can be redeemed when quota is at least 90% used.");
+    error.resetRequestSent = false;
+    throw error;
+  };
+  const call = () => redeemChatGPTSubscriptionAccountResetCredit(account.id, { ...options, consume });
+  await assert.rejects(call(), /at least 90%/);
+  await assert.rejects(call(), /at least 90%/);
+  assert.notEqual(attempts[0].idempotencyKey, attempts[1].idempotencyKey);
+  assert.equal(existsSync(path.join(options.homesDir, account.id, "reset-credit-attempt.json")), false);
+});
+
+test("a pending attempt with recovered quota stays uncertain without a second consume", async () => {
+  const options = fixture();
+  const account = redeemableAccount(options);
+  const keys = [];
+  const consume = async ({ idempotencyKey }) => {
+    keys.push(idempotencyKey);
+    const error = new Error(keys.length === 1 ? "post-send timeout" : "quota recovered");
+    error.resetRequestSent = keys.length === 1;
+    if (keys.length > 1) error.code = "RESET_QUOTA_NOT_READY";
+    throw error;
+  };
+  const call = () => redeemChatGPTSubscriptionAccountResetCredit(account.id, { ...options, consume });
+  assert.equal((await call()).outcome, "uncertain");
+  assert.equal((await call()).outcome, "uncertain");
+  assert.equal(keys[0], keys[1]);
+  assert.equal(existsSync(path.join(options.homesDir, account.id, "reset-credit-attempt.json")), true);
+});
+
+test("two rapid clicks after a confirmed reset cannot spend twice on stale limits", async () => {
+  const options = fixture();
+  const account = redeemableAccount(options);
+  const keys = [];
+  const call = () => redeemChatGPTSubscriptionAccountResetCredit(account.id, {
+    ...options,
+    consume: async ({ idempotencyKey }) => {
+      keys.push(idempotencyKey);
+      return { outcome: "reset" };
+    },
+    // Simulate an upstream read still advertising the old available credit.
+    refreshUsage: async () => ({ accounts: [{ id: account.id, resetCredits: { availableCount: 1 } }] }),
+  });
+  const first = await call();
+  const second = await call();
+  assert.equal(first.outcome, "reset");
+  assert.equal(second.outcome, "reset");
+  assert.equal(second.replayed, true);
+  assert.equal(keys.length, 1);
 });
 
 test("an owned login lease keeps newly written OAuth auth pending and unusable", () => {

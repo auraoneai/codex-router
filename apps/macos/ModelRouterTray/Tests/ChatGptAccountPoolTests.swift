@@ -55,12 +55,146 @@ struct ChatGptAccountPoolTests {
     // A weekly window the probe did not report stays nil rather than becoming 0.
     #expect(home.secondaryRemainingPercent == nil)
     #expect(home.resetsAt == 1_790_419_714)
+    #expect(home.bankedResetCount == 0)
+    #expect(!home.canRedeemBankedReset)
+    #expect(!home.resetAttemptPending)
 
     let unread = snapshot.accounts[1]
     #expect(unread.health == .unknown)
     #expect(unread.planType == nil)
     #expect(unread.primaryRemainingPercent == nil)
     #expect(unread.resetsAt == nil)
+  }
+
+  @Test("banked credits appear only when the cache reports a positive count")
+  func bankedResetAvailability() throws {
+    let payload = """
+    {"accounts":[
+      {"id":"acct_a","primaryRemainingPercent":10,"resetCredits":{"availableCount":2}},
+      {"id":"acct_b","primaryRemainingPercent":0,"resetCredits":{"availableCount":0}},
+      {"id":"acct_c","primaryRemainingPercent":0,"resetCredits":{"availableCount":-3}},
+      {"id":"acct_d"},
+      {"id":"acct_e","primaryRemainingPercent":0,"resetCredits":{"availableCount":1},"authInvalid":true},
+      {"id":"acct_f","primaryRemainingPercent":11,"resetCredits":{"availableCount":1}},
+      {"id":"acct_g","secondaryRemainingPercent":10,"resetCredits":{"availableCount":1}},
+      {"id":"acct_h","resetCredits":{"availableCount":1}}
+    ]}
+    """
+    let snapshot = try JSONDecoder().decode(
+      ChatGptAccountPoolUsage.self, from: Data(payload.utf8)
+    )
+    #expect(snapshot.accounts.map(\.bankedResetCount) == [2, 0, 0, 0, 1, 1, 1, 1])
+    #expect(snapshot.accounts.map(\.canRedeemBankedReset) == [
+      true, false, false, false, false, false, true, false,
+    ])
+  }
+
+  @Test("reset outcomes never imply a credit was spent without a confirmed reset")
+  func bankedResetOutcomeMessages() {
+    let label = "test@example.com"
+    #expect(RouterStore.resetCreditFailureMessage("noCredit", label: label).contains(label))
+    #expect(RouterStore.resetCreditFailureMessage("nothingToReset", label: label)
+      .contains("no credit was used"))
+    #expect(RouterStore.resetCreditFailureMessage("alreadyRedeemed", label: label)
+      .contains("already used"))
+    #expect(RouterStore.resetCreditFailureMessage(nil, label: label)
+      .contains("could not be used"))
+  }
+
+  @Test("a confirmation cannot silently redeem after its account snapshot changes")
+  func staleResetPrompt() {
+    let account = ChatGptAccountPoolRow(
+      id: "acct_a", label: "one@example.com", primaryRemainingPercent: 10,
+      resetCredits: ChatGptAccountResetCredits(availableCount: 1)
+    )
+    let prompt = ChatGptResetCreditPrompt(
+      accountId: account.id, accountLabel: account.displayLabel, availableCount: 1)
+    let current = ChatGptAccountPoolUsage(fetchedAt: "before", rotation: [account.id], accounts: [account])
+    #expect(prompt.isCurrent(in: current))
+    #expect(!prompt.isCurrent(in: nil))
+    #expect(!prompt.isCurrent(in: ChatGptAccountPoolUsage(
+      fetchedAt: "after", rotation: [], accounts: [])))
+    let changed = ChatGptAccountPoolRow(
+      id: "acct_a", label: "different@example.com", primaryRemainingPercent: 10,
+      resetCredits: ChatGptAccountResetCredits(availableCount: 1)
+    )
+    #expect(!prompt.isCurrent(in: ChatGptAccountPoolUsage(
+      fetchedAt: "after", rotation: [changed.id], accounts: [changed])))
+    let noLongerEligible = ChatGptAccountPoolRow(
+      id: "acct_a", label: "one@example.com", primaryRemainingPercent: 11,
+      resetCredits: ChatGptAccountResetCredits(availableCount: 1)
+    )
+    #expect(!prompt.isCurrent(in: ChatGptAccountPoolUsage(
+      fetchedAt: "after", rotation: [account.id], accounts: [noLongerEligible])))
+  }
+
+  @Test("a redeemed count stays hidden until a new verified probe arrives")
+  func redeemedCountVerification() {
+    let hold = ChatGptResetCreditCountHold(priorFetchedAt: "before")
+    let row = ChatGptAccountPoolRow(
+      id: "acct_a", label: "one@example.com", primaryRemainingPercent: 10,
+      resetCredits: ChatGptAccountResetCredits(availableCount: 1)
+    )
+    let snapshot = { (at: String, account: ChatGptAccountPoolRow) in
+      ChatGptAccountPoolUsage(fetchedAt: at, rotation: [account.id], accounts: [account])
+    }
+    #expect(!hold.canRelease(accountId: row.id, in: snapshot("before", row)))
+    #expect(hold.canRelease(accountId: row.id, in: snapshot("after", row)))
+    let noBalance = ChatGptAccountPoolRow(id: row.id, label: row.label)
+    #expect(!hold.canRelease(accountId: row.id, in: snapshot("after", noBalance)))
+    let failedRead = ChatGptAccountPoolRow(
+      id: row.id, label: row.label, error: "probe failed",
+      resetCredits: ChatGptAccountResetCredits(availableCount: 1))
+    #expect(!hold.canRelease(accountId: row.id, in: snapshot("after", failedRead)))
+  }
+
+  @Test("uncertain redemption offers only a saved-key retry and never claims no spend")
+  func uncertainRedemptionFeedback() {
+    let accountId = "acct_a"
+    let label = "one@example.com"
+    let uncertain = RouterStore.resetCreditFeedback(
+      ChatGptResetCreditResult(accountId: accountId, outcome: "uncertain", redeemed: false),
+      accountId: accountId, label: label)
+    #expect(uncertain.status == .uncertain)
+    #expect(uncertain.canRetry)
+    #expect(uncertain.accountId == accountId)
+    #expect(uncertain.text.contains("may have used"))
+
+    let replay = RouterStore.resetCreditFeedback(
+      ChatGptResetCreditResult(accountId: accountId, outcome: "alreadyRedeemed", redeemed: true),
+      accountId: accountId, label: label)
+    #expect(replay.status == .redeemed)
+    #expect(!replay.canRetry)
+
+    let transportFailure = RouterStore.resetCreditErrorFeedback("timed out", label: label)
+    #expect(transportFailure.status == .uncertain)
+    #expect(!transportFailure.canRetry)
+    let wrongAccount = RouterStore.resetCreditFeedback(
+      ChatGptResetCreditResult(accountId: "acct_other", outcome: "reset", redeemed: true),
+      accountId: accountId, label: label)
+    #expect(wrongAccount.status == .uncertain)
+    #expect(!wrongAccount.canRetry)
+    let contradictory = RouterStore.resetCreditFeedback(
+      ChatGptResetCreditResult(accountId: accountId, outcome: "reset", redeemed: false),
+      accountId: accountId, label: label)
+    #expect(contradictory.status == .uncertain)
+  }
+
+  @Test("a pending reset attempt survives tray restart without available credits")
+  func pendingResetAttemptDecoding() throws {
+    let json = """
+    {"id":"acct_a","label":"one@example.com","primaryRemainingPercent":100,
+     "resetCredits":{"availableCount":0},"resetAttemptPending":true}
+    """
+    let row = try JSONDecoder().decode(ChatGptAccountPoolRow.self, from: Data(json.utf8))
+    #expect(row.resetAttemptPending)
+    #expect(row.bankedResetCount == 0)
+    #expect(!row.canRedeemBankedReset)
+    let review = RouterStore.pendingResetCreditFeedback(accountId: row.id, label: row.displayLabel)
+    #expect(review.status == .uncertain)
+    #expect(review.canRetry)
+    #expect(review.accountId == row.id)
+    #expect(review.text.contains("may have used"))
   }
 
   @Test("rotation order drives the table, with excluded accounts after it")

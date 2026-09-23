@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, unlinkSync } from "node:fs";
+import { randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
 
 import lockfile from "proper-lockfile";
@@ -296,6 +296,162 @@ export function createChatGPTSubscriptionAccount({ label = "", filePath = CHATGP
 export function chatGPTSubscriptionAccountHome(accountValue, { homesDir = CHATGPT_ACCOUNT_HOMES_DIR } = {}) { return path.join(homesDir, accountId(accountValue)); }
 export function chatGPTSubscriptionAccountAuthPath(accountValue, options = {}) { return path.join(chatGPTSubscriptionAccountHome(accountValue, options), "auth.json"); }
 export function chatGPTSubscriptionAccountCatalogDir(accountValue, options = {}) { return path.join(chatGPTSubscriptionAccountHome(accountValue, options), "router-catalog"); }
+
+function resetAttemptPath(id, homesDir) {
+  return path.join(chatGPTSubscriptionAccountHome(id, { homesDir }), "reset-credit-attempt.json");
+}
+
+function readResetAttempt(filePath, expectedAccountId, expectedEmail) {
+  let file;
+  try { file = lstatSync(filePath); } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  if (!file.isFile() || file.isSymbolicLink() || !privateFileIsProtected(filePath)) {
+    throw new Error("The saved reset attempt is not an owner-only regular file.");
+  }
+  let attempt;
+  try { attempt = JSON.parse(readFileSync(filePath, "utf8")); } catch {
+    throw new Error("The saved reset attempt is invalid.");
+  }
+  if (
+    attempt?.accountId !== expectedAccountId
+    || typeof attempt?.email !== "string"
+    || attempt.email.toLowerCase() !== expectedEmail.toLowerCase()
+    || !/^[0-9a-f-]{36}$/i.test(attempt?.idempotencyKey || "")
+    || !["pending", "completed"].includes(attempt?.status)
+    || (attempt.status === "completed" && (
+      !["reset", "alreadyRedeemed"].includes(attempt.outcome)
+      || !Number.isFinite(attempt.completedAt)
+    ))
+  ) {
+    throw new Error("The saved reset attempt does not match this account.");
+  }
+  return attempt;
+}
+
+export function chatGPTSubscriptionAccountResetAttemptPending(accountValue, {
+  filePath = CHATGPT_ACCOUNT_POOL_PATH,
+  homesDir = CHATGPT_ACCOUNT_HOMES_DIR,
+  state,
+} = {}) {
+  try {
+    const id = accountId(accountValue);
+    const pool = state || readChatGPTAccountPoolState(filePath);
+    const account = pool.accounts?.[id];
+    if (!account || account.state !== "active" || account.paused || !account.identity?.accountId || !account.identity?.email) return false;
+    const home = chatGPTSubscriptionAccountHome(id, { homesDir });
+    ensureNoSymlinkParents(home, { label: "ChatGPT account reset home" });
+    return readResetAttempt(resetAttemptPath(id, homesDir), account.identity.accountId, account.identity.email)?.status === "pending";
+  } catch {
+    // A damaged or unreadable private attempt cannot authorize a retry hint.
+    return false;
+  }
+}
+
+const RESET_COMPLETION_REPLAY_MS = 10 * 60_000;
+
+// A timeout after the consume request leaves its outcome uncertain. The private
+// attempt record survives a router restart, so a retry uses the same key. A
+// recently completed result is replayed as well: two rapid clicks cannot spend
+// a second credit while the upstream quota read is still stale.
+export async function redeemChatGPTSubscriptionAccountResetCredit(accountValue, {
+  filePath = CHATGPT_ACCOUNT_POOL_PATH,
+  homesDir = CHATGPT_ACCOUNT_HOMES_DIR,
+  consume,
+  refreshUsage,
+  timeoutMs = 20_000,
+} = {}) {
+  const id = accountId(accountValue);
+  const consumeCredit = consume || (await import("./codex-account-usage.mjs")).consumeCodexRateLimitResetCredit;
+  const probeUsage = refreshUsage || (await import("./chatgpt-usage-probe.mjs")).probeChatGPTAccountUsage;
+  const result = await withChatGPTAccountPoolLock(async () => {
+    const state = readChatGPTAccountPoolState(filePath);
+    const account = state.accounts[id];
+    if (!account || account.state !== "active" || account.paused) {
+      throw new Error("Select an active ChatGPT account with an available reset credit.");
+    }
+    if (!account.identity?.accountId || !account.identity?.email) {
+      throw new Error("This account's registered identity is incomplete; no credit was spent.");
+    }
+    const status = chatGPTSubscriptionAccountStatus(id, { homesDir });
+    if (!status.usable || !status.hasAccountId || status.email?.toLowerCase() !== account.identity.email.toLowerCase()) {
+      throw new Error("This account needs a valid matching login before redeeming a reset credit.");
+    }
+    const home = chatGPTSubscriptionAccountHome(id, { homesDir });
+    ensureNoSymlinkParents(home, { label: "ChatGPT account reset home" });
+    const attemptPath = resetAttemptPath(id, homesDir);
+    const previous = readResetAttempt(attemptPath, account.identity.accountId, account.identity.email);
+    if (
+      previous?.status === "completed"
+      && Date.now() - previous.completedAt < RESET_COMPLETION_REPLAY_MS
+    ) {
+      return {
+        accountId: id, label: account.label,
+        outcome: previous.outcome, redeemed: true, replayed: true,
+      };
+    }
+    const pending = previous?.status === "pending" ? previous : null;
+    const idempotencyKey = pending?.idempotencyKey || randomUUID();
+    if (!pending) writePrivateJson(attemptPath, {
+      accountId: account.identity.accountId, email: account.identity.email,
+      idempotencyKey, status: "pending",
+    }, { directoryMode: 0o700 });
+    let response;
+    try {
+      response = await consumeCredit({
+        codexHome: home,
+        expectedAccountId: account.identity.accountId,
+        expectedEmail: account.identity.email,
+        idempotencyKey,
+        timeoutMs,
+      });
+    } catch (error) {
+      if (error?.resetRequestSent === true) {
+        return { accountId: id, label: account.label, outcome: "uncertain", redeemed: false };
+      }
+      if (pending && ["RESET_NO_CREDIT", "RESET_QUOTA_NOT_READY"].includes(error?.code)) {
+        // The earlier attempt may have succeeded and lowered quota/credits.
+        // Do not issue another consume until its outcome can be established.
+        return { accountId: id, label: account.label, outcome: "uncertain", redeemed: false };
+      }
+      if (!pending) unlinkSync(attemptPath);
+      throw error;
+    }
+    if (!["reset", "alreadyRedeemed", "nothingToReset", "noCredit"].includes(response?.outcome)) {
+      throw new Error("Reset redemption status is uncertain; retry with the saved attempt key.");
+    }
+    if (response.outcome === "reset" || response.outcome === "alreadyRedeemed") {
+      writePrivateJson(attemptPath, {
+        accountId: account.identity.accountId,
+        email: account.identity.email,
+        idempotencyKey,
+        status: "completed",
+        outcome: response.outcome,
+        completedAt: Date.now(),
+      }, { directoryMode: 0o700 });
+    } else {
+      unlinkSync(attemptPath);
+    }
+    return {
+      accountId: id,
+      label: account.label,
+      outcome: response.outcome,
+      redeemed: response.outcome === "reset" || response.outcome === "alreadyRedeemed",
+    };
+  }, { filePath });
+  if (result.redeemed) {
+    try {
+      const refreshed = await probeUsage({ poolPath: filePath, homesDir, freshAfterInFlight: true });
+      const usage = refreshed?.accounts?.find((entry) => entry.id === id);
+      if (usage) return { ...result, usage, resetCredits: usage.resetCredits ?? null };
+    } catch {
+      // The credit's definitive result is still reported if a follow-up read
+      // is unavailable; the next ordinary poll can refresh the snapshot.
+    }
+  }
+  return result;
+}
 export function removeChatGPTSubscriptionAccount(accountValue, {
   filePath = CHATGPT_ACCOUNT_POOL_PATH,
   homesDir = CHATGPT_ACCOUNT_HOMES_DIR,

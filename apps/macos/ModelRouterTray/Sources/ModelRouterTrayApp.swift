@@ -984,6 +984,11 @@ final class RouterStore: ObservableObject {
   // and it is dropped as soon as a snapshot agrees with it.
   @Published private(set) var chatGptPreferredOverride: String?
   @Published private(set) var chatGptAccountOperation: String?
+  @Published private(set) var chatGptResetCreditPrompt: ChatGptResetCreditPrompt?
+  @Published private(set) var chatGptResetCreditFeedback: ChatGptResetCreditFeedback?
+  @Published private(set) var chatGptResetCreditCountHolds: [String: ChatGptResetCreditCountHold] = [:]
+  @Published private(set) var chatGptResetCreditPendingRetry: [String: ChatGptResetCreditFeedback] = [:]
+  @Published private(set) var chatGptResetAttemptResolved: Set<String> = []
   // The CLI projection drops each window's duration, and its two slots are
   // positional rather than fixed windows. Read alongside the snapshot so the
   // table's columns name the window they are actually showing.
@@ -2222,6 +2227,12 @@ final class RouterStore: ObservableObject {
       let output = try await runControl(arguments: ["chatgpt-account-pool", "usage", "cached"])
       let next = try JSONDecoder().decode(ChatGptAccountPoolUsage.self, from: output)
       if chatGptAccountUsage != next { chatGptAccountUsage = next }
+      chatGptResetCreditCountHolds = chatGptResetCreditCountHolds.filter { accountId, hold in
+        !hold.canRelease(accountId: accountId, in: next)
+      }
+      chatGptResetAttemptResolved = Set(chatGptResetAttemptResolved.filter { accountId in
+        next.accounts.first(where: { $0.id == accountId })?.resetAttemptPending == true
+      })
       // Read the durations from the same document the CLI just projected. The
       // probe rewrites that file on its own schedule, so a read that straddles a
       // rewrite would pair one probe's window lengths with another's percentages.
@@ -2260,6 +2271,187 @@ final class RouterStore: ObservableObject {
       chatGptAccountUsageError = error.localizedDescription
     }
     await refreshChatGptAccountUsage()
+  }
+
+  /// A banked reset is a one-way credit spend. A row click only opens the
+  /// confirmation; the CLI mutation is reachable solely through its confirm
+  /// button, and the backend rechecks the account and credit under its lock.
+  func requestChatGptResetCredit(_ accountId: String) {
+    guard chatGptAccountOperation == nil,
+      let account = chatGptAccountUsage?.accounts.first(where: { $0.id == accountId }),
+      account.canRedeemBankedReset
+    else { return }
+    chatGptResetCreditFeedback = nil
+    chatGptResetCreditPrompt = ChatGptResetCreditPrompt(
+      accountId: account.id,
+      accountLabel: account.displayLabel,
+      availableCount: account.bankedResetCount
+    )
+  }
+
+  func cancelChatGptResetCredit() {
+    guard chatGptAccountOperation == nil else { return }
+    chatGptResetCreditPrompt = nil
+  }
+
+  func dismissChatGptResetCreditFeedback() {
+    chatGptResetCreditFeedback = nil
+  }
+
+  func showPendingChatGptResetCredit(_ accountId: String) {
+    guard canRetryPendingChatGptResetCredit(accountId) else { return }
+    let feedback: ChatGptResetCreditFeedback
+    if let pending = chatGptResetCreditPendingRetry[accountId] {
+      feedback = pending
+    } else {
+      guard let row = chatGptAccountUsage?.accounts.first(where: { $0.id == accountId }) else {
+        return
+      }
+      feedback = Self.pendingResetCreditFeedback(accountId: accountId, label: row.displayLabel)
+      chatGptResetCreditPendingRetry[accountId] = feedback
+    }
+    chatGptResetCreditFeedback = feedback
+  }
+
+  func canRetryPendingChatGptResetCredit(_ accountId: String) -> Bool {
+    guard !chatGptResetAttemptResolved.contains(accountId) else { return false }
+    return chatGptResetCreditPendingRetry[accountId]?.canRetry == true
+      || chatGptAccountUsage?.accounts.first(where: { $0.id == accountId })?.resetAttemptPending == true
+  }
+
+  func isResetCreditCountUnverified(_ accountId: String) -> Bool {
+    chatGptResetCreditCountHolds[accountId] != nil
+  }
+
+  func visibleBankedResetCount(for account: ChatGptAccountPoolRow) -> Int {
+    isResetCreditCountUnverified(account.id) ? 0 : account.bankedResetCount
+  }
+
+  func retryUncertainChatGptResetCredit() async {
+    guard let feedback = chatGptResetCreditFeedback,
+      feedback.status == .uncertain,
+      feedback.canRetry,
+      let accountId = feedback.accountId,
+      let accountLabel = feedback.accountLabel,
+      chatGptAccountOperation == nil
+    else { return }
+    await runChatGptResetCredit(accountId: accountId, accountLabel: accountLabel)
+  }
+
+  func confirmChatGptResetCredit() async {
+    guard let prompt = chatGptResetCreditPrompt, chatGptAccountOperation == nil else { return }
+    guard prompt.isCurrent(in: chatGptAccountUsage) else {
+      chatGptResetCreditFeedback = ChatGptResetCreditFeedback(
+        text: routerFormat("%@ changed since this confirmation opened. No reset was requested.",
+                           prompt.accountLabel),
+        status: .notRedeemed
+      )
+      chatGptResetCreditPrompt = nil
+      return
+    }
+    await runChatGptResetCredit(accountId: prompt.accountId, accountLabel: prompt.accountLabel)
+  }
+
+  private func runChatGptResetCredit(accountId: String, accountLabel: String) async {
+    guard chatGptAccountOperation == nil else { return }
+    chatGptAccountOperation = accountId
+    let oldFetchedAt = chatGptAccountUsage?.fetchedAt
+    let feedback: ChatGptResetCreditFeedback
+    do {
+      let output = try await runControl(arguments: [
+        "chatgpt-account-pool", "reset-credit", accountId,
+      ])
+      let result = try JSONDecoder().decode(ChatGptResetCreditResult.self, from: output)
+      feedback = Self.resetCreditFeedback(result, accountId: accountId, label: accountLabel)
+    } catch {
+      // A failure outside the backend's structured result could happen after
+      // the request left this process. Never claim that no credit was used, and
+      // do not offer a retry unless the backend confirmed a saved attempt key.
+      feedback = Self.resetCreditErrorFeedback(error.localizedDescription, label: accountLabel)
+    }
+    if feedback.status != .notRedeemed {
+      chatGptResetCreditCountHolds[accountId] = ChatGptResetCreditCountHold(priorFetchedAt: oldFetchedAt)
+    }
+    if feedback.status == .uncertain && feedback.canRetry {
+      chatGptResetAttemptResolved.remove(accountId)
+      chatGptResetCreditPendingRetry[accountId] = feedback
+    } else {
+      chatGptResetCreditPendingRetry.removeValue(forKey: accountId)
+      if feedback.status != .uncertain { chatGptResetAttemptResolved.insert(accountId) }
+    }
+    // A definitive backend redemption triggers a fresh probe. If that probe
+    // failed, keep the old count hidden until a later verified cache arrives.
+    await refreshNativeUsage()
+    chatGptResetCreditFeedback = feedback
+    chatGptResetCreditPrompt = nil
+    chatGptAccountOperation = nil
+  }
+
+  nonisolated static func resetCreditFeedback(
+    _ result: ChatGptResetCreditResult,
+    accountId: String,
+    label: String
+  ) -> ChatGptResetCreditFeedback {
+    guard result.accountId == accountId else {
+      return ChatGptResetCreditFeedback(
+        text: routerFormat("The reset status for %@ could not be verified.", label),
+        status: .uncertain
+      )
+    }
+    switch result.outcome {
+    case "reset" where result.redeemed == true:
+      return ChatGptResetCreditFeedback(
+        text: routerFormat("Used one banked reset credit on %@.", label), status: .redeemed)
+    case "alreadyRedeemed" where result.redeemed == true:
+      return ChatGptResetCreditFeedback(
+        text: routerFormat(
+          "A banked reset credit was already used on %@; no additional credit was spent.", label),
+        status: .redeemed)
+    case "uncertain" where result.redeemed == false:
+      return pendingResetCreditFeedback(accountId: accountId, label: label)
+    case let outcome where (outcome == "noCredit" || outcome == "nothingToReset")
+      && result.redeemed == false:
+      return ChatGptResetCreditFeedback(
+        text: resetCreditFailureMessage(result.outcome, label: label), status: .notRedeemed)
+    default:
+      return ChatGptResetCreditFeedback(
+        text: routerFormat("The reset status for %@ could not be verified.", label),
+        status: .uncertain)
+    }
+  }
+
+  nonisolated static func pendingResetCreditFeedback(
+    accountId: String,
+    label: String
+  ) -> ChatGptResetCreditFeedback {
+    ChatGptResetCreditFeedback(
+      text: routerFormat(
+        "The reset for %@ may have used a credit. Retry checks the saved attempt; if limits recovered, inspect account usage.",
+        label),
+      status: .uncertain,
+      accountId: accountId,
+      accountLabel: label,
+      canRetry: true
+    )
+  }
+
+  nonisolated static func resetCreditErrorFeedback(
+    _ detail: String,
+    label: String
+  ) -> ChatGptResetCreditFeedback {
+    ChatGptResetCreditFeedback(
+      text: routerFormat("The reset status for %@ could not be verified: %@", label, detail),
+      status: .uncertain
+    )
+  }
+
+  nonisolated static func resetCreditFailureMessage(_ outcome: String?, label: String) -> String {
+    switch outcome {
+    case "noCredit": return routerFormat("%@ has no banked reset credit available.", label)
+    case "nothingToReset": return routerFormat("%@ is not near its rate limit, so no credit was used.", label)
+    case "alreadyRedeemed": return routerFormat("A banked reset was already used on %@.", label)
+    default: return routerFormat("The banked reset for %@ could not be used.", label)
+    }
   }
 
   func refreshProviderUsage() async {
@@ -4810,10 +5002,14 @@ struct ChatGptAccountPoolRow: Decodable, Equatable, Identifiable {
   let secondaryRemainingPercent: Double?
   let resetsAt: TimeInterval?
   let error: String?
+  let resetCredits: ChatGptAccountResetCredits?
+  let authInvalid: Bool
+  let resetAttemptPending: Bool
 
   enum CodingKeys: String, CodingKey {
     case id, label, preferred, planType, health
     case primaryRemainingPercent, secondaryRemainingPercent, resetsAt, error
+    case resetCredits, authInvalid, resetAttemptPending
   }
 
   init(from decoder: Decoder) throws {
@@ -4829,6 +5025,9 @@ struct ChatGptAccountPoolRow: Decodable, Equatable, Identifiable {
       Double.self, forKey: .secondaryRemainingPercent)
     resetsAt = try container.decodeIfPresent(TimeInterval.self, forKey: .resetsAt)
     error = try container.decodeIfPresent(String.self, forKey: .error)
+    resetCredits = try container.decodeIfPresent(ChatGptAccountResetCredits.self, forKey: .resetCredits)
+    authInvalid = (try container.decodeIfPresent(Bool.self, forKey: .authInvalid)) ?? false
+    resetAttemptPending = (try container.decodeIfPresent(Bool.self, forKey: .resetAttemptPending)) ?? false
   }
 
   init(
@@ -4840,7 +5039,10 @@ struct ChatGptAccountPoolRow: Decodable, Equatable, Identifiable {
     primaryRemainingPercent: Double? = nil,
     secondaryRemainingPercent: Double? = nil,
     resetsAt: TimeInterval? = nil,
-    error: String? = nil
+    error: String? = nil,
+    resetCredits: ChatGptAccountResetCredits? = nil,
+    authInvalid: Bool = false,
+    resetAttemptPending: Bool = false
   ) {
     self.id = id
     self.label = label
@@ -4851,6 +5053,19 @@ struct ChatGptAccountPoolRow: Decodable, Equatable, Identifiable {
     self.secondaryRemainingPercent = secondaryRemainingPercent
     self.resetsAt = resetsAt
     self.error = error
+    self.resetCredits = resetCredits
+    self.authInvalid = authInvalid
+    self.resetAttemptPending = resetAttemptPending
+  }
+
+  var bankedResetCount: Int { max(0, resetCredits?.availableCount ?? 0) }
+  /// The upstream reset endpoint accepts a core limit only once it is at
+  /// least 90% spent. Unknown windows do not establish readiness.
+  var canRedeemBankedReset: Bool {
+    guard bankedResetCount > 0, !authInvalid else { return false }
+    return [primaryRemainingPercent, secondaryRemainingPercent]
+      .compactMap { $0 }
+      .contains { $0.isFinite && $0 >= 0 && $0 <= 10 }
   }
 
   /// A label is not guaranteed; a bare account id is still better than a blank
@@ -4859,6 +5074,54 @@ struct ChatGptAccountPoolRow: Decodable, Equatable, Identifiable {
     let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
     if !trimmed.isEmpty { return trimmed }
     return String(id.suffix(8))
+  }
+}
+
+struct ChatGptAccountResetCredits: Decodable, Equatable {
+  let availableCount: Int?
+}
+
+struct ChatGptResetCreditResult: Decodable {
+  let accountId: String?
+  let outcome: String?
+  let redeemed: Bool?
+}
+
+struct ChatGptResetCreditPrompt: Equatable {
+  let accountId: String
+  let accountLabel: String
+  let availableCount: Int
+
+  func isCurrent(in snapshot: ChatGptAccountPoolUsage?) -> Bool {
+    guard let account = snapshot?.accounts.first(where: { $0.id == accountId }) else { return false }
+    return account.displayLabel == accountLabel && account.canRedeemBankedReset
+  }
+}
+
+enum ChatGptResetCreditStatus: Equatable {
+  case redeemed
+  case notRedeemed
+  case uncertain
+}
+
+struct ChatGptResetCreditFeedback: Equatable {
+  let text: String
+  let status: ChatGptResetCreditStatus
+  var accountId: String? = nil
+  var accountLabel: String? = nil
+  var canRetry = false
+}
+
+struct ChatGptResetCreditCountHold: Equatable {
+  let priorFetchedAt: String?
+
+  func canRelease(accountId: String, in snapshot: ChatGptAccountPoolUsage) -> Bool {
+    guard snapshot.fetchedAt != nil, snapshot.fetchedAt != priorFetchedAt,
+      let row = snapshot.accounts.first(where: { $0.id == accountId }),
+      row.error == nil,
+      row.resetCredits?.availableCount != nil
+    else { return false }
+    return true
   }
 }
 

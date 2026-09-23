@@ -142,3 +142,49 @@ test("one production account status poll owns pending profile reconciliation", (
   assert.match(accountPool, /attentionRequired[\s\S]*?retryable: false[\s\S]*?previous sign-in may still be running/i);
   assert.doesNotMatch(accountPool, /\.map\(\(account\) => refreshChatGPTSubscriptionAccount/);
 });
+
+test("cached usage shows only a boolean retry hint for a matching private reset attempt", () => {
+  const isolated = mkdtempSync(path.join(os.tmpdir(), "codex-reset-control-"));
+  try {
+    const id = "acct_resetstatus1";
+    const home = path.join(isolated, "chatgpt-accounts", id);
+    mkdirSync(home, { recursive: true, mode: 0o700 });
+    const poolPath = path.join(isolated, "chatgpt-account-pool.json");
+    const pool = {
+      version: 1,
+      policy: { enabled: true, mode: "switch" },
+      accounts: {
+        [id]: {
+          id, state: "active", paused: false, priority: 50,
+          identity: { accountId: "backend-account", email: "owner@example.com" },
+          health: { state: "healthy" }, turns: 0, requests: 0,
+        },
+      },
+      sessions: {},
+    };
+    writeFileSync(poolPath, JSON.stringify(pool), { mode: 0o600 });
+    writeFileSync(path.join(isolated, "chatgpt-account-usage.json"), JSON.stringify({
+      fetchedAt: new Date().toISOString(),
+      accounts: [{ id, label: "Owner", planType: "plus", resetCredits: { availableCount: 1 } }],
+    }), { mode: 0o600 });
+    const key = "00000000-0000-4000-8000-000000000001";
+    const attemptPath = path.join(home, "reset-credit-attempt.json");
+    writeFileSync(attemptPath, JSON.stringify({
+      accountId: "backend-account", email: "owner@example.com", idempotencyKey: key, status: "pending",
+    }), { mode: 0o600 });
+    const runCached = () => {
+      const output = execFileSync(process.execPath, [path.join(root, "src/control.mjs"), "chatgpt-account-pool", "usage", "cached"], {
+        env: { ...process.env, CODEX_HOME: isolated, MODEL_ROUTER_STATE_DIR: isolated }, encoding: "utf8",
+      });
+      assert.equal(output.includes(key), false);
+      assert.equal(output.includes(attemptPath), false);
+      return JSON.parse(output);
+    };
+    assert.equal(runCached().accounts[0].resetAttemptPending, true);
+    pool.accounts[id].identity.email = "another@example.com";
+    writeFileSync(poolPath, JSON.stringify(pool), { mode: 0o600 });
+    assert.equal(runCached().accounts[0].resetAttemptPending, false);
+  } finally {
+    rmSync(isolated, { recursive: true, force: true });
+  }
+});
