@@ -8,9 +8,11 @@ Codex Router autonomously manages a multi-account pool of ChatGPT/Codex subscrip
 
 ### Per-Turn Credential Injection
 Unlike legacy or switch-only modes that copy credentials into `~/.codex/auth.json`, autonomous rotation operates on the HTTP wire:
-- Each account in `chatgpt-account-pool.json` maintains its own isolated directory under `~/.codex/codex-router/chatgpt-accounts/<account-id>/auth.json`.
+- Each account in `chatgpt-account-pool.json` has an isolated saved login under `~/.codex/codex-router/chatgpt-accounts/<account-id>/auth.json`. For the account currently signed into Codex desktop, rotation reads the live `~/.codex/auth.json` after checking its account identity. Other accounts use their isolated homes.
 - For each native OpenAI request (e.g. `gpt-6-sol`, `gpt-6-luna`), `rotatedNativeHeaders()` selects an eligible candidate from the pool and replaces the `Authorization: Bearer <token>` and `chatgpt-account-id` headers.
 - The active desktop/CLI profile on disk is never overwritten.
+
+Background usage probes avoid starting another Codex auth manager when an access token is within ten minutes of expiry. The desktop owns refresh for its live login; the pool does not refresh the selected account's saved copy. A background quota reading may briefly be unavailable while that login refreshes.
 
 ---
 
@@ -41,7 +43,7 @@ The selector does not use round robin. Continuing conversations keep their assig
 If an upstream request encounters a `429` (rate limit / quota exhausted) or `401` (invalid/revoked token):
 1. **Account Cooled/Invalidated**: The failing account is immediately put into cooldown (or marked `auth_invalid`), and conversation affinity is forgotten.
 2. **In-Flight Retry Loop**: If response headers/chunks have not yet streamed to the client (`nothingRelayed(response)`), the router automatically retrieves the next candidate from the pool.
-3. **Seamless Relay**: The turn is re-dispatched upstream using the identical materialized body and the next candidate's credentials. The client experiences zero errors or interrupted turns.
+3. **Relay Before Streaming**: The turn is re-dispatched upstream using the identical materialized body and the next candidate's credentials when no response bytes have reached the client. A desktop sign-out or account switch can still interrupt Codex's own authenticated session; HTTP failover cannot repair that local login state.
 4. **Emergency Depletion Probe**: If all candidate accounts fail or become exhausted, an immediate probe is triggered in the background to detect any newly replenished quota.
 
 ---
@@ -86,7 +88,7 @@ Inspect pool and rotation state at any time:
 
 The Island shows each account's server-reported banked reset count. A reset becomes clickable when a five-hour or weekly limit is at least 90% used. Clicking opens an account-specific confirmation; only confirming spends one credit. This is separate from the scheduled quota reset countdown and never happens automatically during rotation.
 
-The equivalent explicit command is `./bin/control chatgpt-account-pool reset-credit <acct_id>`. It verifies the account's isolated login and account identity before using Codex's account reset method. An uncertain response retains the same private idempotency key for a retry. A confirmed result is replayed for ten minutes to protect against rapid duplicate clicks while quota readings catch up. The router refreshes account quota after a confirmed redemption.
+The equivalent explicit command is `./bin/control chatgpt-account-pool reset-credit <acct_id>`. It verifies the account's login and account identity before using Codex's account reset method. The selected account uses its live desktop login when the identity matches; inactive accounts use their isolated logins. An uncertain response retains the same private idempotency key for a retry. A confirmed result is replayed for ten minutes to protect against rapid duplicate clicks while quota readings catch up. The router refreshes account quota after a confirmed redemption.
 
 Example `usage cached` output:
 ```json
