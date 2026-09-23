@@ -62,6 +62,7 @@ test("the snapshot records each account's windows under the upstream names", asy
           planType: "pro",
           primary: { remainingPercent: 55, windowDurationMins: 300, resetsAt: 123 },
           secondary: { remainingPercent: 12, windowDurationMins: 10080, resetsAt: 456 },
+          resetCredits: { availableCount: 2 },
         };
       },
     });
@@ -73,6 +74,7 @@ test("the snapshot records each account's windows under the upstream names", asy
     assert.equal(first.primary.remainingPercent, 55);
     assert.equal(first.secondary.remainingPercent, 12);
     assert.equal(first.planType, "pro");
+    assert.deepEqual(first.resetCredits, { availableCount: 2 });
     assert.equal(first.preferred, true);
 
     const written = JSON.parse(readFileSync(b.cache, "utf8"));
@@ -199,7 +201,56 @@ test("transient network probe error preserves previous known reset and quota win
     // Previous quota and reset window are preserved rather than destroyed
     assert.equal(acct.primary?.remainingPercent, 40);
     assert.equal(acct.primary?.resetsAt, 1800000000000);
+    assert.equal(acct.planType, "pro");
+    assert.equal(acct.resetCredits, null);
     assert.match(acct.error, /ETIMEDOUT/);
+  } finally { b.cleanup(); }
+});
+
+test("a partial rate-limit reply keeps the last verified plan tier", async () => {
+  const b = box();
+  try {
+    writePool(b.pool, ["acct_partialplan"]);
+    await probeChatGPTAccountUsage({
+      poolPath: b.pool, homesDir: b.homes, cachePath: b.cache,
+      readUsage: async () => ({ planType: "plus", primary: { remainingPercent: 20 } }),
+    });
+    const partial = await probeChatGPTAccountUsage({
+      poolPath: b.pool, homesDir: b.homes, cachePath: b.cache,
+      readUsage: async () => ({ planType: null, primary: null, rateLimitError: "limits temporarily unavailable" }),
+    });
+    assert.equal(partial.accounts[0].planType, "plus");
+  } finally { b.cleanup(); }
+});
+
+test("post-reset refresh waits for an older poll then starts a new quota read", async () => {
+  const b = box();
+  try {
+    writePool(b.pool, ["acct_freshafter"]);
+    let release;
+    let reads = 0;
+    const slow = probeChatGPTAccountUsage({
+      poolPath: b.pool, homesDir: b.homes, cachePath: b.cache,
+      readUsage: async () => {
+        reads += 1;
+        await new Promise((resolve) => { release = resolve; });
+        return { planType: "plus", resetCredits: { availableCount: 1 } };
+      },
+    });
+    while (!release) await new Promise((resolve) => setImmediate(resolve));
+    const fresh = probeChatGPTAccountUsage({
+      poolPath: b.pool, homesDir: b.homes, cachePath: b.cache,
+      freshAfterInFlight: true,
+      readUsage: async () => {
+        reads += 1;
+        return { planType: "plus", resetCredits: { availableCount: 0 } };
+      },
+    });
+    release();
+    await slow;
+    const result = await fresh;
+    assert.equal(reads, 2);
+    assert.deepEqual(result.accounts[0].resetCredits, { availableCount: 0 });
   } finally { b.cleanup(); }
 });
 

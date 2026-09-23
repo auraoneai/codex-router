@@ -46,6 +46,9 @@ struct ControlContractTests {
         == .mutation
     )
     #expect(RouterControlContractPolicy.access(for: ["future-command"]) == .mutation)
+    #expect(RouterControlContractPolicy.access(for: [
+      "chatgpt-account-pool", "reset-credit", "acct_testaccount"
+    ]) == .mutation)
     #expect(RouterControlContractPolicy.drainsBeforeTermination(["doctor", "--fix"]))
     #expect(RouterControlContractPolicy.drainsBeforeTermination(["providers", "enable", "deepseek"]))
     #expect(!RouterControlContractPolicy.drainsBeforeTermination(["maintenance"]))

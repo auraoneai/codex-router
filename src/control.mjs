@@ -3699,8 +3699,10 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
   const {
     chatGPTSubscriptionAccountHome,
     chatGPTSubscriptionAccountPoolSnapshot,
+    chatGPTSubscriptionAccountResetAttemptPending,
     createChatGPTSubscriptionAccount,
     readChatGPTAccountPoolState,
+    redeemChatGPTSubscriptionAccountResetCredit,
     refreshBoundedChatGPTSubscriptionAccounts,
     withChatGPTAccountPoolLock,
   } = await import("./chatgpt-account-pool.mjs");
@@ -3813,6 +3815,14 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
     process.stdout.write(`${JSON.stringify({ ...pool, profile })}\n`);
     return;
   }
+  if (action === "reset-credit") {
+    if (!value || !/^acct_[A-Za-z0-9_-]{8,80}$/.test(value)) {
+      throw new Error("Select a registered ChatGPT account id to redeem its banked reset.");
+    }
+    const result = await redeemChatGPTSubscriptionAccountResetCredit(value);
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return;
+  }
   if (action === "usage") {
     // Refreshes the per-account quota snapshot rotation ranks on, and reports
     // the resulting order. This is the only place that probe is driven: the
@@ -3836,6 +3846,8 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
     const usageById = new Map((snapshot?.accounts || []).map((entry) => [entry.id, entry]));
     const order = rotationCandidates({ usageById }).map((entry) => entry.id);
     const now = Date.now();
+    let poolState;
+    try { poolState = readChatGPTAccountPoolState(); } catch { poolState = { accounts: {} }; }
     process.stdout.write(`${JSON.stringify({
       fetchedAt: snapshot?.fetchedAt,
       rotation: order,
@@ -3849,6 +3861,8 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
         cooldownUntil: accountCooldownUntil(entry.id) || null,
         primaryRemainingPercent: entry.primary?.remainingPercent ?? null,
         secondaryRemainingPercent: entry.secondary?.remainingPercent ?? null,
+        resetCredits: entry.resetCredits ?? null,
+        resetAttemptPending: chatGPTSubscriptionAccountResetAttemptPending(entry.id, { state: poolState }),
         resetsAt: entry.secondary?.resetsAt ?? entry.primary?.resetsAt ?? null,
         ...(entry.authInvalid ? { authInvalid: true, authErrorCode: entry.authErrorCode || "token_revoked" } : {}),
         ...(entry.error ? { error: entry.error } : {}),
@@ -3866,7 +3880,7 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
       return;
     }
   }
-  throw new Error("Usage: control chatgpt-account-pool status|add [label]|home <acct_id>|login-finalize <acct_id> <lease>|remove <acct_id>|select <acct_id>|usage [cached]|profile status|profile reconcile");
+  throw new Error("Usage: control chatgpt-account-pool status|add [label]|home <acct_id>|login-finalize <acct_id> <lease>|remove <acct_id>|select <acct_id>|reset-credit <acct_id>|usage [cached]|profile status|profile reconcile");
 }
 
 // The public `/health` leaf intentionally contains only the router summary and

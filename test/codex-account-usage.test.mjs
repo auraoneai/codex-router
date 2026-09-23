@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   ACCOUNT_POOL_USAGE_PROBE_LIMIT,
   attachBoundedChatGPTAccountUsage,
+  consumeCodexRateLimitResetCredit,
   normalizeCodexAccountUsage,
   readCodexAccountUsage,
 } from "../src/codex-account-usage.mjs";
@@ -160,6 +161,7 @@ test("normalizes Codex limits and daily usage without account credentials", () =
       windowDurationMins: 300,
       resetsAt: 1_700_000_000,
     },
+    resetCredits: null,
     dailyUsageBuckets: [
       { startDate: "2026-07-19", tokens: 100 },
       { startDate: "2026-07-20", tokens: 200 },
@@ -167,6 +169,154 @@ test("normalizes Codex limits and daily usage without account credentials", () =
     summary: { lifetimeTokens: 12_345, peakDailyTokens: 3_210, currentStreakDays: 4 },
   });
   assert.equal(JSON.stringify(value).includes("secret-adjacent"), false);
+});
+
+test("banked reset count is normalized without exposing backend credit details", () => {
+  const usage = normalizeCodexAccountUsage({
+    rateLimits: {},
+    rateLimitResetCredits: {
+      availableCount: 2,
+      credits: [{ id: "credit-secret", title: "personal title", status: "available" }],
+    },
+  });
+  assert.deepEqual(usage.resetCredits, { availableCount: 2 });
+  assert.equal(JSON.stringify(usage).includes("credit-secret"), false);
+});
+
+function resetServer({ email = "owner@example.com", accountId = "backend-account", usedPercent = 95, availableCount = 1, onConsume } = {}) {
+  return fakeAppServer((message) => {
+    if (message.id === 1) return { id: 1, result: {} };
+    if (message.id === 2) return { id: 2, result: { account: { type: "chatgpt", email, planType: "plus" } } };
+    if (message.id === 3) return { id: 3, result: {
+      accountId,
+      rateLimits: { primary: { usedPercent } },
+      rateLimitResetCredits: { availableCount, credits: null },
+    } };
+    if (message.id === 4) {
+      onConsume?.(message);
+      return { id: 4, result: { outcome: "reset" } };
+    }
+    return undefined;
+  }, { deferred: true });
+}
+
+const resetOptions = {
+  binary: "/fake/codex",
+  codexHome: "/isolated/account",
+  expectedAccountId: "backend-account",
+  expectedEmail: "owner@example.com",
+  idempotencyKey: "00000000-0000-4000-8000-000000000001",
+};
+
+test("redemption verifies both account identity signals and sends one idempotent consume", async () => {
+  let consumed;
+  const result = await consumeCodexRateLimitResetCredit({
+    ...resetOptions,
+    spawnImpl: () => resetServer({ onConsume: (message) => { consumed = message; } }),
+  });
+  assert.deepEqual(result, { outcome: "reset" });
+  assert.equal(consumed.method, "account/rateLimitResetCredit/consume");
+  assert.equal(consumed.params.idempotencyKey, resetOptions.idempotencyKey);
+});
+
+test("redemption refuses a mismatched email or usage account id before spending", async () => {
+  let consumed = 0;
+  for (const server of [
+    { email: "another@example.com" },
+    { accountId: "another-backend-account" },
+  ]) {
+    await assert.rejects(consumeCodexRateLimitResetCredit({
+      ...resetOptions,
+      spawnImpl: () => resetServer({ ...server, onConsume: () => { consumed += 1; } }),
+    }), /does not match/);
+  }
+  assert.equal(consumed, 0);
+});
+
+test("redemption requires a verified credit and at least 90% used even with a saved key", async () => {
+  let consumed = 0;
+  for (const server of [
+    { availableCount: 0 },
+    { usedPercent: 89 },
+  ]) {
+    await assert.rejects(consumeCodexRateLimitResetCredit({
+      ...resetOptions,
+      spawnImpl: () => resetServer({ ...server, onConsume: () => { consumed += 1; } }),
+    }), /no verified|at least 90%/);
+  }
+  assert.equal(consumed, 0);
+  await assert.rejects(consumeCodexRateLimitResetCredit({
+    ...resetOptions,
+    spawnImpl: () => resetServer({ availableCount: 0, usedPercent: 0, onConsume: () => { consumed += 1; } }),
+  }), /no verified/);
+  assert.equal(consumed, 0);
+});
+
+test("a synchronous app-server spawn failure is marked as safe to discard", async () => {
+  await assert.rejects(consumeCodexRateLimitResetCredit({
+    ...resetOptions,
+    spawnImpl: () => { throw new Error("spawn broke"); },
+  }), (error) => error.resetRequestSent === false && /could not be started/.test(error.message));
+});
+
+test("a failed consume does not forward raw backend error text", async () => {
+  await assert.rejects(consumeCodexRateLimitResetCredit({
+    ...resetOptions,
+    spawnImpl: () => fakeAppServer((message) => {
+      if (message.id === 1) return { id: 1, result: {} };
+      if (message.id === 2) return { id: 2, result: { account: { type: "chatgpt", email: "owner@example.com" } } };
+      if (message.id === 3) return { id: 3, result: {
+        accountId: "backend-account",
+        rateLimits: { primary: { usedPercent: 95 } },
+        rateLimitResetCredits: { availableCount: 1 },
+      } };
+      if (message.id === 4) return { id: 4, error: { message: "secret backend detail" } };
+      return undefined;
+    }, { deferred: true }),
+  }), (error) => error.resetRequestSent === true && !error.message.includes("secret backend detail"));
+});
+
+test("an asynchronous stdin EPIPE after consume is uncertain and cannot crash control", async () => {
+  let child;
+  await assert.rejects(consumeCodexRateLimitResetCredit({
+    ...resetOptions,
+    spawnImpl: () => {
+      child = fakeAppServer((message) => {
+        if (message.id === 1) return { id: 1, result: {} };
+        if (message.id === 2) return { id: 2, result: { account: { type: "chatgpt", email: "owner@example.com" } } };
+        if (message.id === 3) return { id: 3, result: {
+          accountId: "backend-account",
+          rateLimits: { primary: { usedPercent: 95 } },
+          rateLimitResetCredits: { availableCount: 1 },
+        } };
+        if (message.id === 4) {
+          setImmediate(() => child.stdin.emit("error", Object.assign(new Error("broken pipe"), { code: "EPIPE" })));
+        }
+        return undefined;
+      }, { deferred: true });
+      return child;
+    },
+  }), (error) => error.resetRequestSent === true && /uncertain/.test(error.message));
+});
+
+test("a synchronous stdin EPIPE inside consume write is still classified uncertain", async () => {
+  let child;
+  await assert.rejects(consumeCodexRateLimitResetCredit({
+    ...resetOptions,
+    spawnImpl: () => {
+      child = fakeAppServer((message) => {
+        if (message.id === 1) return { id: 1, result: {} };
+        if (message.id === 2) return { id: 2, result: { account: { type: "chatgpt", email: "owner@example.com" } } };
+        if (message.id === 3) return { id: 3, result: {
+          accountId: "backend-account", rateLimits: { primary: { usedPercent: 95 } },
+          rateLimitResetCredits: { availableCount: 1 },
+        } };
+        if (message.id === 4) child.stdin.emit("error", Object.assign(new Error("broken pipe"), { code: "EPIPE" }));
+        return undefined;
+      });
+      return child;
+    },
+  }), (error) => error.resetRequestSent === true && /uncertain/.test(error.message));
 });
 
 test("clamps malformed percentages and tolerates missing usage", () => {

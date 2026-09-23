@@ -165,6 +165,15 @@ export function orderAccountCandidates(candidates, {
     if (health === "drained") return 4;
     return 5;
   };
+  // Spend known Plus capacity before Pro capacity. An unknown plan sits
+  // between them: it may be Plus, but must not be asserted as one. Confirmed
+  // quota still outranks missing telemetry regardless of plan.
+  const planRank = (id) => {
+    const plan = String(usage.get(id)?.planType || "").trim().toLowerCase();
+    if (plan === "plus") return 0;
+    if (plan === "pro") return 2;
+    return 1;
+  };
   const purposeRank = (id) => pinIndex.get(purposes.get(id)) ?? 50;
   return [...candidates].sort((left, right) => {
     // An in-flight conversation outranks everything, provided the account
@@ -183,7 +192,18 @@ export function orderAccountCandidates(candidates, {
       if (home) return 6;
       return 7;
     };
-    const delta = rank(left) - rank(right);
+    const leftRank = rank(left);
+    const rightRank = rank(right);
+    // Conversation affinity wins while its account is usable. Among accounts
+    // with confirmed remaining quota, plan order wins over the selected home,
+    // healthy/soft distinction, and purpose pins. Soft Plus quota is real
+    // remaining capacity and should be spent before healthy Pro quota.
+    if (leftRank !== 0 && rightRank !== 0 &&
+        leftRank >= 1 && leftRank <= 3 && rightRank >= 1 && rightRank <= 3) {
+      const tierDelta = planRank(left.id) - planRank(right.id);
+      if (tierDelta !== 0) return tierDelta;
+    }
+    const delta = leftRank - rightRank;
     if (delta !== 0) return delta;
     const purposeDelta = purposeRank(left.id) - purposeRank(right.id);
     if (purposeDelta !== 0) return purposeDelta;

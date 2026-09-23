@@ -1,6 +1,6 @@
 # Autonomous ChatGPT Multi-Account Rotation, Failover & Self-Healing
 
-Codex Router autonomously manages a multi-account pool of ChatGPT/Codex subscriptions. It rotates turns across healthy accounts, transparently fails over on rate limits (429) or revoked credentials (401), monitors quota resets, and automatically re-admits recovered accounts without service restarts or manual profile switching.
+Codex Router autonomously manages a multi-account pool of ChatGPT/Codex subscriptions. It selects an eligible account for each native turn, transparently fails over on rate limits (429) or revoked credentials (401), monitors quota resets, and automatically re-admits recovered accounts without service restarts or manual profile switching.
 
 ---
 
@@ -9,7 +9,7 @@ Codex Router autonomously manages a multi-account pool of ChatGPT/Codex subscrip
 ### Per-Turn Credential Injection
 Unlike legacy or switch-only modes that copy credentials into `~/.codex/auth.json`, autonomous rotation operates on the HTTP wire:
 - Each account in `chatgpt-account-pool.json` maintains its own isolated directory under `~/.codex/codex-router/chatgpt-accounts/<account-id>/auth.json`.
-- For each native OpenAI request (e.g. `gpt-5.6-sol`, `gpt-5.6-luna`), `rotatedNativeHeaders()` selects an eligible candidate from the pool and replaces the `Authorization: Bearer <token>` and `chatgpt-account-id` headers.
+- For each native OpenAI request (e.g. `gpt-6-sol`, `gpt-6-luna`), `rotatedNativeHeaders()` selects an eligible candidate from the pool and replaces the `Authorization: Bearer <token>` and `chatgpt-account-id` headers.
 - The active desktop/CLI profile on disk is never overwritten.
 
 ---
@@ -18,18 +18,21 @@ Unlike legacy or switch-only modes that copy credentials into `~/.codex/auth.jso
 
 Every account in the pool exists in one of the following states:
 
-1. **`healthy`**: Account has confirmed quota (`remainingPercent > 15%`). Rank 1 in candidate ordering.
-2. **`soft` (soft drain)**: Confirmed quota is between `0.5%` and `15%`. Stays selectable (Rank 2) so the remainder of a paid window can be consumed before switching.
-3. **`unknown`**: No fresh telemetry available (e.g. initial launch before probe completes). Rank 3. Tried after verified healthy accounts, but kept eligible so the pool remains usable.
+1. **`healthy`**: Account has confirmed quota (`remainingPercent > 15%`). Remains eligible.
+2. **`soft` (soft drain)**: Confirmed quota is between `0.5%` and `15%`. Stays eligible so the remainder of a paid window can be consumed before switching.
+3. **`unknown`**: No quota telemetry available (e.g. initial launch before probe completes). Tried after accounts with confirmed quota, but kept eligible so the pool remains usable.
 4. **`cooling`**: Transient `429 Too Many Requests`. The account is put on a 5-minute backoff (`COOLDOWN_MS`). Its conversation affinity is cleared. It is temporarily passed over until cooldown expiry or until next healthy probe.
 5. **`drained` (quota exhausted)**: Confirmed quota `<= 0.5%` (or 100% used). Completely excluded from candidate rotation.
 6. **`auth_invalid`**: Received a `401 Unauthorized` or `token_revoked` response. Tracked by `tokenFingerprint` (SHA-256 of access token). Completely excluded from candidate rotation.
 
-### Candidate Tie-Breaking
-When multiple accounts are equally healthy, tie-breaking follows:
-1. **Conversation Affinity**: The same conversation continues on the same account while healthy and not cooling.
-2. **Purpose Pin Order**: Priority ordered by purpose tags (e.g., personal -> auraone -> veerone -> foundation).
-3. **Preferred Account**: Operator-selected preferred account.
+### Candidate Ordering
+1. **Conversation Affinity**: An in-flight conversation continues on its account while that account is neither drained, auth-invalid, nor cooling. A conversation already on Pro can therefore stay on Pro until its affinity expires or the account becomes unavailable.
+2. **Confirmed Quota**: Accounts with confirmed remaining quota precede those with no quota telemetry. Among confirmed accounts, the usage probe's plan type orders **Plus first, unknown or other plan second, Pro third**. A Plus account with a soft but positive window is chosen before a healthy Pro account, including when Pro is the selected desktop profile.
+3. **Within a plan**: The operator-selected preferred account wins when it has confirmed quota, followed by healthy then soft accounts, purpose pin order, and registration order. Accounts without quota telemetry follow after confirmed accounts, with the preferred account first.
+
+This spends Plus capacity before Pro for new turns while retaining health and conversation safeguards. Plan type comes from the usage probe; it is never guessed from an account label.
+
+The selector does not use round robin. Continuing conversations keep their assigned account while it is eligible. The historical soft-quota switch was removed because it could leave the last 1–15% of a subscription unused before its window reset.
 
 ---
 
@@ -48,7 +51,7 @@ If an upstream request encounters a `429` (rate limit / quota exhausted) or `401
 ### Early Quota Reset Discovery
 OpenAI reported reset timestamps are **hints**, not hard exclusion locks:
 - If an account reports a reset timestamp days in the future, but OpenAI replenishes capacity early, the router will not wait for the reset date.
-- Periodic background probes (every 10 minutes) and startup probes detect early replenishment.
+- Periodic background probes (every 2 minutes), startup probes, and probes after successful native turns detect early replenishment.
 - When `remainingPercent > 0.5%` is detected, `accountIsDrained()` returns false, and the account **immediately returns to the rotation pool** on the very next turn.
 
 ### Reset-Aware Scheduling (`nextKnownResetAt`)
@@ -78,6 +81,12 @@ Inspect pool and rotation state at any time:
 ./bin/control status
 ./bin/model-router codex doctor
 ```
+
+### Banked rate-limit resets
+
+The Island shows each account's server-reported banked reset count. A reset becomes clickable when a five-hour or weekly limit is at least 90% used. Clicking opens an account-specific confirmation; only confirming spends one credit. This is separate from the scheduled quota reset countdown and never happens automatically during rotation.
+
+The equivalent explicit command is `./bin/control chatgpt-account-pool reset-credit <acct_id>`. It verifies the account's isolated login and account identity before using Codex's account reset method. An uncertain response retains the same private idempotency key for a retry. A confirmed result is replayed for ten minutes to protect against rapid duplicate clicks while quota readings catch up. The router refreshes account quota after a confirmed redemption.
 
 Example `usage cached` output:
 ```json

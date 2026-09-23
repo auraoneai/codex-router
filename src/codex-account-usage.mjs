@@ -61,6 +61,16 @@ function optionalTokenCount(value) {
   return Number.isFinite(number) && number >= 0 ? Math.trunc(number) : undefined;
 }
 
+function normalizeResetCredits(response) {
+  const raw = response?.rateLimitResetCredits;
+  if (!raw || typeof raw !== "object") return null;
+  const count = raw.availableCount;
+  if (!Number.isSafeInteger(count) || count < 0) return null;
+  // Credit details can be truncated and contain backend display text. The
+  // snapshot only needs the redeemable count; the backend selects a credit.
+  return { availableCount: count };
+}
+
 export function normalizeCodexAccountUsage(rateLimitResponse, usageResponse, now = new Date()) {
   const buckets = Array.isArray(usageResponse?.dailyUsageBuckets)
     ? usageResponse.dailyUsageBuckets
@@ -101,6 +111,7 @@ export function normalizeCodexAccountUsage(rateLimitResponse, usageResponse, now
     limitId: typeof limits.limitId === "string" ? limits.limitId : null,
     primary: normalizeWindow(limits.primary),
     secondary: normalizeWindow(limits.secondary),
+    resetCredits: normalizeResetCredits(rateLimitResponse),
     dailyUsageBuckets: buckets,
     summary: {
       lifetimeTokens: Number.isFinite(summary.lifetimeTokens) ? summary.lifetimeTokens : null,
@@ -112,6 +123,171 @@ export function normalizeCodexAccountUsage(rateLimitResponse, usageResponse, now
     ...(rateLimitErrorMsg ? { rateLimitError: rateLimitErrorMsg } : {}),
     ...(isAuthInvalid ? { authInvalid: true, authErrorCode: "token_revoked" } : {}),
   };
+}
+
+// A redemption is bound to the isolated profile in two independent responses
+// before the one-way consume request is sent. account/read has an email but no
+// account id; rateLimits/read has an account id but no email. Both must agree
+// with the registered identity, rather than trusting CODEX_HOME alone.
+export function consumeCodexRateLimitResetCredit({
+  expectedAccountId,
+  expectedEmail,
+  idempotencyKey,
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  binary = codexBinary(),
+  platform = process.platform,
+  codexHome,
+  spawnImpl = spawn,
+} = {}) {
+  return new Promise((resolve, reject) => {
+    if (discoveryDisabled()) {
+      reject(new Error("Credential discovery is disabled (--no-discovery); the Codex account is not read."));
+      return;
+    }
+    if (!binary) {
+      reject(new Error("The Codex app-server could not be started: no Codex binary was found."));
+      return;
+    }
+    if (!codexHome || !expectedAccountId || !expectedEmail || !/^[0-9a-f-]{36}$/i.test(idempotencyKey || "")) {
+      reject(new Error("A registered account identity and reset attempt are required."));
+      return;
+    }
+    const target = spawnableCommand(binary, ["app-server"], platform);
+    let child;
+    try { child = spawnImpl(target.command, target.args, {
+      ...target.options,
+      env: { ...process.env, CODEX_HOME: codexHome },
+      stdio: ["pipe", "pipe", "ignore"],
+      windowsHide: true,
+    }); } catch {
+      const error = new Error("The Codex app-server could not be started.");
+      error.resetRequestSent = false;
+      reject(error);
+      return;
+    }
+    let lines;
+    try { lines = readline.createInterface({ input: child.stdout }); } catch {
+      killProcessTree(child, Boolean(target.options.windowsVerbatimArguments));
+      const error = new Error("The Codex app-server could not be started.");
+      error.resetRequestSent = false;
+      reject(error);
+      return;
+    }
+    let settled = false;
+    let account;
+    let limits;
+    let consumeSent = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      lines.close();
+      killProcessTree(child, Boolean(target.options.windowsVerbatimArguments));
+      if (error) {
+        // The pool may discard a fresh attempt only when no consume request
+        // reached the app-server. All post-send failures retain its retry key.
+        error.resetRequestSent = consumeSent;
+        reject(error);
+      }
+      else resolve(value);
+    };
+    const send = (message) => {
+      try {
+        if (!child.stdin || child.stdin.destroyed) return false;
+        child.stdin.write(`${JSON.stringify(message)}\n`);
+        return true;
+      } catch { return false; }
+    };
+    const timer = setTimeout(() => finish(new Error(
+      consumeSent
+        ? "Reset redemption status is uncertain; retry with the saved attempt key."
+        : "Codex reset preflight timed out; no credit was requested.",
+    )), timeoutMs);
+    child.stdin?.on?.("error", () => finish(new Error(
+      consumeSent
+        ? "Reset redemption status is uncertain; retry with the saved attempt key."
+        : "Codex reset preflight failed; no credit was requested.",
+    )));
+    child.once("error", () => finish(new Error("The Codex app-server could not be started.")));
+    child.once("close", (code) => {
+      if (!settled) finish(new Error(consumeSent
+        ? "Reset redemption status is uncertain; retry with the saved attempt key."
+        : `Codex app-server exited before reset preflight (${code ?? "signal"}).`));
+    });
+    lines.on("line", (line) => {
+      let message;
+      try { message = JSON.parse(line); } catch { return; }
+      if (message.id === 1) {
+        if (message.error) {
+          finish(new Error("Codex app-server initialization failed."));
+          return;
+        }
+        send({ method: "initialized", params: {} });
+        send({ id: 2, method: "account/read", params: { refreshToken: false } });
+        send({ id: 3, method: "account/rateLimits/read", params: null });
+        return;
+      }
+      if (message.id === 2 || message.id === 3) {
+        if (message.error) {
+          finish(new Error("The account identity or reset credits could not be verified."));
+          return;
+        }
+        if (message.id === 2) account = message.result?.account;
+        else limits = message.result;
+        if (account === undefined || limits === undefined) return;
+        if (
+          account?.type !== "chatgpt"
+          || typeof account.email !== "string"
+          || account.email.toLowerCase() !== expectedEmail.toLowerCase()
+          || limits?.accountId !== expectedAccountId
+        ) {
+          finish(new Error("The isolated Codex login does not match the registered account; no credit was spent."));
+          return;
+        }
+        if (!(normalizeResetCredits(limits)?.availableCount > 0)) {
+          const error = new Error("This account has no verified banked reset credit available.");
+          error.code = "RESET_NO_CREDIT";
+          finish(error);
+          return;
+        }
+        const windows = [limits?.rateLimits?.primary, limits?.rateLimits?.secondary];
+        if (!windows.some((window) => Number.isFinite(window?.usedPercent) && window.usedPercent >= 90)) {
+          const error = new Error("A banked reset can be redeemed when this account's quota is at least 90% used.");
+          error.code = "RESET_QUOTA_NOT_READY";
+          finish(error);
+          return;
+        }
+        // Mark the attempt before writing: a stream can emit EPIPE from within
+        // write(), before send() returns, and we must not call that safe.
+        consumeSent = true;
+        if (!send({
+          id: 4,
+          method: "account/rateLimitResetCredit/consume",
+          params: { idempotencyKey },
+        })) finish(new Error("Reset redemption status is uncertain; retry with the saved attempt key."));
+        return;
+      }
+      if (message.id !== 4 || !consumeSent) return;
+      if (message.error) {
+        finish(new Error("The banked reset status is uncertain; retry or check this account's quota in Codex."));
+        return;
+      }
+      const outcome = message.result?.outcome;
+      if (!["reset", "nothingToReset", "noCredit", "alreadyRedeemed"].includes(outcome)) {
+        finish(new Error("Reset redemption status is uncertain; retry with the saved attempt key."));
+        return;
+      }
+      finish(undefined, { outcome });
+    });
+    send({
+      id: 1,
+      method: "initialize",
+      params: {
+        clientInfo: { name: "codex_router_tray", title: "Codex Router Tray", version: "0.4.0" },
+        capabilities: { experimentalApi: true },
+      },
+    });
+  });
 }
 
 export async function attachBoundedChatGPTAccountUsage(pool, {
