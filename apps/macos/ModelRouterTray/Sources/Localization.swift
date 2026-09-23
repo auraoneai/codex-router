@@ -133,6 +133,7 @@ func routerFormat(_ english: String, _ arguments: CVarArg...) -> String {
 
 enum RouterChineseText {
   static let values: [String: String] = [
+    "Done": "完成",
     "Reset result unknown; reopen the saved attempt": "重置结果未知；重新打开已保存的请求",
     "Review uncertain reset attempt": "查看结果未知的重置请求",
     "%@ changed since this confirmation opened. No reset was requested.": "%@ 的信息自打开确认框后发生了变化。未发送重置请求。",

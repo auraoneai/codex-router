@@ -2,6 +2,7 @@
 /// Dynamic Island. English source text is the key; see Localization.swift.
 enum RouterKoreanText {
   static let values: [String: String] = [
+    "Done": "완료",
     "Reset result unknown; reopen the saved attempt": "재설정 결과를 알 수 없습니다. 저장된 시도를 다시 여세요",
     "Review uncertain reset attempt": "결과를 알 수 없는 재설정 시도 확인",
     "%@ changed since this confirmation opened. No reset was requested.": "확인 창을 연 뒤 %@의 정보가 변경되었습니다. 재설정 요청을 보내지 않았습니다.",

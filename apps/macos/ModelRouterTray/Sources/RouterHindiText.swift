@@ -2,6 +2,7 @@
 /// Dynamic Island. English source text is the key; see Localization.swift.
 enum RouterHindiText {
   static let values: [String: String] = [
+    "Done": "पूर्ण",
     "Reset result unknown; reopen the saved attempt": "रीसेट परिणाम अज्ञात; सुरक्षित प्रयास फिर खोलें",
     "Review uncertain reset attempt": "अनिश्चित रीसेट प्रयास देखें",
     "%@ changed since this confirmation opened. No reset was requested.": "पुष्टि खोलने के बाद %@ की जानकारी बदल गई। कोई रीसेट अनुरोध नहीं भेजा गया।",

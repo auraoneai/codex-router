@@ -2,6 +2,7 @@
 /// Dynamic Island. English source text is the key; see Localization.swift.
 enum RouterArabicText {
   static let values: [String: String] = [
+    "Done": "تم",
     "Reset result unknown; reopen the saved attempt": "نتيجة إعادة التعيين غير معروفة؛ افتح المحاولة المحفوظة",
     "Review uncertain reset attempt": "راجع محاولة إعادة التعيين غير المؤكدة",
     "%@ changed since this confirmation opened. No reset was requested.": "تغيّرت بيانات %@ منذ فتح التأكيد. لم يُرسل طلب إعادة تعيين.",
