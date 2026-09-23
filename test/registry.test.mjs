@@ -232,7 +232,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
     ],
   );
   assert.equal(PROVIDERS.get("deepseek").baseUrl, "https://api.deepseek.com");
-  assert.equal(MODELS.filter((model) => model.provider === "kiro-prism").length, 9);
+  assert.equal(MODELS.filter((model) => model.provider === "kiro-prism").length, 11);
   // Fable 5.1 is defined and routable by explicit slug, but stays out of the
   // picker until Kiro model governance approves it for the organization.
   assert.equal(
@@ -252,6 +252,14 @@ test("provider registry exposes configured API and OAuth model families", () => 
   assert.equal(
     MODEL_BY_SLUG.get("kiro-prism/deepseek-v4.1-flash")?.upstreamModel,
     "deepseek-v4.1-flash",
+  );
+  assert.equal(
+    MODEL_BY_SLUG.get("kiro-prism/qwen3-8-max-vl-thinking")?.upstreamModel,
+    "qwen3-8-max-vl-thinking",
+  );
+  assert.equal(
+    MODEL_BY_SLUG.get("kiro-prism/glm-5-3-flash")?.upstreamModel,
+    "glm-5-3-flash",
   );
   assert.equal(MODELS.filter((model) => model.provider === "free-prism").length, 2);
   assert.equal(MODELS.filter((model) => model.provider === "cloudflare-workers-ai").length, 4);

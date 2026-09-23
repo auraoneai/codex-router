@@ -346,6 +346,73 @@
       "supportsReasoningSummaries": true,
       "supportsImageDetailOriginal": true,
       "compHash": "kiro-prism-claude-fable-5-1-v1"
+    },
+    {
+      "slug": "kiro-prism/qwen3-8-max-vl-thinking",
+      "gatewayModel": "kiro-prism-qwen3-8-max-vl-thinking",
+      "upstreamModel": "qwen3-8-max-vl-thinking",
+      "provider": "kiro-prism",
+      "listed": true,
+      "displayName": "Qwen 3.8 Max VL Thinking · Modal (Kiro Prism)",
+      "description": "Qwen 3.8 Max VL Thinking through Kiro Prism's budget-capped Modal Shared API endpoints",
+      "priority": 99,
+      "defaultEffort": "high",
+      "reasoningLevels": [
+        {
+          "effort": "low",
+          "description": "Low reasoning effort"
+        },
+        {
+          "effort": "medium",
+          "description": "Medium reasoning effort"
+        },
+        {
+          "effort": "high",
+          "description": "High reasoning effort"
+        }
+      ],
+      "contextWindow": 1000000,
+      "autoCompact": 900000,
+      "inputModalities": [
+        "text",
+        "image"
+      ],
+      "supportsReasoningSummaries": true,
+      "supportsImageDetailOriginal": true,
+      "compHash": "kiro-prism-qwen3-8-max-vl-thinking-v1"
+    },
+    {
+      "slug": "kiro-prism/glm-5-3-flash",
+      "gatewayModel": "kiro-prism-glm-5-3-flash",
+      "upstreamModel": "glm-5-3-flash",
+      "provider": "kiro-prism",
+      "listed": true,
+      "displayName": "GLM 5.3 Flash · Modal (Kiro Prism)",
+      "description": "GLM 5.3 Flash through Kiro Prism's budget-capped Modal Shared API endpoints",
+      "priority": 99,
+      "defaultEffort": "medium",
+      "reasoningLevels": [
+        {
+          "effort": "low",
+          "description": "Low reasoning effort"
+        },
+        {
+          "effort": "medium",
+          "description": "Medium reasoning effort"
+        },
+        {
+          "effort": "high",
+          "description": "High reasoning effort"
+        }
+      ],
+      "contextWindow": 1000000,
+      "autoCompact": 900000,
+      "inputModalities": [
+        "text"
+      ],
+      "supportsReasoningSummaries": true,
+      "supportsImageDetailOriginal": false,
+      "compHash": "kiro-prism-glm-5-3-flash-v1"
     }
   ]
 }

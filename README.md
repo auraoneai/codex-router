@@ -262,6 +262,8 @@ Linux installations support the Codex CLI.
 | Kimi K3 (China API) | `kimi-api-cn/kimi-k3` | Separately billed Moonshot **China** platform key |
 | DeepSeek V4 Flash (API) | `deepseek/deepseek-v4-flash` | DeepSeek API key |
 | DeepSeek V4.1 Flash (Kiro Prism / Modal) | `kiro-prism/deepseek-v4.1-flash` | Kiro Prism API key |
+| Qwen 3.8 Max VL Thinking (Kiro Prism / Modal) | `kiro-prism/qwen3-8-max-vl-thinking` | Kiro Prism API key |
+| GLM 5.3 Flash (Kiro Prism / Modal) | `kiro-prism/glm-5-3-flash` | Kiro Prism API key |
 | DeepSeek V4 Pro (API) | `deepseek/deepseek-v4-pro` | DeepSeek API key |
 | DeepSeek V4.1 Flash (API) | `deepseek/deepseek-v4.1-flash` | DeepSeek API key |
 | Grok 4.5 (OAuth) | `grok-oauth/grok-4.5` | Official Grok CLI OAuth session |
