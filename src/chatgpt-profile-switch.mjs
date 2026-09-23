@@ -1003,8 +1003,14 @@ export function codexDesktopRunning({ platform = process.platform, processList, 
       listing = typeof processListReader === "function"
         ? processListReader(platform)
         : platform === "win32"
-          ? execFileSync("tasklist", ["/FO", "CSV", "/NH"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
-          : execFileSync("/bin/ps", ["-axo", "command="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+          ? execFileSync("tasklist", ["/FO", "CSV", "/NH"], {
+              encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], windowsHide: true,
+              timeout: 5_000, maxBuffer: 2 * 1024 * 1024,
+            })
+          : execFileSync("/bin/ps", ["-axo", "command="], {
+              encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+              timeout: 5_000, maxBuffer: 2 * 1024 * 1024,
+            });
     } catch {
       return true;
     }
