@@ -271,7 +271,7 @@ test("catalog presence alone is insufficient; the exact offered agent binding mu
 });
 
 test("high-risk reviewer resolution excludes the author's model family", () => {
-  const sol = "gpt-5.6-sol";
+  const sol = "gpt-6-sol";
   const opus = "kiro-prism/claude-opus-5";
   const result = resolveEngineeringAssignment({
     policy: enabledPolicy(),
@@ -288,7 +288,7 @@ test("high-risk reviewer resolution excludes the author's model family", () => {
 test("every DeepSeek assignment inherits ordered non-Modal recovery and is rejected without it", () => {
   const deepseek = "kiro-prism/deepseek-v4.1-flash";
   const glm = "cloudflare-workers-ai/glm-5.3";
-  const sol = "gpt-5.6-sol";
+  const sol = "gpt-6-sol";
   const sonnet = "kiro-prism/claude-sonnet-5";
   const configuredModels = [deepseek, glm, sol, sonnet];
   const offeredBindings = [

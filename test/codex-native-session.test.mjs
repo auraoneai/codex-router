@@ -202,7 +202,7 @@ test("an unrecognized consent marker fails closed", () => {
   assert.equal(nativeSessionAvailable(), false);
 });
 
-test("native models map for the harness with GPT-6 effort choices, minus internal variants", () => {
+test("native models map for the harness with GPT-6 effort choices, minus retired and internal variants", () => {
   const mapped = dshNativeModels([
     {
       slug: "gpt-5.6-sol",
@@ -236,28 +236,19 @@ test("native models map for the harness with GPT-6 effort choices, minus interna
     { slug: "codex-auto-review", visibility: "hide" },
   ]);
 
-  assert.equal(mapped.length, 3);
+  assert.equal(mapped.length, 2);
   assert.deepEqual(mapped[0], {
-    slug: "gpt-5.6-sol",
-    displayName: "GPT-5.6-Sol (Codex)",
-    contextWindow: 272000,
-    inputModalities: ["text", "image"],
-    reasoningLevels: [{ effort: "low" }, { effort: "high" }],
+    slug: "gpt-6-sol",
+    displayName: "GPT-6-Sol (Codex)",
+    contextWindow: 1_050_000,
+    inputModalities: ["text"],
+    reasoningLevels: ["none", "low", "medium", "high", "xhigh", "max"]
+      .map((effort) => ({ effort })),
     // Codex ranks with 1 as best; the router ranks with higher as better.
-    priority: -1,
+    priority: -2,
     native: true,
   });
   assert.deepEqual(mapped.slice(1), [
-    {
-      slug: "gpt-6-sol",
-      displayName: "GPT-6-Sol (Codex)",
-      contextWindow: 1_050_000,
-      inputModalities: ["text"],
-      reasoningLevels: ["none", "low", "medium", "high", "xhigh", "max"]
-        .map((effort) => ({ effort })),
-      priority: -2,
-      native: true,
-    },
     {
       slug: "gpt-6-luna",
       displayName: "GPT-6-Luna (Codex)",

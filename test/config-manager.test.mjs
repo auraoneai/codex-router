@@ -69,8 +69,8 @@ function writeCatalogCodexStub(directory) {
   const file = path.join(directory, isWindows ? "codex-catalog.cmd" : "codex-catalog");
   const catalog = JSON.stringify({
     models: [{
-      slug: "gpt-5.6-sol",
-      display_name: "GPT-5.6-Sol",
+      slug: "gpt-6-sol",
+      display_name: "GPT-6-Sol",
       visibility: "list",
       priority: 10,
     }],
@@ -1853,7 +1853,7 @@ api_key = "REFRESH_QUERY_SECRET"
 case "$1" in
   --version) echo 'codex-cli 99.0.0' ;;
   login) exit 0 ;;
-  debug) echo '{"models":[{"slug":"gpt-5.6-sol","display_name":"GPT-5.6-Sol","visibility":"list","priority":10}]}' ;;
+  debug) echo '{"models":[{"slug":"gpt-6-sol","display_name":"GPT-6-Sol","visibility":"list","priority":10}]}' ;;
   *) exit 1 ;;
 esac
 `,

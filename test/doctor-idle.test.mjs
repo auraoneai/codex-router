@@ -19,7 +19,7 @@ function writeCodexStub(directory, loginSentinel, realHome, accountSentinel) {
   const target = path.join(directory, windows ? "codex-idle.cmd" : "codex-idle");
   const models = JSON.stringify({
     models: [
-      { slug: "gpt-5.6-sol", display_name: "GPT-5.6 Sol", visibility: "list", priority: 10 },
+      { slug: "gpt-6-sol", display_name: "GPT-6 Sol", visibility: "list", priority: 10 },
     ],
   });
   // `debug models` and `debug models --bundled` are different promises: the

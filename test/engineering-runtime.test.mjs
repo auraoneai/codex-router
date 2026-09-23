@@ -273,7 +273,7 @@ test("DeepSeek 429 falls through the immutable snapshot, skips unavailable GLM, 
     defaults.executionSelectionMode = "pinned";
     const deepseek = "kiro-prism/deepseek-v4.1-flash";
     const glm = "cloudflare-workers-ai/glm-5.3";
-    const sol = "gpt-5.6-sol";
+    const sol = "gpt-6-sol";
     const sonnet = "kiro-prism/claude-sonnet-5";
     const dispatches = [];
     let committed = false;
@@ -378,7 +378,7 @@ test("ambiguous dispatch never advances to a fallback route", async () => {
     const runtime = createEngineeringRuntime(options(environment, {
       policyReader: () => ({ status: "ok", degraded: false, enabled: true, revision: 7, policy: defaults }),
       routeAvailability: (route) => ({
-        available: route.includes("deepseek") || route.includes("glm-5.3") || route.includes("gpt-5.6-sol") || route.includes("claude-sonnet-5"),
+        available: route.includes("deepseek") || route.includes("glm-5.3") || route.includes("gpt-6-sol") || route.includes("claude-sonnet-5"),
         provider: route.split("/")[0],
         capacityHost: route === deepseek ? "modal" : route.split("/")[0],
       }),

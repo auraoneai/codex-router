@@ -52,13 +52,13 @@ test("Codex doctor gates installed native vision engines on the live sign-in pro
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   mkdirSync(launchAgents, { recursive: true, mode: 0o700 });
   const luna = {
-    slug: "gpt-5.6-luna",
-    display_name: "GPT-5.6-Luna",
+    slug: "gpt-6-luna",
+    display_name: "GPT-6-Luna",
     visibility: "list",
     priority: 10,
     input_modalities: ["text", "image"],
   };
-  writeFileSync(path.join(codexHome, "config.toml"), 'model = "gpt-5.6-luna"\n', { mode: 0o600 });
+  writeFileSync(path.join(codexHome, "config.toml"), 'model = "gpt-6-luna"\n', { mode: 0o600 });
   writeFileSync(
     path.join(stateDir, "enabled-providers.json"),
     `${JSON.stringify({ version: 1, providers: [] })}\n`,
@@ -86,7 +86,7 @@ test("Codex doctor gates installed native vision engines on the live sign-in pro
     const byName = new Map(report.checks.map((check) => [check.name, check]));
     assert.equal(byName.get("Codex sign-in probe").detail, "authenticated");
     assert.equal(byName.get("Vision bridge").status, "ok");
-    assert.equal(byName.get("Vision bridge").detail, "text-only models read images via gpt-5.6-luna");
+    assert.equal(byName.get("Vision bridge").detail, "text-only models read images via gpt-6-luna");
 
     // Keep both native catalog files stale on disk but make the live sign-in probe fail.
     // The request path cannot spend a native engine without a live session, so doctor

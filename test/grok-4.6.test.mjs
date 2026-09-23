@@ -27,7 +27,7 @@ test("every Grok 4.6 route records the upstream id and window", () => {
     const model = MODEL_BY_SLUG.get(slug);
     assert.ok(model, `${slug} is missing from the registry`);
     assert.equal(model.upstreamModel, upstreamModel);
-    assert.equal(model.listed, true);
+    assert.equal(model.listed, !["grok-oauth/grok-4.6", "openrouter/grok-4.6"].includes(slug));
     // The official window is 500,000 tokens.
     assert.equal(model.contextWindow, 500_000);
     // autoCompact sits below the hard limit.

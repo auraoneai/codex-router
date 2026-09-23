@@ -20,8 +20,8 @@ const codexStub = path.join(stateDir, process.platform === "win32" ? "codex-cont
 writeFileSync(
   codexStub,
   process.platform === "win32"
-    ? "@echo off\r\nif \"%1\"==\"--version\" (echo codex-cli 99.0.0& exit /b 0)\r\nif \"%1\"==\"login\" exit /b 0\r\nif \"%1\"==\"debug\" (echo {\"models\":[{\"slug\":\"gpt-5.6-sol\",\"display_name\":\"GPT-5.6 Sol\",\"visibility\":\"list\"}]}& exit /b 0)\r\nexit /b 1\r\n"
-    : "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'codex-cli 99.0.0' ;;\n  login) exit 0 ;;\n  debug) printf '%s\\n' '{\"models\":[{\"slug\":\"gpt-5.6-sol\",\"display_name\":\"GPT-5.6 Sol\",\"visibility\":\"list\"}]}' ;;\n  *) exit 1 ;;\nesac\n",
+    ? "@echo off\r\nif \"%1\"==\"--version\" (echo codex-cli 99.0.0& exit /b 0)\r\nif \"%1\"==\"login\" exit /b 0\r\nif \"%1\"==\"debug\" (echo {\"models\":[{\"slug\":\"gpt-6-sol\",\"display_name\":\"GPT-6 Sol\",\"visibility\":\"list\"}]}& exit /b 0)\r\nexit /b 1\r\n"
+    : "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'codex-cli 99.0.0' ;;\n  login) exit 0 ;;\n  debug) printf '%s\\n' '{\"models\":[{\"slug\":\"gpt-6-sol\",\"display_name\":\"GPT-6 Sol\",\"visibility\":\"list\"}]}' ;;\n  *) exit 1 ;;\nesac\n",
   { mode: 0o755 },
 );
 const env = {
