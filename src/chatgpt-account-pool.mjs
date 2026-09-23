@@ -7,7 +7,12 @@ import lockfile from "proper-lockfile";
 
 import { privateFileIsProtected, protectPrivateFile, writePrivateJson } from "./file-security.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
-import { CHATGPT_ACCOUNT_HOMES_DIR, CHATGPT_ACCOUNT_POOL_PATH } from "./paths.mjs";
+import {
+  CHATGPT_ACCOUNT_HOMES_DIR,
+  CHATGPT_ACCOUNT_POOL_PATH,
+  CHATGPT_PROFILE_SWITCH_PATH,
+  CODEX_HOME,
+} from "./paths.mjs";
 import { findCodexBinary } from "./codex-binary.mjs";
 import { spawnableCommand } from "./spawnable-command.mjs";
 import {
@@ -358,6 +363,8 @@ const RESET_COMPLETION_REPLAY_MS = 10 * 60_000;
 export async function redeemChatGPTSubscriptionAccountResetCredit(accountValue, {
   filePath = CHATGPT_ACCOUNT_POOL_PATH,
   homesDir = CHATGPT_ACCOUNT_HOMES_DIR,
+  primaryHome = CODEX_HOME,
+  switchPath = CHATGPT_PROFILE_SWITCH_PATH,
   consume,
   refreshUsage,
   timeoutMs = 20_000,
@@ -374,11 +381,21 @@ export async function redeemChatGPTSubscriptionAccountResetCredit(accountValue, 
     if (!account.identity?.accountId || !account.identity?.email) {
       throw new Error("This account's registered identity is incomplete; no credit was spent.");
     }
-    const status = chatGPTSubscriptionAccountStatus(id, { homesDir });
+    const { selectedChatGPTUsageProfile } = await import("./chatgpt-profile-switch.mjs");
+    const liveProfile = selectedChatGPTUsageProfile({ filePath, homesDir, primaryHome, switchPath });
+    const home = id === liveProfile.selection && liveProfile.home
+      ? liveProfile.home
+      : chatGPTSubscriptionAccountHome(id, { homesDir });
+    const status = chatGPTSubscriptionAccountStatus(id, { homesDir, home });
     if (!status.usable || !status.hasAccountId || status.email?.toLowerCase() !== account.identity.email.toLowerCase()) {
       throw new Error("This account needs a valid matching login before redeeming a reset credit.");
     }
-    const home = chatGPTSubscriptionAccountHome(id, { homesDir });
+    if (home === primaryHome) {
+      const liveSession = readSubscriptionSession(id, { homesDir, home });
+      if (!Number.isFinite(liveSession?.expiresAtMs) || liveSession.expiresAtMs - Date.now() <= 10 * 60_000) {
+        throw new Error("Wait for the desktop login to refresh before redeeming this account's reset credit.");
+      }
+    }
     ensureNoSymlinkParents(home, { label: "ChatGPT account reset home" });
     const attemptPath = resetAttemptPath(id, homesDir);
     const previous = readResetAttempt(attemptPath, account.identity.accountId, account.identity.email);
@@ -560,8 +577,8 @@ function tokenEmail(idToken) {
     return email.length <= 320 && EMAIL.test(email) ? email : undefined;
   } catch { return undefined; }
 }
-function readSubscriptionSession(accountValue, { homesDir = CHATGPT_ACCOUNT_HOMES_DIR, now = Date.now() } = {}) {
-  const authPath = chatGPTSubscriptionAccountAuthPath(accountValue, { homesDir });
+function readSubscriptionSession(accountValue, { homesDir = CHATGPT_ACCOUNT_HOMES_DIR, now = Date.now(), home } = {}) {
+  const authPath = home ? path.join(home, "auth.json") : chatGPTSubscriptionAccountAuthPath(accountValue, { homesDir });
   if (!existsSync(authPath)) return undefined;
   try {
     const file = lstatSync(authPath);
@@ -604,9 +621,9 @@ export function hardenChatGPTSubscriptionAccountAuth(accountValue, {
   }
   return authPath;
 }
-export function chatGPTSubscriptionAccountStatus(accountValue, { homesDir = CHATGPT_ACCOUNT_HOMES_DIR, now = Date.now() } = {}) {
+export function chatGPTSubscriptionAccountStatus(accountValue, { homesDir = CHATGPT_ACCOUNT_HOMES_DIR, now = Date.now(), home } = {}) {
   assertAccountDiscoveryEnabled();
-  const session = readSubscriptionSession(accountValue, { homesDir, now });
+  const session = readSubscriptionSession(accountValue, { homesDir, now, home });
   return {
     authenticated: Boolean(session), usable: Boolean(session) && !session.expired, expired: Boolean(session?.expired), hasAccountId: Boolean(session?.accountId),
     ...(session?.email ? { email: session.email } : {}),
@@ -634,6 +651,8 @@ export async function claimChatGPTSubscriptionRefresh(accountValue, {
 export async function refreshChatGPTSubscriptionAccount(accountValue, {
   filePath = CHATGPT_ACCOUNT_POOL_PATH,
   homesDir = CHATGPT_ACCOUNT_HOMES_DIR,
+  primaryHome = CODEX_HOME,
+  switchPath = CHATGPT_PROFILE_SWITCH_PATH,
   force = false,
   now = Date.now(),
   binary,
@@ -649,6 +668,12 @@ export async function refreshChatGPTSubscriptionAccount(accountValue, {
 } = {}) {
   assertAccountDiscoveryEnabled();
   const id = accountId(accountValue);
+  const { selectedChatGPTUsageProfile } = await import("./chatgpt-profile-switch.mjs");
+  const liveProfile = selectedChatGPTUsageProfile({ filePath, homesDir, primaryHome, switchPath });
+  // The Codex desktop owns refresh for the account installed in its primary
+  // home. Refreshing its saved copy in another process spends the same rotating
+  // refresh token twice and can strand the live login on an old generation.
+  if (id === liveProfile.selection && liveProfile.home === primaryHome) return false;
   const status = chatGPTSubscriptionAccountStatus(id, { homesDir, now });
   const expiresSoon = status.expiresInHours !== undefined && status.expiresInHours * 36e5 <= ACCOUNT_REFRESH_MARGIN_MS;
   if (!force && !status.expired && !expiresSoon) return false;

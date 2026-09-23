@@ -242,6 +242,13 @@ export async function refreshViaCodex({ now = Date.now() } = {}) {
   lastRefreshAttemptMs = now;
   refreshInFlight = (async () => {
     try {
+      // The desktop already owns its live login. Keep this check inside the
+      // in-flight promise so concurrent calls cannot start multiple CLIs.
+      const { codexDesktopRunning } = await import("./chatgpt-profile-switch.mjs");
+      if (codexDesktopRunning()) {
+        lastRefreshAttemptMs = 0;
+        return false;
+      }
       const { findCodexBinary } = await import("./codex-binary.mjs");
       const binary = findCodexBinary();
       if (!binary) return false;

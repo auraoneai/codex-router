@@ -27,6 +27,7 @@ import {
   CURSOR_CATALOG_PATH,
   GEMINI_CATALOG_PATH,
   OPENCLAW_CATALOG_PATH,
+  CODEX_HOME,
   PROVIDER_API_KEY_POOL_PATH,
   PROVIDER_CREDENTIAL_STORE_PATH,
   PROVIDER_SELECTION_PATH,
@@ -3700,6 +3701,7 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
     chatGPTSubscriptionAccountHome,
     chatGPTSubscriptionAccountPoolSnapshot,
     chatGPTSubscriptionAccountResetAttemptPending,
+    chatGPTSubscriptionAccountStatus,
     createChatGPTSubscriptionAccount,
     readChatGPTAccountPoolState,
     redeemChatGPTSubscriptionAccountResetCredit,
@@ -3716,6 +3718,7 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
     reconcileChatGPTProfileSwitchIfReady,
     removeChatGPTProfileAccount,
     selectChatGPTProfileAccount,
+    selectedChatGPTUsageProfile,
   } = await import("./chatgpt-profile-switch.mjs");
 
   if (!action || action === "status") {
@@ -3728,6 +3731,18 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
     const beforeRefresh = chatGPTSubscriptionAccountPoolSnapshot();
     await refreshBoundedChatGPTSubscriptionAccounts(beforeRefresh);
     const safe = chatGPTSubscriptionAccountPoolSnapshot();
+    const selectedProfile = selectedChatGPTUsageProfile();
+    if (selectedProfile.home === CODEX_HOME && safe.accounts?.[selectedProfile.selection]) {
+      const account = safe.accounts[selectedProfile.selection];
+      if (account.subscription?.loginInProgress !== true) {
+        const status = chatGPTSubscriptionAccountStatus(selectedProfile.selection, { home: CODEX_HOME });
+        account.subscription = {
+          ...(account.subscription || {}),
+          status: status.usable ? "usable" : status.expired ? "expired" : status.authenticated ? "invalid" : "pending",
+          ...status,
+        };
+      }
+    }
     const profile = chatGPTProfileSwitchSnapshot();
     const loginAttempts = {};
     for (const failure of recovery.failures) {
@@ -3763,9 +3778,15 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
         error: "A previous sign-in may still be running. Verify that no Codex login process remains before manually clearing its saved ownership.",
       };
     }
-    const { attachBoundedChatGPTAccountUsage } = await import("./codex-account-usage.mjs");
+    const {
+      BACKGROUND_USAGE_MIN_ACCESS_LIFETIME_MS,
+      attachBoundedChatGPTAccountUsage,
+    } = await import("./codex-account-usage.mjs");
     await attachBoundedChatGPTAccountUsage(safe, {
-      accountHome: (accountId) => chatGPTSubscriptionAccountHome(accountId),
+      minAccessLifetimeMs: BACKGROUND_USAGE_MIN_ACCESS_LIFETIME_MS,
+      accountHome: (accountId) => accountId === selectedProfile.selection && selectedProfile.home
+        ? selectedProfile.home
+        : chatGPTSubscriptionAccountHome(accountId),
     });
     process.stdout.write(`${JSON.stringify({
       ...safe,

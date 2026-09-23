@@ -1,13 +1,17 @@
 import { execFileSync, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import readline from "node:readline";
 
 import { findCodexBinary } from "./codex-binary.mjs";
+import { tokenExpiryMs } from "./codex-native-session.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { spawnableCommand } from "./spawnable-command.mjs";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 export const ACCOUNT_POOL_USAGE_PROBE_LIMIT = 8;
 export const ACCOUNT_POOL_USAGE_TIMEOUT_MS = 2_000;
+export const BACKGROUND_USAGE_MIN_ACCESS_LIFETIME_MS = 10 * 60_000;
 
 // This used to keep its own two-line search -- an undocumented CODEX_BINARY
 // override, a hardcoded macOS app path, then the bare name "codex". None of
@@ -295,6 +299,7 @@ export async function attachBoundedChatGPTAccountUsage(pool, {
   accountHome,
   probeLimit = ACCOUNT_POOL_USAGE_PROBE_LIMIT,
   timeoutMs = ACCOUNT_POOL_USAGE_TIMEOUT_MS,
+  minAccessLifetimeMs = 0,
 } = {}) {
   if (!pool?.accounts || typeof accountHome !== "function") return pool;
   const selectedId = pool.policy?.selectedAccountId;
@@ -304,7 +309,7 @@ export async function attachBoundedChatGPTAccountUsage(pool, {
     .slice(0, Math.max(0, Math.floor(probeLimit)));
   await Promise.all(candidates.map(async (account) => {
     try {
-      const usage = await readUsage({ codexHome: accountHome(account.id), timeoutMs });
+      const usage = await readUsage({ codexHome: accountHome(account.id), timeoutMs, minAccessLifetimeMs });
       const windows = [usage.primary, usage.secondary].filter(Boolean);
       const monthly = windows.find((window) => window.windowDurationMins >= 28 * 24 * 60);
       const weekly = windows.find(
@@ -333,6 +338,7 @@ export function readCodexAccountUsage({
   platform = process.platform,
   codexHome = process.env.CODEX_HOME,
   spawnImpl = spawn,
+  minAccessLifetimeMs = 0,
 } = {}) {
   return new Promise((resolve, reject) => {
     // The app-server answers with the signed-in ChatGPT account's usage, which
@@ -347,6 +353,19 @@ export function readCodexAccountUsage({
     if (!binary) {
       reject(new Error("The Codex app-server could not be started: no Codex binary was found."));
       return;
+    }
+    if (minAccessLifetimeMs > 0) {
+      try {
+        const auth = JSON.parse(readFileSync(path.join(codexHome, "auth.json"), "utf8"));
+        const expiresAt = tokenExpiryMs(auth?.tokens?.access_token);
+        if (!Number.isFinite(expiresAt) || expiresAt - Date.now() <= minAccessLifetimeMs) {
+          reject(new Error("The login owner needs to refresh this access token before background usage probing."));
+          return;
+        }
+      } catch {
+        reject(new Error("The login owner needs to restore this account before background usage probing."));
+        return;
+      }
     }
     const target = spawnableCommand(binary, ["app-server"], platform);
     const processHandle = spawnImpl(target.command, target.args, {
