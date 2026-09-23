@@ -670,10 +670,19 @@ function atomicPrivateContents(contents, destination, { protect = protectPrivate
 function syncAuthProfile(source, destination) {
   ensureAuthFile(source, "The active");
   ensureAuthFile(destination, "The saved");
+  const sourceIdentity = authIdentity(source)?.accountId;
+  const savedIdentity = authIdentity(destination)?.accountId;
+  if (!sourceIdentity || sourceIdentity !== savedIdentity) {
+    throw new Error("The active ChatGPT login differs from its saved account; refusing to replace either profile.");
+  }
   const sourceMtime = statSync(source).mtimeMs;
   const destinationMtime = statSync(destination).mtimeMs;
-  if (sourceMtime >= destinationMtime) atomicPrivateCopy(source, destination);
-  else atomicPrivateCopy(destination, source);
+  if (destinationMtime > sourceMtime && !authFilesEqual(source, destination)) {
+    throw new Error("The saved active login changed after the live login; reconcile it before switching accounts.");
+  }
+  // The selected account's live primary auth is authoritative while Codex is
+  // running. Never copy an older saved refresh-token generation over it.
+  atomicPrivateCopy(source, destination);
 }
 
 function authIdentityFromContents(contents) {

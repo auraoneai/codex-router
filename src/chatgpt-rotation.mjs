@@ -26,8 +26,11 @@ import path from "node:path";
 import {
   CHATGPT_ACCOUNT_POOL_PATH,
   CHATGPT_ACCOUNT_HOMES_DIR,
+  CHATGPT_PROFILE_SWITCH_PATH,
+  CODEX_HOME,
 } from "./paths.mjs";
 import { readChatGPTAccountPoolState } from "./chatgpt-account-pool.mjs";
+import { selectedChatGPTUsageProfile } from "./chatgpt-profile-switch.mjs";
 import { tokenExpiryMs } from "./codex-native-session.mjs";
 import { nextKnownResetAt } from "./chatgpt-usage-probe.mjs";
 
@@ -220,11 +223,14 @@ function accountAuthPath(accountId, { homesDir = CHATGPT_ACCOUNT_HOMES_DIR } = {
   return path.join(homesDir, accountId, "auth.json");
 }
 
-// Reads one account's own credentials. Deliberately a plain read of the pool's
-// per-account home: this must not consult `$CODEX_HOME/auth.json`, because the
-// point of rotation is to reach an account *other* than the switched-in one.
-export function accountSession(accountId, { homesDir = CHATGPT_ACCOUNT_HOMES_DIR, now = Date.now() } = {}) {
-  const authPath = accountAuthPath(accountId, { homesDir });
+// Reads one account's credentials. Inactive accounts use their isolated homes;
+// the selected account uses the live primary home only after identity checks.
+export function accountSession(accountId, {
+  homesDir = CHATGPT_ACCOUNT_HOMES_DIR,
+  now = Date.now(),
+  home,
+} = {}) {
+  const authPath = home ? path.join(home, "auth.json") : accountAuthPath(accountId, { homesDir });
   if (!existsSync(authPath)) return undefined;
   let document;
   try {
@@ -244,6 +250,7 @@ export function accountSession(accountId, { homesDir = CHATGPT_ACCOUNT_HOMES_DIR
   return {
     accountId: accountIdClaim,
     accessToken,
+    expiresAtMs: expiry,
     expired: Number.isFinite(expiry) ? expiry <= now : false,
     tokenFingerprint,
     identityFingerprint,
@@ -354,6 +361,8 @@ export function rotationCandidates({
   homesDir = CHATGPT_ACCOUNT_HOMES_DIR,
   usageById,
   now = Date.now(),
+  primaryHome = CODEX_HOME,
+  switchPath = CHATGPT_PROFILE_SWITCH_PATH,
 } = {}) {
   let pool;
   try {
@@ -364,6 +373,9 @@ export function rotationCandidates({
   if (pool?.policy?.enabled === false) return [];
   const entries = Object.values(pool?.accounts || {});
   if (entries.length < 2) return [];
+  const liveProfile = selectedChatGPTUsageProfile({
+    filePath: poolPath, homesDir, primaryHome, switchPath,
+  });
   const rules = normalizeRules(pool?.policy?.rules);
   const usage = usageById instanceof Map ? usageById : new Map(Object.entries(usageById || {}));
   const purposeById = new Map();
@@ -371,8 +383,15 @@ export function rotationCandidates({
   const seenFingerprints = new Set();
   for (const entry of entries) {
     if (entry?.state !== "active" || entry?.paused) continue;
-    const session = accountSession(entry.id, { homesDir, now });
+    const session = accountSession(entry.id, {
+      homesDir,
+      now,
+      ...(entry.id === liveProfile.selection && liveProfile.home ? { home: liveProfile.home } : {}),
+    });
     if (!session || session.expired) continue;
+    // The primary login can change between profile resolution and this read.
+    // Never route another identity under the selected account's pool record.
+    if (entry.identity?.accountId && session.accountId !== entry.identity.accountId) continue;
     if (isAccountAuthInvalid(entry.id, { tokenFingerprint: session.tokenFingerprint })) continue;
     const cachedRow = usage.get(entry.id);
     if (cachedRow && accountIsAuthInvalid(cachedRow, entry.id)) continue;
@@ -418,6 +437,8 @@ export function poolExhaustionReport({
   homesDir = CHATGPT_ACCOUNT_HOMES_DIR,
   usageById,
   now = Date.now(),
+  primaryHome = CODEX_HOME,
+  switchPath = CHATGPT_PROFILE_SWITCH_PATH,
 } = {}) {
   let pool;
   try {
@@ -428,6 +449,9 @@ export function poolExhaustionReport({
   if (pool?.policy?.enabled === false) return null;
   const entries = Object.values(pool?.accounts || {});
   if (entries.length < 2) return null;
+  const liveProfile = selectedChatGPTUsageProfile({
+    filePath: poolPath, homesDir, primaryHome, switchPath,
+  });
   const rules = normalizeRules(pool?.policy?.rules);
   const usage = usageById instanceof Map ? usageById : new Map(Object.entries(usageById || {}));
 
@@ -442,8 +466,12 @@ export function poolExhaustionReport({
   for (const entry of entries) {
     if (entry?.state !== "active" || entry?.paused) continue;
     totalActive++;
-    const session = accountSession(entry.id, { homesDir, now });
-    if (!session || session.expired) {
+    const session = accountSession(entry.id, {
+      homesDir,
+      now,
+      ...(entry.id === liveProfile.selection && liveProfile.home ? { home: liveProfile.home } : {}),
+    });
+    if (!session || session.expired || (entry.identity?.accountId && session.accountId !== entry.identity.accountId)) {
       expired++;
       continue;
     }

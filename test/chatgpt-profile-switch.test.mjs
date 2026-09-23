@@ -672,6 +672,46 @@ test("explicit retry resets only an exactly ended changed login", async () => {
   assert.equal(clearChatGPTLoginLease(account.id, valid, { homesDir }), true);
 });
 
+test("switching refuses a saved credential that is newer than the live account", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "codex-profile-refresh-order-"));
+  try {
+    const filePath = path.join(root, "pool.json");
+    const homesDir = path.join(root, "homes");
+    const primaryHome = path.join(root, "primary");
+    const switchPath = path.join(root, "switch.json");
+    mkdirSync(primaryHome, { recursive: true });
+    const active = createChatGPTSubscriptionAccount({ filePath, homesDir });
+    const target = createChatGPTSubscriptionAccount({ filePath, homesDir });
+    const primary = path.join(primaryHome, "auth.json");
+    const saved = chatGPTSubscriptionAccountAuthPath(active.id, { homesDir });
+    const targetAuth = chatGPTSubscriptionAccountAuthPath(target.id, { homesDir });
+    const liveContents = JSON.stringify({ tokens: { access_token: "live-token", account_id: "active-backend" } });
+    const savedContents = JSON.stringify({ tokens: { access_token: "saved-token", account_id: "active-backend" } });
+    writeFileSync(primary, liveContents, { mode: 0o600 });
+    writeFileSync(saved, savedContents, { mode: 0o600 });
+    writeFileSync(targetAuth, JSON.stringify({ tokens: { access_token: "target-token", account_id: "target-backend" } }), { mode: 0o600 });
+    const state = readChatGPTAccountPoolState(filePath);
+    state.accounts[active.id].identity = { accountId: "active-backend" };
+    state.accounts[target.id].identity = { accountId: "target-backend" };
+    state.policy.selectedAccountId = active.id;
+    writeChatGPTAccountPoolState(state, filePath);
+    writeFileSync(switchPath, JSON.stringify({ version: 1, desired: active.id, active: active.id, pending: false, phase: "idle" }), { mode: 0o600 });
+    const future = new Date(Date.now() + 60_000);
+    utimesSync(saved, future, future);
+    await assert.rejects(
+      requestChatGPTProfileSwitch(target.id, {
+        filePath, homesDir, primaryHome, switchPath,
+        platform: "darwin", processList: "", refreshCatalog: false,
+      }),
+      /saved active login changed/,
+    );
+    assert.equal(readFileSync(primary, "utf8"), liveContents);
+    assert.equal(readFileSync(saved, "utf8"), savedContents);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("login finalization binds inactive identities and synchronizes an active refresh only when Codex closes", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "codex-profile-login-finalize-"));
   const primaryHome = path.join(root, "primary");

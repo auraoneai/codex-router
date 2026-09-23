@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
@@ -392,6 +394,37 @@ test("the usage panel names a missing Codex instead of blaming the app-server", 
   // machine with Codex installed. It only looked green because CI runners have
   // none -- which is the one environment where this assertion cannot fail.
   await assert.rejects(readCodexAccountUsage({ binary: null }), /no Codex binary was found/);
+});
+
+test("background usage refuses a near-expiry token before starting another auth manager", async () => {
+  const codexHome = mkdtempSync(path.join(tmpdir(), "usage-refresh-guard-"));
+  try {
+    const authPath = path.join(codexHome, "auth.json");
+    const token = (seconds) => `header.${Buffer.from(JSON.stringify({ exp: seconds })).toString("base64url")}.signature`;
+    const writeExpiry = (seconds) => writeFileSync(authPath, JSON.stringify({
+      tokens: { access_token: token(seconds), account_id: "backend-account" },
+    }));
+    let spawned = 0;
+    const options = {
+      binary: "/fake/codex", codexHome, minAccessLifetimeMs: 10 * 60_000,
+      spawnImpl: () => {
+        spawned += 1;
+        return fakeAppServer((message) => {
+          if (message.id === 1) return { id: 1, result: {} };
+          if (message.id === 2) return { id: 2, result: { rateLimits: {} } };
+          if (message.id === 3) return { id: 3, result: { summary: {} } };
+        });
+      },
+    };
+    writeExpiry(Math.floor(Date.now() / 1000) + 5 * 60);
+    await assert.rejects(readCodexAccountUsage(options), /login owner needs to refresh/);
+    assert.equal(spawned, 0);
+    writeExpiry(Math.floor(Date.now() / 1000) + 60 * 60);
+    await readCodexAccountUsage(options);
+    assert.equal(spawned, 1);
+  } finally {
+    rmSync(codexHome, { recursive: true, force: true });
+  }
 });
 
 test("a healthy app-server that answers both account reads returns full usage", async () => {

@@ -18,9 +18,14 @@ import {
   CHATGPT_ACCOUNT_HOMES_DIR,
   CHATGPT_ACCOUNT_POOL_PATH,
   CHATGPT_ACCOUNT_USAGE_CACHE_PATH,
+  CHATGPT_PROFILE_SWITCH_PATH,
+  CODEX_HOME,
 } from "./paths.mjs";
 import { readChatGPTAccountPoolState } from "./chatgpt-account-pool.mjs";
-import { readCodexAccountUsage } from "./codex-account-usage.mjs";
+import {
+  BACKGROUND_USAGE_MIN_ACCESS_LIFETIME_MS,
+  readCodexAccountUsage,
+} from "./codex-account-usage.mjs";
 import { protectPrivateFile } from "./file-security.mjs";
 import { clearAccountAuthInvalid } from "./chatgpt-rotation.mjs";
 
@@ -83,6 +88,8 @@ async function executeProbeChatGPTAccountUsage({
   probeLimit = USAGE_PROBE_LIMIT,
   now = Date.now(),
   write = true,
+  primaryHome = CODEX_HOME,
+  switchPath = CHATGPT_PROFILE_SWITCH_PATH,
 } = {}) {
   let pool;
   try {
@@ -91,6 +98,13 @@ async function executeProbeChatGPTAccountUsage({
     return { fetchedAt: new Date(now).toISOString(), accounts: [] };
   }
   const selectedId = pool?.policy?.selectedAccountId;
+  // The selected account's saved profile is a snapshot of the desktop's live
+  // auth. A second app-server on that snapshot can refresh the same rotating
+  // token independently and leave one of the two credential stores stale.
+  const { selectedChatGPTUsageProfile } = await import("./chatgpt-profile-switch.mjs");
+  const selectedProfile = selectedChatGPTUsageProfile({
+    filePath: poolPath, homesDir, primaryHome, switchPath,
+  });
   const candidates = Object.values(pool?.accounts || {})
     .filter((account) => account?.state === "active" && !account?.paused)
     // The switched-in account is probed first so a truncated run still knows
@@ -119,7 +133,13 @@ async function executeProbeChatGPTAccountUsage({
     };
     const prev = prevAccountsById.get(account.id);
     try {
-      const usage = await readUsage({ codexHome: accountHome(account.id, homesDir), timeoutMs });
+      const codexHome = account.id === selectedProfile.selection && selectedProfile.home
+        ? selectedProfile.home
+        : accountHome(account.id, homesDir);
+      const usage = await readUsage({
+        codexHome, timeoutMs,
+        minAccessLifetimeMs: BACKGROUND_USAGE_MIN_ACCESS_LIFETIME_MS,
+      });
       const isAuthInvalid = usage?.authInvalid === true ||
         Boolean(usage?.rateLimitError && /401|token_revoked|invalidated oauth token|invalid_token|unauthorized/i.test(usage.rateLimitError));
       if (!isAuthInvalid) {
