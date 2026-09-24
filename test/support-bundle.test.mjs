@@ -280,6 +280,10 @@ model_catalog_json = ${JSON.stringify(path.join(stateDir, "merged-models.json"))
       source: "not required",
       persistent: false,
     });
+    assert.ok(bundle.claudeAccountPool);
+    assert.equal(typeof bundle.claudeAccountPool, "object");
+    assert.equal(bundle.files.claudeAccountPool.exists, false);
+    assert.equal(bundle.files.claudeAccountUsage.exists, false);
     assert.doesNotMatch(contents, new RegExp(sentinel));
     assert.doesNotMatch(contents, new RegExp(chutesSentinel));
     assert.doesNotMatch(contents, new RegExp(copilotSentinel));
@@ -315,6 +319,7 @@ model_catalog_json = ${JSON.stringify(path.join(stateDir, "merged-models.json"))
     assert.equal(privateResult.includedLogs, false);
     assert.equal("redactedLogTail" in privateBundle, false);
     assert.match(privateBundle.privacy, /historical logs cannot be proven/i);
+    assert.deepEqual(privateBundle.claudeAccountPool, { discoveryDisabled: true });
     assert.doesNotMatch(privateContents, new RegExp(oauthClientId.replaceAll(".", "\\.")));
     assert.doesNotMatch(privateContents, new RegExp(oauthClientSecret));
     assert.doesNotMatch(privateContents, new RegExp(oauthAccessToken));
@@ -533,5 +538,58 @@ test("support bundle omits logs when the OAuth credential source is unsafe", asy
     if (previousDiscovery === undefined) delete process.env.CODEX_ROUTER_NO_DISCOVERY;
     else process.env.CODEX_ROUTER_NO_DISCOVERY = previousDiscovery;
     rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
+test("support bundle includes sanitized claudeAccountPool snapshot and file metadata", () => {
+  const previousDiscovery = process.env.CODEX_ROUTER_NO_DISCOVERY;
+  process.env.CODEX_ROUTER_NO_DISCOVERY = "0";
+  const stateDir = process.env.CODEX_ROUTER_STATE_DIR;
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const poolPath = path.join(stateDir, "claude-account-pool.json");
+  const usagePath = path.join(stateDir, "claude-account-usage.json");
+  const testSecret = "TEST_CLAUDE_ACCOUNT_SECRET_MUST_NOT_LEAK";
+  const accountId = "clacct_support1111";
+  const poolState = {
+    version: 1,
+    policy: { enabled: true, mode: "switch", selectedAccountId: accountId },
+    accounts: {
+      [accountId]: {
+        id: accountId,
+        state: "active",
+        paused: false,
+        priority: 50,
+        label: "support test account",
+        createdAt: new Date().toISOString(),
+        subscription: { status: "usable", plan: "pro" },
+        health: { state: "healthy", lastError: testSecret },
+        turns: 5,
+        requests: 10,
+      },
+    },
+  };
+  writeFileSync(poolPath, `${JSON.stringify(poolState, null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(usagePath, `${JSON.stringify({ version: 1, accounts: {} }, null, 2)}\n`, { mode: 0o600 });
+
+  try {
+    const result = createSupportBundle();
+    const contents = readFileSync(result.path, "utf8");
+    const bundle = JSON.parse(contents);
+
+    assert.ok(bundle.claudeAccountPool);
+    assert.equal(bundle.claudeAccountPool.version, 1);
+    assert.equal(bundle.claudeAccountPool.policy.selectedAccountId, accountId);
+    assert.ok(bundle.claudeAccountPool.accounts[accountId]);
+    assert.equal(bundle.claudeAccountPool.accounts[accountId].id, accountId);
+    assert.equal(bundle.claudeAccountPool.accounts[accountId].health.lastError, "[redacted]");
+    assert.doesNotMatch(contents, new RegExp(testSecret));
+
+    assert.equal(bundle.files.claudeAccountPool.exists, true);
+    assert.equal(bundle.files.claudeAccountUsage.exists, true);
+  } finally {
+    if (previousDiscovery === undefined) delete process.env.CODEX_ROUTER_NO_DISCOVERY;
+    else process.env.CODEX_ROUTER_NO_DISCOVERY = previousDiscovery;
+    rmSync(poolPath, { force: true });
+    rmSync(usagePath, { force: true });
   }
 });

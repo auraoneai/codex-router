@@ -1830,7 +1830,8 @@ kill-switch (`discovery-mode.json`, read through
 `src/discovery-mode.mjs` `discoveryDisabled()`, overridable with
 `CODEX_ROUTER_NO_DISCOVERY=1|0`). While it is set, the promise is absolute:
 no provider credential file, macOS Keychain item, other CLI's OAuth or
-session file, or Codex `auth.json` is read, no `codex login status` probe
+session file, Codex `auth.json`, or Claude account pool
+(`CLAUDE_ACCOUNT_POOL_PATH`, `claude-accounts/`) is read, no `codex login status` probe
 runs against the real `CODEX_HOME`, and traffic gets a local
 `503 router_idle_no_provider` instead of provider or native forwarding.
 

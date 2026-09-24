@@ -17,6 +17,15 @@ import {
 import { cooldownUntil } from "./rate-limit-headers.mjs";
 import { rateLimitSnapshotFor } from "./rate-limit-state.mjs";
 import { VERSION } from "./version.mjs";
+import {
+  CLAUDE_ACCOUNT_POOL_PATH,
+  CLAUDE_ACCOUNT_USAGE_CACHE_PATH,
+} from "./paths.mjs";
+import {
+  claudeAccountPoolConfigured,
+  readClaudeAccountPoolState,
+} from "./claude-account-pool.mjs";
+import { readClaudeAccountUsageDocument } from "./claude-account-usage.mjs";
 
 const REQUEST_TIMEOUT_MS = 8_000;
 
@@ -909,6 +918,240 @@ async function openRouterAccount(fetchImpl) {
   };
 }
 
+function extractUsageAccounts(usageDoc) {
+  const map = new Map();
+  if (!usageDoc || typeof usageDoc !== "object") return map;
+  if (Array.isArray(usageDoc.accounts)) {
+    for (const entry of usageDoc.accounts) {
+      if (entry?.id) map.set(entry.id, entry);
+    }
+  } else if (usageDoc.accounts && typeof usageDoc.accounts === "object") {
+    for (const [id, entry] of Object.entries(usageDoc.accounts)) {
+      if (entry && typeof entry === "object") {
+        map.set(id, { id, ...entry });
+      }
+    }
+  }
+  if (map.size === 0) {
+    for (const [key, entry] of Object.entries(usageDoc)) {
+      if (key !== "fetchedAt" && entry && typeof entry === "object" && (entry.fiveHour || entry.weekly || entry.id)) {
+        map.set(entry.id || key, { id: entry.id || key, ...entry });
+      }
+    }
+  }
+  return map;
+}
+
+function extractClaudeWindow(win) {
+  if (!win || typeof win !== "object") return null;
+  const usedVal = numberValue(win.utilization ?? win.usedPercent ?? win.used_percent ?? win.used);
+  const remVal = numberValue(win.remainingPercent ?? win.remaining_percent ?? win.remaining);
+  let usedPercent;
+  let remainingPercent;
+
+  if (remVal !== undefined) {
+    remainingPercent = remVal <= 1 && remVal > 0 ? Math.round(remVal * 100) : Math.max(0, Math.min(100, Math.round(remVal)));
+    usedPercent = Math.max(0, 100 - remainingPercent);
+  } else if (usedVal !== undefined) {
+    usedPercent = usedVal <= 1 && usedVal > 0 ? Math.round(usedVal * 100) : Math.max(0, Math.min(100, Math.round(usedVal)));
+    remainingPercent = Math.max(0, 100 - usedPercent);
+  }
+
+  const rawReset = win.resetsAtMs ?? win.resetsAt ?? win.resetAt ?? win.reset ?? win.resets_at ?? win.resets_at_ms ?? win.resetTime ?? win.reset_time;
+  let resetAt;
+  let resetTimeFormatted;
+
+  if (rawReset !== undefined && rawReset !== null && rawReset !== "") {
+    let ms;
+    if (typeof rawReset === "number" && Number.isFinite(rawReset)) {
+      ms = rawReset >= 1e11 ? rawReset : rawReset * 1000;
+    } else {
+      const parsed = Date.parse(String(rawReset));
+      if (Number.isFinite(parsed)) ms = parsed;
+      else {
+        const num = Number(rawReset);
+        if (Number.isFinite(num)) ms = num >= 1e11 ? num : num * 1000;
+      }
+    }
+    if (Number.isFinite(ms)) {
+      resetAt = ms / 1000;
+      resetTimeFormatted = new Date(ms).toISOString();
+    }
+  }
+
+  if (usedPercent === undefined && remainingPercent === undefined && resetAt === undefined) {
+    return null;
+  }
+
+  return {
+    usedPercent: usedPercent ?? 0,
+    remainingPercent: remainingPercent ?? (usedPercent !== undefined ? 100 - usedPercent : 100),
+    ...(resetAt !== undefined ? { resetAt } : {}),
+    ...(resetTimeFormatted !== undefined ? { resetTimeFormatted, resetTime: resetTimeFormatted } : {}),
+  };
+}
+
+export function claudeAccountPoolMetrics(poolState, usageDoc) {
+  const activeAccounts = Object.values(poolState?.accounts || {}).filter(
+    (account) => account?.state === "active" && !account?.paused,
+  );
+  if (!activeAccounts.length) {
+    return { metrics: [], accounts: [] };
+  }
+
+  const selectedId = poolState?.policy?.selectedAccountId;
+  if (selectedId) {
+    activeAccounts.sort((a, b) => Number(b.id === selectedId) - Number(a.id === selectedId));
+  }
+
+  const usageByAccountId = extractUsageAccounts(usageDoc);
+  const metrics = [];
+  const accounts = [];
+
+  for (const account of activeAccounts) {
+    const usageEntry = usageByAccountId.get(account.id) || {};
+    const accountName = account.label || account.identity?.email || account.email || usageEntry.email || account.id;
+
+    let healthStatus = "healthy";
+    if (account.health?.state) {
+      healthStatus = account.health.state;
+    }
+    if (account.health?.cooldownUntil) {
+      const cd = Date.parse(account.health.cooldownUntil);
+      if (Number.isFinite(cd) && cd > Date.now()) {
+        healthStatus = "cooldown";
+      }
+    }
+    if (usageEntry.authInvalid === true || account.health?.state === "reauth-required") {
+      healthStatus = "reauth-required";
+    }
+
+    const fiveHour = extractClaudeWindow(usageEntry.fiveHour || usageEntry["5h"] || usageEntry.five_hour);
+    const weekly = extractClaudeWindow(usageEntry.weekly || usageEntry["7d"] || usageEntry.seven_day || usageEntry.sevenDay);
+
+    const accountSummary = {
+      id: account.id,
+      title: accountName,
+      accountName,
+      label: account.label || accountName,
+      ...(account.identity?.email || account.email || usageEntry.email
+        ? { email: account.identity?.email || account.email || usageEntry.email }
+        : {}),
+      health: healthStatus,
+      status: healthStatus,
+      healthStatus,
+      ...(fiveHour ? {
+        fiveHour,
+        utilization5h: fiveHour.usedPercent,
+        remaining5h: fiveHour.remainingPercent,
+      } : {}),
+      ...(weekly ? {
+        weekly,
+        utilization7d: weekly.usedPercent,
+        remaining7d: weekly.remainingPercent,
+      } : {}),
+      ...(fiveHour?.resetTimeFormatted || weekly?.resetTimeFormatted ? {
+        resetTimesFormatted: [
+          fiveHour?.resetTimeFormatted ? `5h: ${fiveHour.resetTimeFormatted}` : null,
+          weekly?.resetTimeFormatted ? `7d: ${weekly.resetTimeFormatted}` : null,
+        ].filter(Boolean).join(" · "),
+        resetTimeFormatted: fiveHour?.resetTimeFormatted || weekly?.resetTimeFormatted,
+      } : {}),
+    };
+    accounts.push(accountSummary);
+
+    if (fiveHour) {
+      metrics.push({
+        kind: "quota",
+        label: activeAccounts.length > 1 ? `${accountName} (5-hour limit)` : "5-hour limit",
+        title: accountName,
+        accountName,
+        accountId: account.id,
+        accountLabel: account.label || accountName,
+        health: healthStatus,
+        status: healthStatus,
+        usedPercent: fiveHour.usedPercent,
+        remainingPercent: fiveHour.remainingPercent,
+        used: fiveHour.usedPercent,
+        limit: 100,
+        remaining: fiveHour.remainingPercent,
+        unit: "percent",
+        fiveHour,
+        ...(fiveHour.resetAt !== undefined ? { resetAt: fiveHour.resetAt } : {}),
+        ...(fiveHour.resetTimeFormatted !== undefined ? {
+          resetTime: fiveHour.resetTimeFormatted,
+          resetTimeFormatted: fiveHour.resetTimeFormatted,
+        } : {}),
+        detail: [
+          accountName,
+          healthStatus !== "healthy" ? healthStatus : undefined,
+          fiveHour.resetTimeFormatted ? `Resets ${fiveHour.resetTimeFormatted}` : undefined,
+        ].filter(Boolean).join(" · "),
+      });
+    }
+
+    if (weekly) {
+      metrics.push({
+        kind: "quota",
+        label: activeAccounts.length > 1 ? `${accountName} (Weekly limit)` : "Weekly limit",
+        title: accountName,
+        accountName,
+        accountId: account.id,
+        accountLabel: account.label || accountName,
+        health: healthStatus,
+        status: healthStatus,
+        usedPercent: weekly.usedPercent,
+        remainingPercent: weekly.remainingPercent,
+        used: weekly.usedPercent,
+        limit: 100,
+        remaining: weekly.remainingPercent,
+        unit: "percent",
+        weekly,
+        ...(weekly.resetAt !== undefined ? { resetAt: weekly.resetAt } : {}),
+        ...(weekly.resetTimeFormatted !== undefined ? {
+          resetTime: weekly.resetTimeFormatted,
+          resetTimeFormatted: weekly.resetTimeFormatted,
+        } : {}),
+        detail: [
+          accountName,
+          healthStatus !== "healthy" ? healthStatus : undefined,
+          weekly.resetTimeFormatted ? `Resets ${weekly.resetTimeFormatted}` : undefined,
+        ].filter(Boolean).join(" · "),
+      });
+    }
+  }
+
+  return { metrics, accounts };
+}
+
+async function anthropicAccount(fetchImpl) {
+  const poolPath = process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_POOL || CLAUDE_ACCOUNT_POOL_PATH;
+  const usagePath = process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_USAGE || CLAUDE_ACCOUNT_USAGE_CACHE_PATH;
+  if (claudeAccountPoolConfigured({ filePath: poolPath })) {
+    try {
+      const poolState = readClaudeAccountPoolState(poolPath);
+      const usageDoc = readClaudeAccountUsageDocument(usagePath);
+      const { metrics, accounts } = claudeAccountPoolMetrics(poolState, usageDoc);
+      if (metrics.length > 0) {
+        return {
+          status: "configured",
+          source: "claude-account-pool",
+          metrics,
+          accounts,
+        };
+      }
+    } catch {
+      // fall through to fallback
+    }
+  }
+  return resolveProviderCredential("anthropic-api")
+    ? withHeaderQuota(
+        "anthropic-api",
+        localOnly("Anthropic API account balance is unavailable; showing router traffic"),
+      )
+    : { status: "not-configured", source: "official-api", metrics: [] };
+}
+
 async function accountUsageFor(providerId, fetchImpl) {
   try {
     if (providerId === "chutes") return await chutesAccount(fetchImpl);
@@ -927,12 +1170,7 @@ async function accountUsageFor(providerId, fetchImpl) {
         : { status: "not-configured", source: "official-api", metrics: [] };
     }
     if (providerId === "anthropic-api") {
-      return resolveProviderCredential("anthropic-api")
-        ? withHeaderQuota(
-            providerId,
-            localOnly("Anthropic API account balance is unavailable; showing router traffic"),
-          )
-        : { status: "not-configured", source: "official-api", metrics: [] };
+      return await anthropicAccount(fetchImpl);
     }
     if (providerId === "zai-coding") return await zaiCodingAccount(fetchImpl);
     if (providerId === "zai-api") {
@@ -1017,6 +1255,10 @@ async function accountUsageFor(providerId, fetchImpl) {
       message: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+export async function providerAccountUsage(providerId, fetchImpl = fetch) {
+  return accountUsageFor(providerId, fetchImpl);
 }
 
 export async function providerAccountUsageSnapshot({

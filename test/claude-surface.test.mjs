@@ -26,14 +26,14 @@ function routedModels() {
   };
 }
 
-async function fixture(handler) {
+async function fixture(handler, customRoutedModels = routedModels) {
   const upstream = http.createServer(handler);
   const upstreamPort = await listen(upstream);
   const surface = http.createServer((request, response) => {
     const route = new URL(request.url, `http://${request.headers.host}`).pathname;
     handleClaudeRequest(request, response, route, {
       responsesUrl: `http://127.0.0.1:${upstreamPort}/v1/responses`,
-      routedModels,
+      routedModels: customRoutedModels,
     });
   });
   const surfacePort = await listen(surface);
@@ -176,4 +176,142 @@ test("tool and image blocks map to the canonical request shape", () => {
   });
   assert.equal(converted.model, "deepseek/test");
   assert.equal(converted.input[0].content[1].image_url, "data:image/png;base64,AA==");
+});
+
+test("429 pool exhaustion upstream error translates cleanly to Claude Code rate_limit_error with earliest reset message preserved", async () => {
+  const exhaustionMessage = "All 3 Claude accounts in the pool are currently unavailable (3 quota-exhausted, 0 auth invalid, 0 cooling). Earliest quota reset: 2026-09-24T23:59:00.000Z.";
+  const app = await fixture((_request, response) => {
+    response.writeHead(429, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      error: {
+        type: "claude_account_pool_exhausted",
+        message: exhaustionMessage,
+        param: null,
+        code: "pool_exhausted",
+      },
+    }));
+  });
+  try {
+    const response = await fetch(`${app.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "codex_router/anthropic/openai/gpt-test",
+        max_tokens: 32,
+        messages: [{ role: "user", content: "ping" }],
+      }),
+    });
+    assert.equal(response.status, 429);
+    const body = await response.json();
+    assert.equal(body.type, "error");
+    assert.equal(body.error.type, "rate_limit_error");
+    assert.equal(body.error.message, exhaustionMessage);
+  } finally {
+    await app.close();
+  }
+});
+
+test("503 pool exhaustion upstream error translates cleanly to Claude Code rate_limit_error with earliest reset message preserved", async () => {
+  const exhaustionMessage = "All 2 Claude accounts in the pool are currently unavailable (2 quota-exhausted, 0 auth invalid, 0 cooling). Earliest quota reset: 2026-09-25T02:00:00.000Z.";
+  const app = await fixture((_request, response) => {
+    response.writeHead(503, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      error: {
+        type: "claude_account_pool_exhausted",
+        message: exhaustionMessage,
+        code: "pool_exhausted",
+      },
+    }));
+  });
+  try {
+    const response = await fetch(`${app.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "codex_router/anthropic/openai/gpt-test",
+        max_tokens: 32,
+        messages: [{ role: "user", content: "ping" }],
+      }),
+    });
+    assert.equal(response.status, 503);
+    const body = await response.json();
+    assert.equal(body.type, "error");
+    assert.equal(body.error.type, "rate_limit_error");
+    assert.equal(body.error.message, exhaustionMessage);
+  } finally {
+    await app.close();
+  }
+});
+
+test("streaming pool exhaustion error event is translated to Claude Code rate_limit_error", async () => {
+  const exhaustionMessage = "All 2 Claude accounts in the pool are currently unavailable (2 quota-exhausted, 0 auth invalid, 0 cooling). Earliest quota reset: 2026-09-25T01:00:00.000Z.";
+  const app = await fixture((_request, response) => {
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write(`data: ${JSON.stringify({
+      type: "error",
+      error: {
+        type: "claude_account_pool_exhausted",
+        message: exhaustionMessage,
+      },
+    })}\n\n`);
+    response.end();
+  });
+  try {
+    const response = await fetch(`${app.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "codex_router/anthropic/openai/gpt-test",
+        max_tokens: 16,
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    const stream = await response.text();
+    assert.match(stream, /event: error/);
+    assert.match(stream, /"type":"rate_limit_error"/);
+    assert.match(stream, /Earliest quota reset: 2026-09-25T01:00:00\.000Z\./);
+  } finally {
+    await app.close();
+  }
+});
+
+test("model listing and count_tokens keep working when pool-served", async () => {
+  function poolServedModels() {
+    return {
+      engine: "test",
+      models: [
+        { slug: "anthropic-api/claude-opus-4.8", displayName: "Claude Opus 4.8", priority: 10 },
+        { slug: "anthropic-api/claude-sonnet-4.6", displayName: "Claude Sonnet 4.6", priority: 20 },
+      ],
+    };
+  }
+  const app = await fixture((_request, response) => {
+    response.writeHead(500);
+    response.end();
+  }, poolServedModels);
+  try {
+    // Model listing
+    const catalog = await fetch(`${app.baseUrl}/v1/models`).then((r) => r.json());
+    assert.deepEqual(catalog.data.map((m) => m.id), [
+      "codex_router/anthropic/anthropic-api/claude-opus-4.8",
+      "codex_router/anthropic/anthropic-api/claude-sonnet-4.6",
+    ]);
+
+    // count_tokens does not touch credentials or make upstream network calls
+    const countRes = await fetch(`${app.baseUrl}/v1/messages/count_tokens`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "codex_router/anthropic/anthropic-api/claude-opus-4.8",
+        messages: [{ role: "user", content: "Hello world, count my tokens." }],
+      }),
+    });
+    assert.equal(countRes.status, 200);
+    const countBody = await countRes.json();
+    assert.equal(typeof countBody.input_tokens, "number");
+    assert.ok(countBody.input_tokens > 0);
+  } finally {
+    await app.close();
+  }
 });

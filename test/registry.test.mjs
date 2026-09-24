@@ -2017,3 +2017,31 @@ test("Muse Spark 1.2 routes normalize forced tool choices model-by-model", () =>
     assert.equal(MODEL_BY_SLUG.get(slug)?.requestProfile, undefined, slug);
   }
 });
+
+test("an unknown extra field on a provider fails the registry load", async () => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const nodePath = (await import("node:path")).default;
+  const { spawnSync } = await import("node:child_process");
+  const dir = mkdtempSync(nodePath.join(tmpdir(), "registry-extra-field-test-"));
+  try {
+    const document = readRegistryDocument("config");
+    document.providers = document.providers.map((p) =>
+      p.id === "deepseek" ? { ...p, unsupportedExtraField: true } : p
+    );
+    const registryPath = nodePath.join(dir, "providers.json");
+    writeFileSync(registryPath, JSON.stringify(document));
+    const result = spawnSync(
+      process.execPath,
+      [
+        "-e",
+        "import('./src/model-registry.mjs').catch((e)=>{console.error(e.message);process.exit(1);})",
+      ],
+      { encoding: "utf8", env: { ...process.env, MODEL_ROUTER_REGISTRY: registryPath } },
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /provider deepseek has unsupported field unsupportedExtraField/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -37,6 +37,7 @@ import { serviceFollowsHostApps } from "./presence-state.mjs";
 import { waitForRouterHealth } from "./router-health.mjs";
 import {
   CALLER_SECRET_PATH,
+  CLAUDE_ACCOUNT_POOL_PATH,
   CLAUDE_CATALOG_PATH,
   CLAUDE_LAUNCHER_PATH,
   CODEX_AGENTS_DIR,
@@ -67,6 +68,10 @@ import {
   skillRequiredFields,
 } from "./skills-install.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
+import {
+  claudeAccountPoolConfigured,
+  readClaudeAccountPoolState,
+} from "./claude-account-pool.mjs";
 import { credentialLabel } from "./provider-credentials.mjs";
 import { providerApiKeyPoolsSnapshot } from "./provider-api-key-pool.mjs";
 import {
@@ -1114,6 +1119,51 @@ const poolAuthoritySnapshot = {
     ]),
   ),
 };
+
+const claudePoolExists = existsSync(CLAUDE_ACCOUNT_POOL_PATH);
+const anthropicSelected = selection.providers.includes("anthropic-api");
+if (claudePoolExists || anthropicSelected) {
+  if (credentialDiscoveryOff) {
+    add(
+      "warn",
+      "Claude account pool",
+      "pool not evaluated while credential discovery is disabled",
+      "Re-run ./bin/setup without --no-discovery to re-enable it.",
+    );
+  } else if (!claudePoolExists) {
+    add(
+      "warn",
+      "Claude account pool",
+      "not configured",
+      "Run ./bin/control claude-account-pool add to register an account.",
+    );
+  } else {
+    try {
+      const isConfigured = claudeAccountPoolConfigured();
+      const state = readClaudeAccountPoolState(CLAUDE_ACCOUNT_POOL_PATH);
+      const accounts = Object.values(state.accounts || {});
+      const total = accounts.length;
+      const active = accounts.filter((account) => account.state === "active" && !account.paused).length;
+      if (isConfigured && active > 0) {
+        add("ok", "Claude account pool", `${active} active account(s) (${total} total)`);
+      } else {
+        add(
+          "warn",
+          "Claude account pool",
+          "pool is configured but contains no active accounts",
+          "Run ./bin/control claude-account-pool add to register an account.",
+        );
+      }
+    } catch {
+      add(
+        anthropicSelected ? "fail" : "warn",
+        "Claude account pool",
+        "pool state is invalid",
+        "Repair or delete claude-account-pool.json, then rerun the doctor.",
+      );
+    }
+  }
+}
 
 for (const warning of RUNTIME_PROVIDER_WARNINGS) {
   add(

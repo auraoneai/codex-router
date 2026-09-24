@@ -101,6 +101,33 @@ import {
 } from "./openai-endpoint-policy.mjs";
 import { vertexAdapterForModel } from "./vertex-adapters.mjs";
 import { vertexForwardBaseUrl } from "./vertex-endpoint.mjs";
+import { setTimeout as sleep } from "node:timers/promises";
+import {
+  CLAUDE_ACCOUNT_HOMES_DIR,
+  CLAUDE_ACCOUNT_POOL_PATH,
+  CLAUDE_ACCOUNT_USAGE_CACHE_PATH,
+} from "./paths.mjs";
+import {
+  claudeAccountPoolConfigured,
+  readClaudeAccountPoolState,
+} from "./claude-account-pool.mjs";
+import {
+  claudePoolExhaustionReport,
+  claudeRotationCandidates,
+  coolClaudeAccount,
+  isClaudeAccountAuthInvalid,
+  markClaudeAccountAuthInvalid,
+  rememberClaudeAccount,
+} from "./claude-account-rotation.mjs";
+import {
+  cachedClaudeAccountUsageById,
+  recordClaudeAccountUsage,
+} from "./claude-account-usage.mjs";
+import { ensureFreshClaudeOAuthToken } from "./claude-oauth-session.mjs";
+import {
+  claudeSharedRejection,
+  parseClaudeUnifiedHeaders,
+} from "./rate-limit-headers.mjs";
 
 installStableFetchTransport();
 
@@ -1475,7 +1502,15 @@ function normalizeBody(buffer, contentType, route) {
   };
 }
 
-function upstreamHeaders(requestHeaders, body, apiKey, provider, extraHeaders = {}, endpoint = provider) {
+function upstreamHeaders(
+  requestHeaders,
+  body,
+  apiKey,
+  provider,
+  extraHeaders = {},
+  endpoint = provider,
+  authKind = undefined,
+) {
   const headers = {};
   const providerIdentityHeaders = new Set([
     "copilot-integration-id",
@@ -1500,11 +1535,19 @@ function upstreamHeaders(requestHeaders, body, apiKey, provider, extraHeaders = 
     }
     if (value !== undefined) headers[name] = Array.isArray(value) ? value.join(", ") : value;
   }
+  const resolvedAuthKind = authKind || extraHeaders?.authKind;
+  const cleanExtraHeaders = { ...extraHeaders };
+  delete cleanExtraHeaders.authKind;
+
   if (provider.generic === true || endpoint.authMode === "anonymous") {
     // The upstream explicitly permits anonymous access -- for a reseller's
     // free-model subset, a single allowlisted community endpoint, or the
     // generic-provider boundary which injects its own confined credential.
     // Never forward the gateway's internal bearer token to any of them.
+  } else if (resolvedAuthKind === "claude-oauth") {
+    headers.Authorization = `Bearer ${apiKey}`;
+    headers["anthropic-beta"] = "oauth-2025-04-20";
+    headers["anthropic-version"] ||= "2023-06-01";
   } else if (provider.protocol === "anthropic") {
     headers["x-api-key"] = apiKey;
     headers["anthropic-version"] ||= "2023-06-01";
@@ -1513,7 +1556,7 @@ function upstreamHeaders(requestHeaders, body, apiKey, provider, extraHeaders = 
   }
   headers["User-Agent"] = `codex-router/${VERSION}`;
   headers["Accept-Encoding"] = "identity";
-  Object.assign(headers, extraHeaders);
+  Object.assign(headers, cleanExtraHeaders);
   // OpenCode Go/Zen affinity must win over any session.headers merge above:
   // starting 2026-09-06 their edge may refuse requests without this header.
   applyOpenCodeSessionHeaders(headers, {
@@ -1533,6 +1576,7 @@ async function relayUpstreamResponse(
   response,
   startedAt,
   telemetryUpstream = upstream,
+  claudeAccountInfo = undefined,
 ) {
   const upstreamContentType = upstream.headers.get("content-type") || "";
   const responsesStream = normalized.responseAdapter === "responses" &&
@@ -1568,6 +1612,16 @@ async function relayUpstreamResponse(
   if (responsesJson) response.setHeader("Content-Type", "application/json; charset=utf-8");
   await pipeResponse(upstream, response, denylist, transform);
   recordUpstreamLimits(normalized, telemetryUpstream);
+  if (claudeAccountInfo?.accountId) {
+    try {
+      recordClaudeAccountUsage(claudeAccountInfo.accountId, telemetryUpstream.headers, {
+        plan: claudeAccountInfo.account?.subscription?.plan,
+        email: claudeAccountInfo.account?.identity?.email,
+        poolPath: claudeAccountInfo.poolPath,
+        usagePath: claudeAccountInfo.usagePath,
+      });
+    } catch {}
+  }
   if (!QUIET) {
     console.error(
       `[api-forwarder] provider=${normalized.provider.id} model=${normalized.model.upstreamModel} status=${upstream.status} duration_ms=${Date.now() - startedAt}`,
@@ -1656,6 +1710,12 @@ function recordUpstreamLimits(normalized, upstream) {
   if (upstream.ok) return;
   const until = cooldownUntil(rateLimit);
   if (!until) return;
+  // When a Claude pool is configured, suppress the provider-wide cooldown
+  // recording for one account's quota rejection (per-account state is authoritative;
+  // one drained account must not cool the whole provider).
+  if (normalized.provider.id === "anthropic-api" && claudeAccountPoolConfigured()) {
+    return;
+  }
   // The provider id is passed through unresolved: `recordProviderCooldown`
   // keys the window by cooldown scope, and pre-canonicalizing here would file
   // a separately billed variant's window under the subscription it does not
@@ -1708,6 +1768,270 @@ function healthPayload() {
     };
   }
   return { ok, service: "codex-router-api-forwarder", providers };
+}
+
+async function runClaudeAccountAttempts(normalized, {
+  request,
+  upstreamBody,
+  route,
+  requestUrl,
+  conversationId,
+  controller,
+  latencyTrace,
+  isResponseCommitted,
+  affinityHeaders = {},
+  poolPath = CLAUDE_ACCOUNT_POOL_PATH,
+  homesDir = CLAUDE_ACCOUNT_HOMES_DIR,
+  usagePath = CLAUDE_ACCOUNT_USAGE_CACHE_PATH,
+} = {}) {
+  const usageById = cachedClaudeAccountUsageById({ usagePath });
+  const candidates = claudeRotationCandidates({
+    conversationId,
+    usageById,
+    poolPath,
+    homesDir,
+  });
+  if (candidates.length === 0) {
+    const exhaustion = claudePoolExhaustionReport({ poolPath, homesDir, usageById });
+    if (exhaustion?.exhausted && (exhaustion.drained > 0 || exhaustion.cooling > 0)) {
+      return { exhausted: true, exhaustion };
+    }
+    return {
+      unavailable: true,
+      message: "The Claude account pool is configured, but no usable Claude account credentials could be resolved.",
+    };
+  }
+
+  const attempted = new Set();
+  let candidateIndex = 0;
+  let headerless429Hops = 0;
+
+  while (candidateIndex < candidates.length) {
+    if (typeof isResponseCommitted === "function" && isResponseCommitted()) {
+      return { committed: true };
+    }
+
+    const candidate = candidates[candidateIndex];
+    candidateIndex++;
+
+    if (attempted.has(candidate.id)) {
+      continue;
+    }
+    attempted.add(candidate.id);
+
+    let poolState;
+    try {
+      poolState = readClaudeAccountPoolState(poolPath);
+    } catch {
+      poolState = null;
+    }
+    const account = poolState?.accounts?.[candidate.id];
+    if (!account || account.state !== "active" || account.paused) {
+      continue;
+    }
+
+    if (isClaudeAccountAuthInvalid(candidate.id, { tokenFingerprint: candidate.tokenFingerprint })) {
+      continue;
+    }
+
+    let tokenSession;
+    try {
+      tokenSession = await ensureFreshClaudeOAuthToken(candidate.id, { homesDir });
+    } catch (refreshErr) {
+      markClaudeAccountAuthInvalid(candidate.id, {
+        tokenFingerprint: candidate.tokenFingerprint,
+        reason: refreshErr?.message || "refresh_failed",
+        poolPath,
+      });
+      continue;
+    }
+    if (!tokenSession?.accessToken) {
+      continue;
+    }
+
+    const baseUrl = providerBaseUrl(normalized.endpoint) || "https://api.anthropic.com";
+    const target = upstreamTarget({ baseUrl }, normalized, route, requestUrl.search);
+    const headers = upstreamHeaders(
+      request.headers,
+      upstreamBody,
+      tokenSession.accessToken,
+      normalized.provider,
+      {
+        "anthropic-beta": "oauth-2025-04-20",
+        ...affinityHeaders,
+      },
+      normalized.endpoint,
+      "claude-oauth",
+    );
+
+    const attemptRecord = latencyTrace?.beginAttempt?.({
+      provider: canonicalProviderId(normalized.provider.id),
+      model: normalized.model?.upstreamModel,
+      kind: "claude_account_attempt",
+    });
+
+    let attemptResponse;
+    try {
+      attemptResponse = await fetch(target, {
+        method: request.method,
+        headers,
+        body: upstreamBody,
+        signal: controller.signal,
+        redirect: route === "/embeddings" ? "error" : "follow",
+      });
+      latencyTrace?.finishAttemptRecord?.(attemptRecord, { response: attemptResponse });
+    } catch (fetchErr) {
+      latencyTrace?.finishAttemptRecord?.(attemptRecord, { error: fetchErr });
+      if (typeof isResponseCommitted === "function" && isResponseCommitted()) {
+        throw fetchErr;
+      }
+      continue;
+    }
+
+    const unified = parseClaudeUnifiedHeaders(attemptResponse.headers);
+    const retryAfter = retryAfterSeconds(attemptResponse.headers);
+
+    if (attemptResponse.ok) {
+      rememberClaudeAccount(conversationId, candidate.id);
+      return {
+        ok: true,
+        status: attemptResponse.status,
+        response: attemptResponse,
+        headers: attemptResponse.headers,
+        accountId: candidate.id,
+        account,
+        target,
+        poolPath,
+        usagePath,
+      };
+    }
+
+    if (attemptResponse.status === 401) {
+      markClaudeAccountAuthInvalid(candidate.id, {
+        tokenFingerprint: tokenSession.tokenFingerprint,
+        reason: "unauthorized_401",
+        poolPath,
+      });
+      if (!isResponseCommitted?.()) {
+        await attemptResponse.body?.cancel().catch(() => {});
+        continue;
+      }
+      return {
+        ok: false,
+        status: 401,
+        response: attemptResponse,
+        headers: attemptResponse.headers,
+        accountId: candidate.id,
+        account,
+        target,
+      };
+    }
+
+    if (attemptResponse.status === 403) {
+      const bodyText = (await readResponseBody(attemptResponse, { signal: controller.signal })).toString("utf8");
+      if (bodyText.includes("oauth_not_allowed_for_organization")) {
+        coolClaudeAccount(candidate.id, Date.now() + 5 * 60 * 1000, { poolPath });
+      }
+      if (!isResponseCommitted?.()) {
+        continue;
+      }
+      return {
+        ok: false,
+        status: 403,
+        response: new Response(bodyText, { status: 403, headers: attemptResponse.headers }),
+        headers: attemptResponse.headers,
+        accountId: candidate.id,
+        account,
+        target,
+      };
+    }
+
+    if (attemptResponse.status === 429) {
+      const isUnifiedRejection = unified?.status === "rejected" || claudeSharedRejection(attemptResponse.headers);
+      const hasUnifiedHeaders = Boolean(unified?.fiveHour || unified?.weekly || unified?.fable || unified?.status);
+
+      if (isUnifiedRejection || hasUnifiedHeaders) {
+        const resetsAt = unified?.fiveHour?.resetsAtMs || unified?.weekly?.resetsAtMs;
+        const cd = resetsAt && resetsAt > Date.now() ? resetsAt : Date.now() + 5 * 60 * 1000;
+        coolClaudeAccount(candidate.id, cd, { poolPath });
+        recordClaudeAccountUsage(candidate.id, attemptResponse.headers, {
+          plan: account?.subscription?.plan,
+          email: account?.identity?.email,
+          poolPath,
+          usagePath,
+        });
+        if (!isResponseCommitted?.()) {
+          await attemptResponse.body?.cancel().catch(() => {});
+          continue;
+        }
+        return {
+          ok: false,
+          status: 429,
+          response: attemptResponse,
+          headers: attemptResponse.headers,
+          accountId: candidate.id,
+          account,
+          target,
+        };
+      } else if (retryAfter !== undefined && retryAfter > 0) {
+        if (retryAfter <= 60 && !isResponseCommitted?.()) {
+          await attemptResponse.body?.cancel().catch(() => {});
+          await sleep(retryAfter * 1000);
+          attempted.delete(candidate.id);
+          candidateIndex = Math.max(0, candidateIndex - 1);
+          continue;
+        }
+        return {
+          ok: false,
+          status: 429,
+          response: attemptResponse,
+          headers: attemptResponse.headers,
+          accountId: candidate.id,
+          account,
+          target,
+        };
+      } else {
+        if (headerless429Hops === 0 && candidateIndex < candidates.length && !isResponseCommitted?.()) {
+          headerless429Hops++;
+          await attemptResponse.body?.cancel().catch(() => {});
+          await sleep(2000);
+          continue;
+        }
+        return {
+          ok: false,
+          status: 429,
+          response: attemptResponse,
+          headers: attemptResponse.headers,
+          accountId: candidate.id,
+          account,
+          target,
+        };
+      }
+    }
+
+    if (!isResponseCommitted?.()) {
+      await attemptResponse.body?.cancel().catch(() => {});
+      continue;
+    }
+    return {
+      ok: false,
+      status: attemptResponse.status,
+      response: attemptResponse,
+      headers: attemptResponse.headers,
+      accountId: candidate.id,
+      account,
+      target,
+    };
+  }
+
+  const exhaustion = claudePoolExhaustionReport({ poolPath, homesDir, usageById });
+  if (exhaustion?.exhausted && (exhaustion.drained > 0 || exhaustion.cooling > 0)) {
+    return { exhausted: true, exhaustion };
+  }
+  return {
+    unavailable: true,
+    message: "The Claude account pool could not complete this request before response bytes were committed.",
+  };
 }
 
 function localModels(response) {
@@ -1831,6 +2155,108 @@ async function handleRequest(request, response) {
     return;
   }
 
+  // Fetch may detach a Buffer's backing ArrayBuffer while sending it. Copilot
+  // can replay once after refreshing account routing, so use one immutable
+  // string for both attempts instead of trying to reuse detached bytes.
+  const upstreamBody = normalized.provider.authProfile === "github-copilot"
+    ? normalized.body.toString("utf8")
+    : normalized.body;
+  let session;
+  let target;
+  let upstream;
+  let deferredUpstreamLimits;
+  let claudeAccountInfo;
+
+  // When provider anthropic-api has a configured Claude account pool, the pool is
+  // authoritative and the legacy single key is not used.
+  const isClaudeProvider = normalized.provider.id === "anthropic-api";
+  let claudePoolConfigured = false;
+  if (isClaudeProvider) {
+    try {
+      claudePoolConfigured = claudeAccountPoolConfigured();
+    } catch {
+      claudePoolConfigured = false;
+    }
+  }
+
+  if (claudePoolConfigured && route !== "/embeddings") {
+    let claudeAttemptSuccess = false;
+    try {
+      const claudeAttemptResult = await runClaudeAccountAttempts(normalized, {
+        request,
+        upstreamBody,
+        route,
+        requestUrl,
+        conversationId,
+        controller,
+        latencyTrace,
+        isResponseCommitted: () => response.headersSent || response.writableEnded || response.writableFinished,
+        affinityHeaders,
+      });
+
+      if (claudeAttemptResult.committed) {
+        return;
+      }
+      if (claudeAttemptResult.exhausted) {
+        writeJson(response, 429, {
+          error: {
+            message: claudeAttemptResult.exhaustion.message,
+            type: "claude_account_pool_exhausted",
+            param: null,
+            code: "pool_exhausted",
+            pool_state: {
+              total: claudeAttemptResult.exhaustion.total,
+              healthy: claudeAttemptResult.exhaustion.healthy,
+              drained: claudeAttemptResult.exhaustion.drained,
+              auth_invalid: claudeAttemptResult.exhaustion.authInvalid,
+              cooling: claudeAttemptResult.exhaustion.cooling,
+              next_reset_at: claudeAttemptResult.exhaustion.nextResetAt,
+            },
+          },
+        });
+        return;
+      }
+      if (claudeAttemptResult.unavailable) {
+        writeJson(response, 503, {
+          error: {
+            type: "claude_account_pool_unavailable",
+            provider: normalized.provider.id,
+            message: claudeAttemptResult.message,
+          },
+        });
+        return;
+      }
+      if (claudeAttemptResult.response) {
+        upstream = claudeAttemptResult.response;
+        target = claudeAttemptResult.target;
+        claudeAccountInfo = {
+          accountId: claudeAttemptResult.accountId,
+          account: claudeAttemptResult.account,
+          poolPath: claudeAttemptResult.poolPath,
+          usagePath: claudeAttemptResult.usagePath,
+        };
+        claudeAttemptSuccess = true;
+      }
+    } catch (rotationError) {
+      // Rotation-never-fails-a-turn: a throwing rotation dependency leaves the request
+      // completing on the legacy credential if available.
+      console.error(`[api-forwarder] Claude rotation dependency failed: ${formatErrorChain(rotationError)}`);
+      claudeAttemptSuccess = false;
+    }
+
+    if (claudeAttemptSuccess && upstream) {
+      await relayUpstreamResponse(
+        normalized,
+        upstream,
+        response,
+        startedAt,
+        upstream,
+        claudeAccountInfo,
+      );
+      return;
+    }
+  }
+
   // Resolved against the endpoint, not the provider: a per-model endpoint keeps
   // its credential under its own slug, so two custom models on two hosts never
   // share a key and one missing key never blocks the other model. A configured
@@ -1917,16 +2343,6 @@ async function handleRequest(request, response) {
     await relayThroughPlan();
     return;
   }
-  // Fetch may detach a Buffer's backing ArrayBuffer while sending it. Copilot
-  // can replay once after refreshing account routing, so use one immutable
-  // string for both attempts instead of trying to reuse detached bytes.
-  const upstreamBody = normalized.provider.authProfile === "github-copilot"
-    ? normalized.body.toString("utf8")
-    : normalized.body;
-  let session;
-  let target;
-  let upstream;
-  let deferredUpstreamLimits;
   if (poolRouting.pooled && route !== "/embeddings") {
     const pooled = await runProviderApiKeyAttempts(normalized.endpoint.id, {
       filePath: undefined,

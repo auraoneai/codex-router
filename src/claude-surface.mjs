@@ -8,6 +8,7 @@ import {
   writeJson,
 } from "./http-utils.mjs";
 import { claudeModelId, claudeRoutedSlug } from "./claude-model-id.mjs";
+import { claudePoolExhaustionReport } from "./claude-account-rotation.mjs";
 
 export const CLAUDE_ROUTE_PREFIX = "/anthropic";
 const MAX_BODY_BYTES = 32 * 1024 * 1024;
@@ -314,9 +315,25 @@ async function upstreamError(upstream) {
   const text = await upstream.text();
   try {
     const parsed = JSON.parse(text);
+    const rawType = parsed?.error?.type || parsed?.type;
+    const isPoolExhausted = rawType === "claude_account_pool_exhausted" ||
+      rawType === "chatgpt_account_pool_exhausted" ||
+      parsed?.error?.code === "claude_account_pool_exhausted" ||
+      parsed?.error?.code === "chatgpt_account_pool_exhausted" ||
+      parsed?.code === "claude_account_pool_exhausted" ||
+      parsed?.code === "chatgpt_account_pool_exhausted";
+    const message = parsed?.error?.message || parsed?.message ||
+      (isPoolExhausted ? claudePoolExhaustionReport()?.message : null) ||
+      `The routed model returned HTTP ${upstream.status}.`;
+    if (isPoolExhausted) {
+      return {
+        type: "rate_limit_error",
+        message,
+      };
+    }
     return {
       type: parsed?.error?.type || "api_error",
-      message: parsed?.error?.message || parsed?.message || `The routed model returned HTTP ${upstream.status}.`,
+      message,
     };
   } catch {
     return { type: "api_error", message: text || `The routed model returned HTTP ${upstream.status}.` };
@@ -405,8 +422,16 @@ async function handleStream(request, response, upstream, requestedModel) {
   try {
     for await (const event of sseFrames(upstream.body)) {
       if (["response.failed", "response.error", "error"].includes(event?.type)) {
-        const message = event?.error?.message || event?.response?.error?.message || "The routed model failed.";
-        response.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "api_error", message } })}\n\n`);
+        const rawType = event?.error?.type || event?.response?.error?.type;
+        const isPoolExhausted = rawType === "claude_account_pool_exhausted" ||
+          rawType === "chatgpt_account_pool_exhausted" ||
+          event?.error?.code === "claude_account_pool_exhausted" ||
+          event?.response?.error?.code === "claude_account_pool_exhausted";
+        const message = event?.error?.message || event?.response?.error?.message ||
+          (isPoolExhausted ? claudePoolExhaustionReport()?.message : null) ||
+          "The routed model failed.";
+        const type = isPoolExhausted ? "rate_limit_error" : (rawType || "api_error");
+        response.write(`event: error\ndata: ${JSON.stringify({ type: "error", error: { type, message } })}\n\n`);
         state.completed = true;
         state.failed = true;
         break;
@@ -474,11 +499,17 @@ export async function handleClaudeRequest(request, response, route, { responsesU
     else writeJson(response, 200, responsesToClaudeMessage(await upstream.json(), requestedModel));
   } catch (error) {
     if (!response.headersSent) {
+      const rawType = error?.type || error?.code;
+      const isPoolExhausted = rawType === "claude_account_pool_exhausted" ||
+        rawType === "chatgpt_account_pool_exhausted";
+      const message = isPoolExhausted
+        ? (error?.message || claudePoolExhaustionReport()?.message || "All Claude accounts in the pool are currently quota-exhausted.")
+        : formatErrorChain(error);
       writeClaudeError(
         response,
-        error?.status || 502,
-        error?.type || "api_error",
-        formatErrorChain(error),
+        error?.status || (isPoolExhausted ? 429 : 502),
+        isPoolExhausted ? "rate_limit_error" : (error?.type || "api_error"),
+        message,
       );
     } else if (!response.writableEnded) {
       response.end();

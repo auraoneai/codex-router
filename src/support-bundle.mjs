@@ -40,6 +40,9 @@ import {
 import { genericProviderConfigured } from "./generic-provider-readiness.mjs";
 import {
   CALLER_SECRET_PATH,
+  CLAUDE_ACCOUNT_HOMES_DIR,
+  CLAUDE_ACCOUNT_POOL_PATH,
+  CLAUDE_ACCOUNT_USAGE_CACHE_PATH,
   CODEX_HOME,
   CONFIG_PATH,
   CURSOR_PUBLIC_SECRET_PATH,
@@ -49,6 +52,7 @@ import {
   STATE_DIR,
   SUPPORT_DIR,
 } from "./paths.mjs";
+import { claudeSubscriptionAccountPoolSnapshot } from "./claude-account-pool.mjs";
 import {
   credentialPaths,
   credentialStatus,
@@ -444,9 +448,18 @@ export function createSupportBundle(options = {}) {
     ownership: detectLegacyInstallations(),
     install: sharableInstallManifest(),
     engineering: engineeringSupportSnapshot(),
+    claudeAccountPool: (() => {
+      try {
+        return discoveryDisabled() ? { discoveryDisabled: true } : claudeSubscriptionAccountPoolSnapshot();
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    })(),
     files: {
       config: fileMetadata(CONFIG_PATH),
       log: fileMetadata(LOG_PATH),
+      claudeAccountPool: fileMetadata(CLAUDE_ACCOUNT_POOL_PATH),
+      claudeAccountUsage: fileMetadata(CLAUDE_ACCOUNT_USAGE_CACHE_PATH),
     },
   };
 

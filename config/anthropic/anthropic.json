@@ -19,6 +19,11 @@
           "codex-router-anthropic-api"
         ],
         "prompt": "Anthropic API key"
+      },
+      "subscriptionCredential": {
+        "kind": "claudeAiOauth",
+        "file": "credentials.json",
+        "prompt": "Claude subscription login (imported from Claude Code)"
       }
     }
   ]

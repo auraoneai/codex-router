@@ -16,6 +16,7 @@ Four pieces make the integration work:
 - A dispatcher chooses native or external routing by namespaced model ID.
 - LiteLLM translates Responses requests, streams, and tool calls.
 - Credential forwarders inject only the selected provider's authentication.
+- Multi-account subscription pools provide autonomous failover and quota rotation for ChatGPT and Claude subscription accounts.
 
 ## Request flow
 
@@ -202,12 +203,22 @@ Messages-native providers cannot declare this OpenAI endpoint.
 
 | Route | Incoming Codex credential | Upstream credential |
 | --- | --- | --- |
-| Native GPT, image generation, and web search | Allow-listed and forwarded | Existing ChatGPT/Codex authentication |
+| Native GPT, image generation, and web search | Allow-listed and forwarded | Existing ChatGPT/Codex authentication (or rotated ChatGPT pool account) |
+| ChatGPT Account Pool | Replaced per turn | Isolated ChatGPT login token (`chatgpt-accounts/<id>/auth.json`) + `chatgpt-account-id` |
+| Claude Subscription Pool | Discarded (or caller capability on Claude surface) | Refreshed Claude OAuth bearer (`Authorization: Bearer` + `anthropic-beta: oauth-2025-04-20`, strictly no `x-api-key`) |
 | Kimi OAuth | Discarded | Kimi CLI OAuth bearer from `~/.kimi-code` |
 | Kimi API | Discarded | Kimi Platform API key |
 | DeepSeek | Discarded | DeepSeek API key |
 | GitHub Copilot | Discarded | Stored fine-grained GitHub token, after Copilot entitlement and endpoint validation |
 | Capability-gated embeddings | Router caller capability is consumed locally | The selected routed provider's isolated credential |
+
+## Multi-account subscription pooling and rotation
+
+Codex Router provides autonomous multi-account pooling, failover, and rate-limit mitigation for both ChatGPT and Claude subscription accounts:
+
+- **ChatGPT Account Pool** (`chatgpt-account-pool.json`): Manages multiple ChatGPT/Codex logins with isolated credentials under `chatgpt-accounts/<id>/auth.json`. Rotates per native turn using `rotatedNativeHeaders()`, monitors early quota replenishment with background usage probes, respects conversation affinity, orders plans (Plus before Pro), and fails over in-flight on 429 quota exhaustion. (Detailed in [CHATGPT-ACCOUNT-ROTATION.md](file:///Users/gurbakshchahal/codex-router/docs/CHATGPT-ACCOUNT-ROTATION.md)).
+- **Claude Subscription Account Pool** (`claude-account-pool.json`): Manages multiple Claude subscription logins with isolated credentials under `claude-accounts/<id>/credentials.json`. Outbound requests inject OAuth Bearer tokens with `anthropic-beta: oauth-2025-04-20` (never mixing with `x-api-key`), passively learn 5-hour and 7-day quota windows from `anthropic-ratelimit-unified-*` headers, order accounts by subscription tier weights (`pro` before `max5`/`max20`/`team`), pace per-minute burst throttles inline, and transparently fail over on quota exhaustion. (Detailed in [CLAUDE-ACCOUNT-ROTATION.md](file:///Users/gurbakshchahal/codex-router/docs/CLAUDE-ACCOUNT-ROTATION.md)).
+
 
 The Codex-to-router and internal-service trust boundaries use two different
 random keys, each stored with mode `600` or a current-user Windows ACL. Neither

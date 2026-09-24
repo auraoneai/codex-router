@@ -158,3 +158,136 @@ export function cooldownUntil(snapshot) {
   if (!candidates.length) return undefined;
   return candidates.sort()[candidates.length - 1];
 }
+
+// Claude subscription quota, reported as utilization fractions on every
+// response an OAuth account produces. These are the windows that drive account
+// rotation, and they are a different shape from the API-key windows above:
+// utilization (0-1, not a count) against a reset epoch in *seconds*, with a
+// per-response upstream verdict and a model-family weekly bucket that rides
+// only that family's responses. Parsed here so the forwarder's per-account
+// learner and every status surface share one reading of the same headers.
+//
+// Header names verified against Anthropic's own subscription traffic (see
+// docs/CLAUDE-ACCOUNT-ROTATION-PRD.md section 1.1); absence of any of them is
+// normal -- plain API-key responses carry none -- so a partial or missing set
+// means "unknown window", never an error.
+
+const UNIFIED_STATUS_VALUES = new Set(["allowed", "allowed_warning", "rejected"]);
+
+// An epoch-seconds reset header as epoch milliseconds, or undefined. The
+// unified windows report absolute epochs (unlike the durations and relative
+// seconds the API-key windows accept), so anything that is not a positive
+// integer is treated as absent and never stored: a NaN reset would park an
+// account out of rotation forever because `now >= NaN` is always false.
+function unifiedResetMs(value) {
+  // headers.get answers null for a header that was never sent, and
+  // Number(null) is 0 -- a value that would parse as "epoch 0" below. An
+  // absent header is absent, not a zero.
+  if (value === null || value === undefined || value === "") return undefined;
+  const number = Number(value);
+  if (!Number.isInteger(number) || number <= 0) return undefined;
+  // 1e12 is year 33658 in seconds and ~1970-01-12 in milliseconds; above it
+  // the value is already milliseconds, below it is seconds from the epoch.
+  return number >= 1e12 ? number : number * 1000;
+}
+
+// A utilization fraction (0..~1.2; the family window may exceed 1 in overage),
+// or undefined when the header is absent or not a finite number.
+function utilizationFraction(value) {
+  // The same null-as-zero trap: Number(null) is 0, so a window an absent
+  // header never reported would read as freshly empty.
+  if (value === null || value === undefined || value === "") return undefined;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : undefined;
+}
+
+function unifiedWindow(utilization, resetValue, now = Date.now()) {
+  const used = utilizationFraction(utilization);
+  const resetMs = unifiedResetMs(resetValue);
+  if (used === undefined && resetMs === undefined) return undefined;
+  return {
+    ...(used !== undefined ? {
+      usedPercent: Math.round(used * 100),
+      remainingPercent: Math.max(0, Math.round((1 - used) * 100)),
+    } : {}),
+    ...(resetMs !== undefined ? { resetsAtMs: resetMs } : {}),
+  };
+}
+
+function unifiedStatus(value, now = Date.now()) {
+  const text = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return UNIFIED_STATUS_VALUES.has(text) ? { value: text, seenAtMs: now } : undefined;
+}
+
+// The whole Claude unified reading from one response's headers. `headers` is a
+// fetch Headers instance (case-insensitive), matching parseRateLimitHeaders.
+// Every field is optional: a response may report only the windows it can see,
+// and an empty reading returns undefined so callers skip persistence entirely.
+export function parseClaudeUnifiedHeaders(headers, { now = Date.now() } = {}) {
+  if (!headers || typeof headers.get !== "function") return undefined;
+  const fiveHour = unifiedWindow(
+    headers.get("anthropic-ratelimit-unified-5h-utilization"),
+    headers.get("anthropic-ratelimit-unified-5h-reset"),
+    now,
+  );
+  const weekly = unifiedWindow(
+    headers.get("anthropic-ratelimit-unified-7d-utilization"),
+    headers.get("anthropic-ratelimit-unified-7d-reset"),
+    now,
+  );
+  // The 7d_oi family bucket ("7-day, overage included") rides Fable responses
+  // only, so its reading carries the moment it was observed: a spent family
+  // reading is trusted for a bounded staleness window and then dropped, since
+  // nothing but another Fable request can refresh it.
+  const fableSeenAtMs = headers.get("anthropic-ratelimit-unified-7d_oi-utilization") !== null
+    ? now
+    : undefined;
+  const fableWindow = unifiedWindow(
+    headers.get("anthropic-ratelimit-unified-7d_oi-utilization"),
+    headers.get("anthropic-ratelimit-unified-7d_oi-reset"),
+    now,
+  );
+  const fable = fableWindow && fableSeenAtMs !== undefined
+    ? { ...fableWindow, seenAtMs: fableSeenAtMs }
+    : undefined;
+  const status = unifiedStatus(headers.get("anthropic-ratelimit-unified-status"), now);
+  const fiveHourStatus = unifiedStatus(headers.get("anthropic-ratelimit-unified-5h-status"), now);
+  const weeklyStatus = unifiedStatus(headers.get("anthropic-ratelimit-unified-7d-status"), now);
+  const fableStatus = unifiedStatus(headers.get("anthropic-ratelimit-unified-7d_oi-status"), now);
+  const windowStatuses = {
+    ...(fiveHourStatus ? { fiveHour: fiveHourStatus.value } : {}),
+    ...(weeklyStatus ? { weekly: weeklyStatus.value } : {}),
+    ...(fableStatus ? { fable: fableStatus.value } : {}),
+  };
+  if (!fiveHour && !weekly && !fable && !status && !Object.keys(windowStatuses).length) {
+    return undefined;
+  }
+  return {
+    ...(fiveHour ? { fiveHour } : {}),
+    ...(weekly ? { weekly } : {}),
+    ...(fable ? { fable } : {}),
+    ...(status ? { status: status.value, statusSeenAtMs: status.seenAtMs } : {}),
+    windowStatuses,
+    observedAtMs: now,
+  };
+}
+
+// Which shared window (5h or 7d), if either, signed the rejection that the
+// overall `-unified-status: rejected` verdict describes. A family-cap 429
+// (Fable's 7d_oi bucket spent) also carries the overall rejected verdict while
+// the shared 5h/7d statuses on the same response still say allowed, so a
+// rejection the shared windows did not sign -- or explicitly cleared -- is the
+// family's, and the account stays usable for every other model. When the
+// per-window statuses are silent the overall verdict is the only signal and is
+// read as shared, because assuming "family" on silence would retry a spent
+// shared bucket onto the same account all night.
+export function claudeSharedRejection(reading) {
+  if (!reading) return false;
+  if (reading.status !== "rejected") return false;
+  const statuses = reading.windowStatuses || {};
+  const shared = [statuses.fiveHour, statuses.weekly];
+  if (shared.some((value) => value === "rejected")) return true;
+  if (shared.some((value) => value && value !== "rejected")) return false;
+  if (statuses.fable === "rejected") return false;
+  return true;
+}

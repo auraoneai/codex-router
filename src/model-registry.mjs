@@ -188,6 +188,32 @@ export function readRegistryDocument(root = REGISTRY_PATH) {
   return { version: 1, providers, models };
 }
 
+const ALLOWED_PROVIDER_FIELDS = new Set([
+  "id",
+  "kind",
+  "displayName",
+  "ownedBy",
+  "baseUrl",
+  "baseUrlEnv",
+  "credential",
+  "subscriptionCredential",
+  "authMode",
+  "authProfile",
+  "keyless",
+  "explicitSelection",
+  "perModelEndpoint",
+  "planNote",
+  "protocol",
+  "transport",
+  "proxyBaseEnv",
+  "variantOf",
+  "anonymousModelPolicy",
+  "anonymousModels",
+  "anonymousNote",
+  "models",
+  "modelGarden",
+]);
+
 function loadRegistry() {
   const parsed = readRegistryDocument();
   if (!Array.isArray(parsed.providers) || !Array.isArray(parsed.models)) {
@@ -201,6 +227,11 @@ function loadRegistry() {
     }
     if (!/^[a-z0-9][a-z0-9-]*$/.test(provider.id || "")) {
       fail(`invalid provider id ${JSON.stringify(provider.id)}`);
+    }
+    for (const key of Object.keys(provider)) {
+      if (!ALLOWED_PROVIDER_FIELDS.has(key)) {
+        fail(`provider ${provider.id} has unsupported field ${key}`);
+      }
     }
     if (providers.has(provider.id)) fail(`duplicate provider id ${provider.id}`);
     if (!["oauth", "openai-compatible"].includes(provider.kind)) {
@@ -371,6 +402,24 @@ function loadRegistry() {
       }
       if (provider.transport === "ollama" && !provider.keyless) {
         fail(`provider ${provider.id} Ollama transport must be keyless`);
+      }
+      if (provider.subscriptionCredential !== undefined) {
+        if (
+          !provider.subscriptionCredential ||
+          typeof provider.subscriptionCredential !== "object" ||
+          Array.isArray(provider.subscriptionCredential)
+        ) {
+          fail(`provider ${provider.id} has invalid subscriptionCredential metadata`);
+        }
+        if (provider.subscriptionCredential.kind !== "claudeAiOauth") {
+          fail(`provider ${provider.id} has unsupported subscriptionCredential kind`);
+        }
+        if (
+          typeof provider.subscriptionCredential.file !== "string" ||
+          !provider.subscriptionCredential.file.trim()
+        ) {
+          fail(`provider ${provider.id} subscriptionCredential requires file`);
+        }
       }
     }
     providers.set(provider.id, Object.freeze(provider));

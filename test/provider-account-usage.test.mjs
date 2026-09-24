@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import {
   chutesBalanceMetrics,
   chutesSubscriptionMetrics,
+  claudeAccountPoolMetrics,
   commandCodeCreditsMetrics,
   deepSeekBalanceMetrics,
   githubCopilotQuotaMetrics,
@@ -14,6 +18,7 @@ import {
   opencodeGoUsageMetrics,
   openRouterCreditsMetrics,
   openRouterKeyMetrics,
+  providerAccountUsage,
   providerAccountUsageSnapshot,
   veniceBalanceMetrics,
 } from "../src/provider-account-usage.mjs";
@@ -1087,4 +1092,337 @@ test("Vertex usage does not probe Google Cloud and reports router traffic only",
   });
   assert.equal(snapshot.vertex.status, "local-only");
   assert.match(snapshot.vertex.message, /Google Cloud Console/);
+});
+
+test("claudeAccountPoolMetrics extracts per-account 5h and weekly metrics and formats reset times", () => {
+  const poolState = {
+    version: 1,
+    policy: { enabled: true, mode: "switch", selectedAccountId: "clacct_work111" },
+    accounts: {
+      clacct_work111: {
+        id: "clacct_work111",
+        state: "active",
+        label: "Work Pro",
+        identity: { email: "work@example.com" },
+        health: { state: "healthy" },
+      },
+      clacct_pers222: {
+        id: "clacct_pers222",
+        state: "active",
+        label: "Personal Pro",
+        identity: { email: "personal@example.com" },
+        health: { state: "cooldown", cooldownUntil: new Date(Date.now() + 300000).toISOString() },
+      },
+      clacct_reauth333: {
+        id: "clacct_reauth333",
+        state: "active",
+        label: "Team Seat",
+        health: { state: "reauth-required" },
+      },
+      clacct_paused444: {
+        id: "clacct_paused444",
+        state: "active",
+        paused: true,
+        label: "Paused Account",
+        health: { state: "healthy" },
+      },
+      clacct_revoked555: {
+        id: "clacct_revoked555",
+        state: "revoked",
+        label: "Revoked Account",
+        health: { state: "healthy" },
+      },
+    },
+  };
+
+  const usageDoc = {
+    fetchedAt: new Date().toISOString(),
+    accounts: [
+      {
+        id: "clacct_work111",
+        fiveHour: {
+          usedPercent: 20,
+          remainingPercent: 80,
+          resetsAtMs: 1788220800000,
+        },
+        weekly: {
+          usedPercent: 35,
+          remainingPercent: 65,
+          resetsAtMs: 1788500000000,
+        },
+      },
+      {
+        id: "clacct_pers222",
+        fiveHour: {
+          utilization: 0.9,
+          reset: 1788220800,
+        },
+        weekly: {
+          remaining_percent: 10,
+          resetsAtMs: 1788500000000,
+        },
+      },
+      {
+        id: "clacct_reauth333",
+        authInvalid: true,
+        fiveHour: {
+          usedPercent: 100,
+          remainingPercent: 0,
+        },
+      },
+      {
+        id: "clacct_paused444",
+        fiveHour: { usedPercent: 10, remainingPercent: 90 },
+      },
+    ],
+  };
+
+  const { metrics, accounts } = claudeAccountPoolMetrics(poolState, usageDoc);
+
+  assert.equal(accounts.length, 3);
+  assert.equal(accounts[0].id, "clacct_work111");
+  assert.equal(accounts[0].accountName, "Work Pro");
+  assert.equal(accounts[0].email, "work@example.com");
+  assert.equal(accounts[0].health, "healthy");
+  assert.equal(accounts[0].fiveHour.remainingPercent, 80);
+  assert.equal(accounts[0].fiveHour.usedPercent, 20);
+  assert.equal(accounts[0].weekly.remainingPercent, 65);
+  assert.equal(accounts[0].weekly.usedPercent, 35);
+  assert.equal(accounts[0].fiveHour.resetTimeFormatted, "2026-09-01T00:00:00.000Z");
+  assert.equal(accounts[0].fiveHour.resetAt, 1788220800);
+
+  assert.equal(accounts[1].id, "clacct_pers222");
+  assert.equal(accounts[1].health, "cooldown");
+  assert.equal(accounts[1].fiveHour.usedPercent, 90);
+  assert.equal(accounts[1].fiveHour.remainingPercent, 10);
+  assert.equal(accounts[1].weekly.usedPercent, 90);
+  assert.equal(accounts[1].weekly.remainingPercent, 10);
+
+  assert.equal(accounts[2].id, "clacct_reauth333");
+  assert.equal(accounts[2].health, "reauth-required");
+
+  assert.equal(metrics.length, 5);
+
+  const work5h = metrics.find((m) => m.accountId === "clacct_work111" && m.label.includes("5-hour"));
+  assert.ok(work5h);
+  assert.equal(work5h.kind, "quota");
+  assert.equal(work5h.title, "Work Pro");
+  assert.equal(work5h.accountName, "Work Pro");
+  assert.equal(work5h.remainingPercent, 80);
+  assert.equal(work5h.usedPercent, 20);
+  assert.equal(work5h.unit, "percent");
+  assert.equal(work5h.resetAt, 1788220800);
+  assert.equal(work5h.resetTimeFormatted, "2026-09-01T00:00:00.000Z");
+  assert.equal(work5h.health, "healthy");
+
+  const workWeekly = metrics.find((m) => m.accountId === "clacct_work111" && m.label.includes("Weekly"));
+  assert.ok(workWeekly);
+  assert.equal(workWeekly.remainingPercent, 65);
+  assert.equal(workWeekly.usedPercent, 35);
+
+  const pers5h = metrics.find((m) => m.accountId === "clacct_pers222" && m.label.includes("5-hour"));
+  assert.ok(pers5h);
+  assert.equal(pers5h.health, "cooldown");
+  assert.equal(pers5h.remainingPercent, 10);
+  assert.equal(pers5h.usedPercent, 90);
+
+  const reauth5h = metrics.find((m) => m.accountId === "clacct_reauth333");
+  assert.ok(reauth5h);
+  assert.equal(reauth5h.health, "reauth-required");
+  assert.equal(reauth5h.remainingPercent, 0);
+  assert.equal(reauth5h.usedPercent, 100);
+});
+
+test("anthropic-api reports pool-aware metrics when Claude account pool is configured", async () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "claude-pool-usage-test-"));
+  const poolPath = path.join(stateDir, "claude-account-pool.json");
+  const usagePath = path.join(stateDir, "claude-account-usage.json");
+
+  const poolState = {
+    version: 1,
+    policy: { enabled: true, mode: "switch", selectedAccountId: "clacct_main1234" },
+    accounts: {
+      clacct_main1234: {
+        id: "clacct_main1234",
+        state: "active",
+        paused: false,
+        priority: 50,
+        turns: 0,
+        requests: 0,
+        createdAt: new Date().toISOString(),
+        label: "Primary Claude",
+        identity: { accountId: "uuid-main", email: "operator@example.com" },
+        health: { state: "healthy" },
+      },
+      clacct_backup12: {
+        id: "clacct_backup12",
+        state: "active",
+        paused: false,
+        priority: 50,
+        turns: 0,
+        requests: 0,
+        createdAt: new Date().toISOString(),
+        label: "Secondary Claude",
+        identity: { accountId: "uuid-backup", email: "backup@example.com" },
+        health: { state: "healthy" },
+      },
+    },
+  };
+
+  const usageDoc = {
+    fetchedAt: new Date().toISOString(),
+    accounts: [
+      {
+        id: "clacct_main1234",
+        fiveHour: {
+          usedPercent: 15,
+          remainingPercent: 85,
+          resetsAtMs: 1788220800000,
+        },
+        weekly: {
+          usedPercent: 25,
+          remainingPercent: 75,
+          resetsAtMs: 1788500000000,
+        },
+      },
+      {
+        id: "clacct_backup12",
+        fiveHour: {
+          usedPercent: 0,
+          remainingPercent: 100,
+          resetsAtMs: 1788220800000,
+        },
+        weekly: {
+          usedPercent: 5,
+          remainingPercent: 95,
+          resetsAtMs: 1788500000000,
+        },
+      },
+    ],
+  };
+
+  writeFileSync(poolPath, JSON.stringify(poolState));
+  writeFileSync(usagePath, JSON.stringify(usageDoc));
+
+  const savedPool = process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_POOL;
+  const savedUsage = process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_USAGE;
+  process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_POOL = poolPath;
+  process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_USAGE = usagePath;
+
+  try {
+    const result = await providerAccountUsage("anthropic-api");
+    assert.equal(result.status, "configured");
+    assert.equal(result.source, "claude-account-pool");
+    assert.equal(result.accounts.length, 2);
+    assert.equal(result.accounts[0].accountName, "Primary Claude");
+    assert.equal(result.accounts[0].email, "operator@example.com");
+    assert.equal(result.accounts[0].fiveHour.remainingPercent, 85);
+    assert.equal(result.accounts[0].weekly.remainingPercent, 75);
+    assert.equal(result.accounts[1].accountName, "Secondary Claude");
+
+    assert.equal(result.metrics.length, 4);
+    const primary5h = result.metrics.find((m) => m.accountId === "clacct_main1234" && m.label.includes("5-hour"));
+    assert.ok(primary5h);
+    assert.equal(primary5h.remainingPercent, 85);
+    assert.equal(primary5h.unit, "percent");
+    assert.equal(primary5h.resetAt, 1788220800);
+    assert.equal(primary5h.title, "Primary Claude");
+
+    // Also verify providerAccountUsageSnapshot
+    const snapshot = await providerAccountUsageSnapshot({ providerIds: ["anthropic-api"] });
+    assert.equal(snapshot["anthropic-api"].status, "configured");
+    assert.equal(snapshot["anthropic-api"].source, "claude-account-pool");
+    assert.equal(snapshot["anthropic-api"].metrics.length, 4);
+  } finally {
+    if (savedPool === undefined) delete process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_POOL;
+    else process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_POOL = savedPool;
+    if (savedUsage === undefined) delete process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_USAGE;
+    else process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_USAGE = savedUsage;
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("anthropic-api falls back to router traffic when pool is empty or unconfigured", async () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "claude-pool-empty-test-"));
+  const poolPath = path.join(stateDir, "claude-account-pool.json");
+  const usagePath = path.join(stateDir, "claude-account-usage.json");
+
+  const savedPool = process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_POOL;
+  const savedUsage = process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_USAGE;
+  const savedKey = process.env.ANTHROPIC_API_KEY;
+
+  try {
+    // 1. Unconfigured pool file (file does not exist) + with API key
+    process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_POOL = poolPath;
+    process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_USAGE = usagePath;
+    process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
+
+    const withKeyUnconfigured = await providerAccountUsage("anthropic-api");
+    assert.equal(withKeyUnconfigured.status, "local-only");
+    assert.equal(withKeyUnconfigured.source, "local-router");
+    assert.match(withKeyUnconfigured.message, /Anthropic API account balance is unavailable; showing router traffic/);
+
+    // 2. Unconfigured pool + no API key
+    delete process.env.ANTHROPIC_API_KEY;
+    const withoutKeyUnconfigured = await providerAccountUsage("anthropic-api");
+    assert.equal(withoutKeyUnconfigured.status, "not-configured");
+    assert.equal(withoutKeyUnconfigured.source, "official-api");
+    assert.deepEqual(withoutKeyUnconfigured.metrics, []);
+
+    // 3. Pool configured with active accounts but no cached usage metrics
+    const emptyPoolState = {
+      version: 1,
+      policy: { enabled: true, mode: "switch" },
+      accounts: {
+        clacct_active01: {
+          id: "clacct_active01",
+          state: "active",
+          paused: false,
+          priority: 50,
+          turns: 0,
+          requests: 0,
+          createdAt: new Date().toISOString(),
+          label: "Active Account",
+          health: { state: "healthy" },
+        },
+      },
+    };
+    writeFileSync(poolPath, JSON.stringify(emptyPoolState));
+    writeFileSync(usagePath, JSON.stringify({ fetchedAt: new Date().toISOString(), accounts: [] }));
+
+    process.env.ANTHROPIC_API_KEY = "test-anthropic-key";
+    const noMetricsResult = await providerAccountUsage("anthropic-api");
+    assert.equal(noMetricsResult.status, "local-only");
+    assert.match(noMetricsResult.message, /Anthropic API account balance is unavailable; showing router traffic/);
+
+    // 4. Pool configured but disabled
+    const disabledPool = {
+      version: 1,
+      policy: { enabled: false, mode: "switch" },
+      accounts: {
+        clacct_active01: {
+          id: "clacct_active01",
+          state: "active",
+          paused: false,
+          priority: 50,
+          turns: 0,
+          requests: 0,
+          createdAt: new Date().toISOString(),
+          label: "Active Account",
+          health: { state: "healthy" },
+        },
+      },
+    };
+    writeFileSync(poolPath, JSON.stringify(disabledPool));
+    const disabledResult = await providerAccountUsage("anthropic-api");
+    assert.equal(disabledResult.status, "local-only");
+  } finally {
+    if (savedPool === undefined) delete process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_POOL;
+    else process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_POOL = savedPool;
+    if (savedUsage === undefined) delete process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_USAGE;
+    else process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_USAGE = savedUsage;
+    if (savedKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = savedKey;
+    rmSync(stateDir, { recursive: true, force: true });
+  }
 });

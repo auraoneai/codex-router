@@ -100,6 +100,40 @@ codex-router control chatgpt-account-pool usage cached    # what rotation sees n
 present in `accounts` but absent from `rotation` was excluded for being drained
 or cooling down after a 429.
 
+### Claude subscription account rotation
+`src/claude-account-pool.mjs`, `src/claude-account-rotation.mjs`,
+`src/claude-account-usage.mjs`, `src/claude-oauth-credentials.mjs`,
+`src/claude-oauth-session.mjs`, `src/claude-account-control.mjs`, and wiring in
+`src/claude-surface.mjs` and `src/api-forwarder.mjs`.
+
+Upstream provides no subscription pooling for Claude accounts. Operators who
+maintain multiple Claude subscription tiers (e.g. Pro, Max, Team) were stuck
+with a single API key or manually switching logins in Claude Code.
+
+Claude subscription rotation gives Anthropic routes and Claude Code the same
+autonomous multi-account pooling that exists for ChatGPT:
+- Imports Claude Code OAuth credentials without new browser flows or third-party
+  proxies.
+- Injects `Authorization: Bearer <token>` and `anthropic-beta: oauth-2025-04-20`
+  strictly without `x-api-key`.
+- Proactively refreshes tokens within 5 minutes of expiry and persists them
+  atomically per account.
+- Passively learns 5-hour and 7-day rate-limit windows (`anthropic-ratelimit-unified-*`)
+  on real responses without quota-consuming polling.
+- Orders accounts by subscription tier weight (`pro` before `max5`/`max20`/`team`)
+  to spend smaller confirmed capacity first before drawing on reserve tiers.
+- Paces per-minute burst throttles inline to preserve Anthropic prompt caching;
+  rotates instantly on unified quota exhaustion.
+- Preserves earliest quota reset timestamps and cleanly translates pool exhaustion
+  to Claude Code's `rate_limit_error`.
+
+Inspect it with:
+
+```sh
+codex-router control claude-account-pool status
+codex-router control claude-account-pool usage cached
+```
+
 ### Restored modules
 - `src/operator-model.mjs` -- records the last routed model actually run, so a
   compaction that omits its model can inherit it. An explicit native or routed

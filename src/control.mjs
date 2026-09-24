@@ -3904,6 +3904,16 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
   throw new Error("Usage: control chatgpt-account-pool status|add [label]|home <acct_id>|login-finalize <acct_id> <lease>|remove <acct_id>|select <acct_id>|reset-credit <acct_id>|usage [cached]|profile status|profile reconcile");
 }
 
+async function handleClaudeAccountControl(action, value) {
+  if (discoveryDisabled()) {
+    throw new Error(
+      "Claude account profiles are unavailable while credential discovery is disabled.",
+    );
+  }
+  const { handleClaudeAccountPool } = await import("./claude-account-control.mjs");
+  await handleClaudeAccountPool(action, value);
+}
+
 // The public `/health` leaf intentionally contains only the router summary and
 // a closed set of degraded dependency names. Desktop surfaces need the richer
 // local service view, but should not be handed the forwarders' credential
@@ -4019,6 +4029,8 @@ if (args.includes("--probe")) {
   await handleChatGptSession(args[1]);
 } else if (args[0] === "chatgpt-account-pool") {
   await handleChatGptAccountSwitch(args[1], args[2], args[3]);
+} else if (args[0] === "claude-account-pool") {
+  await handleClaudeAccountControl(args[1], args[2]);
 } else if (args[0] === "activity") {
   if (args.length > 2) throw new Error("Usage: control activity [thread-id]");
   process.stdout.write(`${JSON.stringify(await readControlActivity({ threadId: args[1] }))}\n`);

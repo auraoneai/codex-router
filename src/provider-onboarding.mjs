@@ -40,6 +40,12 @@ import {
   spawnEnvironment,
 } from "./npm-global-install.mjs";
 import { ensureNodeDependencies } from "./node-dependency-install.mjs";
+import { discoveryDisabled } from "./discovery-mode.mjs";
+import {
+  claudeAccountPoolConfigured,
+  claudeSubscriptionAccountPoolSnapshot,
+  readClaudeAccountPoolState,
+} from "./claude-account-pool.mjs";
 import { commandOnPath, spawnableCommand } from "./spawnable-command.mjs";
 
 const SIGN_IN_CLIS = Object.freeze({
@@ -195,12 +201,13 @@ export function providerOnboardingSnapshot() {
           ...(catalogSources.length ? { catalogSources } : {}),
         };
       }
-      const configured = providerNeedsNoKey(provider)
+      const poolConfigured = provider.id === "anthropic-api" && claudeAccountPoolConfigured();
+      const configured = poolConfigured || (providerNeedsNoKey(provider)
         ? true
         : effectiveProviderCredentialStatus(provider, {
             persistent: true,
             poolAuthoritySnapshot,
-          }).configured;
+          }).configured);
       const credentialResolver = provider.credential?.resolver;
       const entry = {
         id: provider.id,
@@ -225,6 +232,13 @@ export function providerOnboardingSnapshot() {
           ? { configurationNote: credentialSetupHint(provider) }
           : {}),
       };
+      if (provider.id === "anthropic-api" && poolConfigured && !discoveryDisabled()) {
+        try {
+          entry.claudeAccountPool = claudeSubscriptionAccountPoolSnapshot();
+        } catch {
+          // Guard against snapshot read failures
+        }
+      }
       if (credentialResolver) return entry;
       // A container has no key field of its own. Saying so is the whole card:
       // an "Add Key" button here would store a secret nothing ever reads.

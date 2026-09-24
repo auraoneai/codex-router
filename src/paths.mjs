@@ -267,6 +267,23 @@ export const CHATGPT_PROFILE_SWITCH_PATH = path.join(STATE_DIR, "chatgpt-profile
 export const CHATGPT_ACCOUNT_USAGE_CACHE_PATH =
   process.env.MODEL_ROUTER_CHATGPT_ACCOUNT_USAGE ||
   path.join(STATE_DIR, "chatgpt-account-usage.json");
+// Claude subscription account pool. The policy file holds opaque account ids
+// and routing metadata only; each account's Claude Code OAuth blob lives in an
+// isolated private home, mirroring the ChatGPT account homes above. The
+// account id is always validated before it is appended to this directory.
+export const CLAUDE_ACCOUNT_POOL_PATH =
+  process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_POOL ||
+  path.join(STATE_DIR, "claude-account-pool.json");
+export const CLAUDE_ACCOUNT_HOMES_DIR =
+  process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_HOMES ||
+  path.join(STATE_DIR, "claude-accounts");
+// Last per-account quota reading, learned passively from the unified
+// rate-limit headers the Anthropic upstream reports on every response. It
+// holds remaining-percent windows and reset times, never a credential; a
+// stale or absent document degrades rotation rather than breaking it.
+export const CLAUDE_ACCOUNT_USAGE_CACHE_PATH =
+  process.env.MODEL_ROUTER_CLAUDE_ACCOUNT_USAGE ||
+  path.join(STATE_DIR, "claude-account-usage.json");
 // User-defined OpenAI-compatible provider descriptors. The document contains
 // no raw credentials; credentialRef values point to the provider-neutral store.
 export const GENERIC_PROVIDERS_PATH =
