@@ -30,6 +30,39 @@ const read = (relative) => {
 };
 const countOf = (text, needle) => (text ? text.split(needle).length - 1 : 0);
 
+// Deliberately conservative source contracts: accept the known detached probe
+// shapes, then reject any remaining probe reference. A changed shape needs
+// review rather than silently broadening the hot-path exception.
+export function nativeRotationWiring(router) {
+  const wired = /function nativeHeaders[\s\S]{0,4000}rotatedNativeHeaders/.test(router)
+    && router.includes("rotationCandidates");
+  const firstCooldown = /if\s*\(!route && \(upstream\.status === 429 \|\| upstream\.status === 401\)\)\s*\{\s*coolNativeAccount\(headers, upstream\.status\)/.test(router);
+  const retryCooldown = /if\s*\(upstream\.status === 429 \|\| upstream\.status === 401\)\s*\{\s*coolNativeAccount\(nextHeaders, upstream\.status\)/.test(router);
+  if (!wired) return { ok: false, detail: "nativeHeaders() no longer calls rotatedNativeHeaders" };
+  if (!firstCooldown || !retryCooldown) {
+    return { ok: false, detail: "native 429/401 cooldown is missing from the first attempt or failover" };
+  }
+  return { ok: true, detail: "selection inside nativeHeaders; cooldown on first and failover native 429/401" };
+}
+
+export function nativeUsageProbeWiring(router) {
+  // Timer callbacks may await the probe because the request never awaits the
+  // callback. Match the entire callback body, not an arbitrary surrounding span.
+  const timerProbe = /set(?:Timeout|Interval)\(\s*async \(\) => \{\s*(?:lastPostTurnProbeAt = Date\.now\(\);\s*)?try \{\s*const \{ probeChatGPTAccountUsage \} = await import\("\.\/chatgpt-usage-probe\.mjs"\);\s*await probeChatGPTAccountUsage\(\);\s*\} catch \{(?:\s|\/\/[^\n]*)*\}\s*\},/g;
+  // The emergency refresh is detached, debounced, and returns no promise for a
+  // request to await. An added return/await or synchronous probe fails closed.
+  const emergencyProbe = /export function triggerEmergencyDepletionProbe\(\) \{\s*const now = Date\.now\(\);\s*if \(now - lastEmergencyProbeAt < 30_000\) return;(?:\s|\/\/[^\n]*)*lastEmergencyProbeAt = now;\s*import\("\.\/chatgpt-usage-probe\.mjs"\)\.then\(\(\{ probeChatGPTAccountUsage \}\) => \{\s*probeChatGPTAccountUsage\(\)\.catch\(\(\) => \{\}\);\s*\}\);\s*\}/g;
+  const foreground = router.replace(timerProbe, "BACKGROUND_TIMER(")
+    .replace(emergencyProbe, "BACKGROUND_EMERGENCY")
+    .replace('import { nextKnownResetAt } from "./chatgpt-usage-probe.mjs";', "");
+  if (/probeChatGPTAccountUsage|chatgpt-usage-probe\.mjs/.test(foreground)) {
+    return { ok: false, detail: "usage probe outside a reviewed detached background callback" };
+  }
+  return /usageById:\s*cachedAccountUsageById\(\)/.test(router)
+    ? { ok: true, detail: "rotation reads cached usage; timer and emergency probes are detached" }
+    : { ok: false, detail: "rotation no longer consumes the usage cache" };
+}
+
 const checks = [];
 const check = (name, why, run) => checks.push({ name, why, run });
 
@@ -61,31 +94,19 @@ check(
       return { ok: false, detail: "src/chatgpt-rotation.mjs is missing" };
     }
     const router = read("src/router.mjs") || "";
-    const wired = router.includes("rotatedNativeHeaders")
-      && router.includes("rotationCandidates")
-      && /function nativeHeaders[\s\S]{0,4000}rotatedNativeHeaders/.test(router);
-    const cools = router.includes("coolNativeAccountAfterRateLimit")
-      && /429[\s\S]{0,400}coolNativeAccountAfterRateLimit/.test(router);
-    if (!wired) return { ok: false, detail: "nativeHeaders() no longer calls rotatedNativeHeaders" };
-    if (!cools) return { ok: false, detail: "a native 429 no longer cools the refusing account" };
-    return { ok: true, detail: "selection inside nativeHeaders, cooldown on native 429" };
+    return nativeRotationWiring(router);
   },
 );
 
 check(
-  "The rotation quota probe is the only thing spawning an app-server",
+  "Native rotation reads cached usage while quota probes run in the background",
   "A probe on the request path would put a process spawn in front of every turn.",
   () => {
     if (!existsSync(path.join(ROOT, "src/chatgpt-usage-probe.mjs"))) {
       return { ok: false, detail: "src/chatgpt-usage-probe.mjs is missing" };
     }
     const router = read("src/router.mjs") || "";
-    if (router.includes("probeChatGPTAccountUsage")) {
-      return { ok: false, detail: "router.mjs probes usage inline; it must only read the cache" };
-    }
-    return router.includes("cachedAccountUsageById")
-      ? { ok: true, detail: "router reads the cached snapshot; probe stays out of the hot path" }
-      : { ok: false, detail: "router no longer reads the usage cache, so ranking is order-only" };
+    return nativeUsageProbeWiring(router);
   },
 );
 
@@ -146,13 +167,13 @@ check(
 
 check(
   "Restored modules are still present",
-  "All three were live on the installation when an upgrade dropped them.",
+  "These active runtime modules must survive upstream upgrades.",
   () => {
-    const missing = ["src/model-sync.mjs", "src/operator-model.mjs", "src/provider-latency-trace.mjs"]
+    const missing = ["src/operator-model.mjs", "src/provider-latency-trace.mjs"]
       .filter((file) => !existsSync(path.join(ROOT, file)));
     return missing.length
       ? { ok: false, detail: `missing: ${missing.join(", ")}` }
-      : { ok: true, detail: "model-sync, operator-model, provider-latency-trace present" };
+      : { ok: true, detail: "operator-model and provider-latency-trace present" };
   },
 );
 
@@ -242,31 +263,37 @@ check(
   },
 );
 
-const results = [];
-for (const { name, why, run } of checks) {
-  try {
-    results.push({ name, why, ...(await run()) });
-  } catch (error) {
-    results.push({ name, why, ok: false, detail: `check threw: ${error.message}` });
+async function main() {
+  const results = [];
+  for (const { name, why, run } of checks) {
+    try {
+      results.push({ name, why, ...(await run()) });
+    } catch (error) {
+      results.push({ name, why, ok: false, detail: `check threw: ${error.message}` });
+    }
   }
+
+  const failed = results.filter((result) => !result.ok);
+  if (process.argv.includes("--json")) {
+    process.stdout.write(`${JSON.stringify({ ok: failed.length === 0, results }, null, 2)}\n`);
+  } else {
+    for (const result of results) {
+      process.stdout.write(`${result.ok ? "OK  " : "FAIL"}  ${result.name}\n        ${result.detail}\n`);
+      if (!result.ok) process.stdout.write(`        why it matters: ${result.why}\n`);
+    }
+    process.stdout.write(
+      `\n${results.length - failed.length}/${results.length} checks passed\n`,
+    );
+    if (failed.length) {
+      process.stdout.write(
+        "\nA failure means a maintained feature or its wiring contract needs review.\n"
+        + "See docs/MAINTAINED-FORK.md for what each feature is and how it was restored.\n",
+      );
+    }
+  }
+  process.exit(failed.length ? 1 : 0);
 }
 
-const failed = results.filter((result) => !result.ok);
-if (process.argv.includes("--json")) {
-  process.stdout.write(`${JSON.stringify({ ok: failed.length === 0, results }, null, 2)}\n`);
-} else {
-  for (const result of results) {
-    process.stdout.write(`${result.ok ? "OK  " : "FAIL"}  ${result.name}\n        ${result.detail}\n`);
-    if (!result.ok) process.stdout.write(`        why it matters: ${result.why}\n`);
-  }
-  process.stdout.write(
-    `\n${results.length - failed.length}/${results.length} checks passed\n`,
-  );
-  if (failed.length) {
-    process.stdout.write(
-      "\nA failure means an upstream merge dropped or disconnected custom work.\n"
-      + "See docs/MAINTAINED-FORK.md for what each feature is and how it was restored.\n",
-    );
-  }
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  await main();
 }
-process.exit(failed.length ? 1 : 0);

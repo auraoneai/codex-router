@@ -23,7 +23,7 @@ upgrade: it asserts each customization is still *wired*, not merely present.
 An upgrade can lose custom work in three ways. Only the first is visible to a
 file listing, and the other two are what cost the hours:
 
-1. **The file is gone.** `model-sync.mjs`, `operator-model.mjs`, and
+1. **The file is gone.** `operator-model.mjs` and
    `provider-latency-trace.mjs` were simply absent after the integration.
 2. **The file is there and the code is dead.** `prismAffinityHeaders` survived
    byte-for-byte while reading a header its only caller had stopped sending.
@@ -101,13 +101,9 @@ present in `accounts` but absent from `rotation` was excluded for being drained
 or cooling down after a 429.
 
 ### Restored modules
-- `src/model-sync.mjs` -- per-turn model selection: reads the desktop picker,
-  runs different models for chat windows and scheduled tasks, pins a thread's
-  choice. Distinct from upstream's `codex-default-model.mjs`, which owns the
-  stored `model=` line and never sees a request.
 - `src/operator-model.mjs` -- records the last routed model actually run, so a
-  threadless compaction inherits it instead of falling back to native GPT and
-  failing on an account with no native quota.
+  compaction that omits its model can inherit it. An explicit native or routed
+  model remains authoritative, even when another conversation wrote the hint.
 - `src/provider-latency-trace.mjs` -- per-attempt correlation and router-side
   phase breakdown. The built-in timing line is one flat summary that cannot say
   which attempt of a failover was slow.
@@ -125,15 +121,28 @@ native models missing from the picker.
 ### macOS tray and island
 `apps/macos/ModelRouterTray/`. A private `routerReduceMotion` key pins the island
 quiet regardless of the system Reduce Motion setting, while the desktop panel
-still follows the OS. Account usage polls every 5 minutes rather than every 30
-seconds, because each probe briefly occupies a core and quotas move on the scale
-of hours. The per-account quota table shows a row per subscription with rotation
+still follows the OS. Account usage reads the cached snapshot on an adaptive
+schedule and reacts to file changes; the tray does not re-probe every account
+on each refresh. The per-account quota table shows a row per subscription with rotation
 rank, both windows, and a reset countdown, and marks accounts rotation excluded.
 
 ## Deliberately not carried forward
 
 Re-adding any of these would reintroduce a problem, so they are decisions rather
 than omissions:
+
+- **Desktop model synchronization** (`model-sync.mjs` and its former
+  `control model-sync` command) -- retired during branch consolidation. The
+  restored module had no production callers or user controls. Its historical
+  wiring rewrote incoming native model names before route selection, including
+  explicit native choices and compaction requests; a bare model name cannot
+  establish that the client made no choice. Restoring that wiring would undo
+  the explicit-model isolation proved by the compaction routing tests.
+  `codex-default-model.mjs` continues to own the opt-in stored Codex default,
+  and `control native-redirect` remains the separate explicit routing opt-in.
+  Neither claims to provide global chat/scheduled-task model or effort
+  synchronization. Existing `model-sync.json` state is left untouched and is
+  not read or activated.
 
 - **The old ChatGPT account stack** (`chatgpt-accounts.mjs`,
   `chatgpt-account-plane.mjs`, `chatgpt-reserve.mjs`, `bin/chatgpt-accounts`).
@@ -148,9 +157,15 @@ than omissions:
   nowhere to persist.
 - **Upstream's leftover-account dashboard** -- deleted upstream in 0.6.0. The
   island's own quota table is a different thing and is maintained here.
-- **The connection-pool bound from `1d3cf83a`** -- upstream's code argues the
-  opposite position explicitly. Unresolved by intent; settle it with upstream
-  rather than silently reversing them.
+- **The connection-pool bound from `1d3cf83a`** -- rejected during branch
+  consolidation. Each HTTP/1.1 stream occupies a socket, so the proposed
+  128-connection ceiling queues legitimate concurrent turns while leaving the
+  pending request queue unbounded. Keep the current shared keep-alive transport,
+  separate health probes, long-idle stream handling, and direct loopback pool.
+- **The branch-only test-hang diagnostic** -- retired. Its push trigger names
+  the deleted diagnostic branch, its fixed per-file timeout can reject valid
+  suites, and it lacks current browser provisioning. Use the maintained CI
+  workflow, which supports manual dispatch and bounds test/job duration.
 
 ## If an update goes wrong
 
