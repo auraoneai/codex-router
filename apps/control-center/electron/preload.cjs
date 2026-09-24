@@ -73,6 +73,7 @@ const routerControl = Object.freeze({
   removeClaudeSubscriptionAccount: (accountId) => call("removeClaudeSubscriptionAccount", { accountId }),
   setClaudeAccountSelection: (selection) => call("setClaudeAccountSelection", { selection }),
   toggleClaudeAccountState: (accountId, action) => call("toggleClaudeAccountState", { accountId, action }),
+  syncClaudeAccountUsage: () => call("syncClaudeAccountUsage"),
   setPresence: (mode) => call("setPresence", { mode }),
   controlService: (action) => call("controlService", { action }),
   controlTray: (action) => call("controlTray", { action }),

@@ -53,9 +53,14 @@ function normalizeWindowJson(win) {
   }
   let resetsAtMs;
   if (reset !== undefined && reset !== null && reset !== "") {
-    const num = Number(reset);
-    if (Number.isFinite(num) && num > 0) {
-      resetsAtMs = num >= 1e12 ? num : num * 1000;
+    const parsed = typeof reset === "string" ? Date.parse(reset) : NaN;
+    if (Number.isFinite(parsed) && parsed > 0) {
+      resetsAtMs = parsed;
+    } else {
+      const num = Number(reset);
+      if (Number.isFinite(num) && num > 0) {
+        resetsAtMs = num >= 1e12 ? num : num * 1000;
+      }
     }
   }
   if (usedPercent === undefined && remainingPercent === undefined && resetsAtMs === undefined) {

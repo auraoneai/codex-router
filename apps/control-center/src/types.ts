@@ -935,6 +935,7 @@ export interface RouterControlApi {
   removeClaudeSubscriptionAccount(accountId: string): Promise<unknown>;
   setClaudeAccountSelection(selection: string): Promise<unknown>;
   toggleClaudeAccountState(accountId: string, action: "enable" | "disable"): Promise<unknown>;
+  syncClaudeAccountUsage(): Promise<unknown>;
   setPresence(mode: "always" | "follow-codex"): Promise<PresenceSnapshot>;
   controlService(action: "status" | "start"): Promise<unknown>;
   controlTray(action: "enable" | "disable" | "status" | "restart"): Promise<unknown>;

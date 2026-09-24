@@ -2221,11 +2221,15 @@ export function registerIpcHandlers({
     if (!executable) throw new Error("Claude Code CLI is not installed.");
     let email;
     if (accountId) {
-      const id = stringValue(accountId, "Account id", CLAUDE_ACCOUNT_ID);
-      const pool = await runJson(["claude-account-pool", "status"], { timeoutMs: 20_000 });
-      const account = pool?.accounts?.[id];
-      if (account?.identity?.email) {
-        email = account.identity.email;
+      if (typeof accountId === "string" && accountId.includes("@")) {
+        email = accountId.trim();
+      } else {
+        const id = stringValue(accountId, "Account id", CLAUDE_ACCOUNT_ID);
+        const pool = await runJson(["claude-account-pool", "status"], { timeoutMs: 20_000 });
+        const account = pool?.accounts?.[id];
+        if (account?.identity?.email) {
+          email = account.identity.email;
+        }
       }
     }
     const args = ["auth", "login"];
@@ -2234,6 +2238,9 @@ export function registerIpcHandlers({
     }
     return openTerminalCommand(executable, args, discoverSourceRoot());
   }, { requiresCompatibleRouter: false });
+  handleAction("syncClaudeAccountUsage", async () => {
+    return runJson(["claude-account-pool", "usage"], { timeoutMs: 30_000 });
+  });
   handleAction("setPresence", async ({ mode } = {}) => runJson(["presence", "set", oneOf(mode, PRESENCE_MODES, "Presence mode")]));
   handleAction("controlService", async ({ action = "status" } = {}) => {
     const value = oneOf(action, SERVICE_COMMANDS, "Service action");

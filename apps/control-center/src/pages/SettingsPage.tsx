@@ -61,6 +61,20 @@ function formatBytes(value: number | null | undefined): string {
   return `${size >= 10 || unit === 0 ? Math.round(size) : size.toFixed(1)} ${units[unit]}`;
 }
 
+function formatTimeUntil(timestampMs?: number | null): string {
+  if (!timestampMs || !Number.isFinite(timestampMs)) return "";
+  const diff = timestampMs - Date.now();
+  if (diff <= 0) return "resets now";
+  const minutes = Math.ceil(diff / 60_000);
+  if (minutes < 60) return `resets in ${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours < 24) return `resets in ${hours}h ${remainingMinutes}m`;
+  const days = Math.floor(hours / 24);
+  const remainingHours = hours % 24;
+  return `resets in ${days}d ${remainingHours}h`;
+}
+
 function roleLabel(role: string): string {
   return role.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
@@ -898,7 +912,7 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
                 aria-label="New Claude account label"
                 value={newClaudeAccountLabel}
                 maxLength={120}
-                placeholder="Account label (optional)"
+                placeholder="Optional nickname (e.g. Work, Personal)"
                 onChange={(event) => setNewClaudeAccountLabel(event.target.value)}
               />
               <Button
@@ -909,8 +923,18 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
               <Button
                 variant="ghost"
                 disabled={!api}
-                onClick={() => api && void runAction("Sign in with Claude CLI", () => api.loginClaudeSubscriptionAccount())}
+                onClick={() => {
+                  if (!api) return;
+                  const emailCandidate = newClaudeAccountLabel.trim().includes("@") ? newClaudeAccountLabel.trim() : undefined;
+                  void runAction("Sign in with Claude CLI", () => api.loginClaudeSubscriptionAccount(emailCandidate));
+                }}
               ><LogIn aria-hidden size={14} strokeWidth={1.7} /> Sign in in Terminal</Button>
+              <Button
+                variant="ghost"
+                title="Sync live usage and quota reset times from Anthropic"
+                disabled={!api}
+                onClick={() => api && void runAction("Sync Claude account usage", () => api.syncClaudeAccountUsage())}
+              ><RefreshCw aria-hidden size={14} strokeWidth={1.7} /> Sync usage</Button>
             </div>
             <div className="settings-list">
               {claudeAccounts.map((account) => {
@@ -931,17 +955,19 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
                         : "Ready";
 
                 const title = account.identity?.email || account.label || "Claude account";
-                const labelPrefix = account.identity?.email && account.label ? `${account.label} · ` : "";
+                const labelPrefix = account.identity?.email && account.label && account.label.toLowerCase() !== account.identity.email.toLowerCase() ? `${account.label} · ` : "";
                 const tier = account.tier ? ` · ${account.tier.toUpperCase()}` : "";
 
                 const fiveHourUsage = account.usage?.fiveHour;
                 const weeklyUsage = account.usage?.weekly;
                 const usageParts: string[] = [];
                 if (fiveHourUsage && Number.isFinite(fiveHourUsage.remainingPercent)) {
-                  usageParts.push(`5h: ${Math.round(fiveHourUsage.remainingPercent!)}% remaining`);
+                  const resetStr = formatTimeUntil(fiveHourUsage.resetsAtMs);
+                  usageParts.push(`5h: ${Math.round(fiveHourUsage.remainingPercent!)}% remaining${resetStr ? ` (${resetStr})` : ""}`);
                 }
                 if (weeklyUsage && Number.isFinite(weeklyUsage.remainingPercent)) {
-                  usageParts.push(`weekly: ${Math.round(weeklyUsage.remainingPercent!)}% remaining`);
+                  const resetStr = formatTimeUntil(weeklyUsage.resetsAtMs);
+                  usageParts.push(`weekly: ${Math.round(weeklyUsage.remainingPercent!)}% remaining${resetStr ? ` (${resetStr})` : ""}`);
                 }
                 const usageLabel = usageParts.length > 0 ? usageParts.join(" · ") : "Usage pending first request";
 
@@ -964,7 +990,8 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
                       >{isSelected ? <><Check aria-hidden size={13} strokeWidth={1.9} /> Selected</> : <><Check aria-hidden size={13} strokeWidth={1.9} /> Select</>}</Button>
                       <Button
                         variant="ghost"
-                        disabled={!api || isPaused || (!isAuthInvalid && account.subscription?.status === "usable")}
+                        title={(!isAuthInvalid && account.subscription?.status === "usable") ? "Account is authenticated and ready. Click to re-authenticate." : "Sign in to this account"}
+                        disabled={!api || isPaused}
                         onClick={() => api && void runAction(`Login ${title}`, () => api.loginClaudeSubscriptionAccount(account.id))}
                       ><LogIn aria-hidden size={13} strokeWidth={1.7} /> Login</Button>
                       <Button

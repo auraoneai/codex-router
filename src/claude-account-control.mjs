@@ -32,9 +32,16 @@ export async function handleClaudeAccountPool(action, value, {
       usage = JSON.parse(readFileSync(usagePath, "utf8"));
     } catch {}
 
+    const usageList = Array.isArray(usage.accounts)
+      ? usage.accounts
+      : usage.accounts && typeof usage.accounts === "object"
+        ? Object.values(usage.accounts)
+        : [];
+    const usageById = new Map(usageList.map((a) => [a?.id, a]).filter(([id]) => id));
+
     const accountsWithUsage = {};
     for (const [id, account] of Object.entries(snapshot.accounts || {})) {
-      const accountUsage = usage.accounts?.[id] || usage[id] || null;
+      const accountUsage = usageById.get(id) || usage.accounts?.[id] || usage[id] || null;
       accountsWithUsage[id] = {
         ...account,
         ...(accountUsage ? { usage: accountUsage } : {}),

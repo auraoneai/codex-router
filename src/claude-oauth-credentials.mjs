@@ -209,12 +209,24 @@ export async function importClaudeAccount(label, {
     }
 
     if (existingAccount) {
+      const trimmedLabel = typeof label === "string" ? label.trim() : "";
+      if (trimmedLabel.includes("@") && identity?.email && trimmedLabel.toLowerCase() !== identity.email.toLowerCase()) {
+        throw new Error(
+          `Claude Code is currently authenticated as ${identity.email}, which is already registered. To add ${trimmedLabel}, sign into that account with 'claude auth login --email ${trimmedLabel}' first.`,
+        );
+      }
+      if (existingAccount.health?.state !== "reauth-required" && !trimmedLabel) {
+        throw new Error(
+          `Claude account ${identity?.email || existingAccount.label || existingAccount.id} is already registered. To add a new account, sign into that account with 'claude auth login' first.`,
+        );
+      }
+
       // Update in place
       const credPath = claudeSubscriptionAccountCredentialsPath(existingAccount.id, { homesDir });
       writePrivateJson(credPath, { claudeAiOauth: blob }, { directoryMode: 0o700, fileMode: 0o600 });
 
-      if (label && typeof label === "string" && label.trim()) {
-        existingAccount.label = label.trim().slice(0, 120);
+      if (trimmedLabel) {
+        existingAccount.label = trimmedLabel.slice(0, 120);
       } else if (identity?.email && (!existingAccount.label || /^Claude account \d+$/.test(existingAccount.label))) {
         existingAccount.label = identity.email.slice(0, 120);
       }
