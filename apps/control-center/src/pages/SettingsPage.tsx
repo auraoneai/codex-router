@@ -906,6 +906,11 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
                 disabled={!api || Boolean(claudeAccountPoolError)}
                 onClick={() => void addClaudeAccount()}
               ><Plus aria-hidden size={14} strokeWidth={1.7} /> Add Claude account</Button>
+              <Button
+                variant="ghost"
+                disabled={!api}
+                onClick={() => api && void runAction("Sign in with Claude CLI", () => api.loginClaudeSubscriptionAccount())}
+              ><LogIn aria-hidden size={14} strokeWidth={1.7} /> Sign in in Terminal</Button>
             </div>
             <div className="settings-list">
               {claudeAccounts.map((account) => {
@@ -957,6 +962,11 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
                         disabled={!api || isPaused}
                         onClick={() => api && void runAction("Switch Claude account", () => api.setClaudeAccountSelection(account.id))}
                       >{isSelected ? <><Check aria-hidden size={13} strokeWidth={1.9} /> Selected</> : <><Check aria-hidden size={13} strokeWidth={1.9} /> Select</>}</Button>
+                      <Button
+                        variant="ghost"
+                        disabled={!api || isPaused || (!isAuthInvalid && account.subscription?.status === "usable")}
+                        onClick={() => api && void runAction(`Login ${title}`, () => api.loginClaudeSubscriptionAccount(account.id))}
+                      ><LogIn aria-hidden size={13} strokeWidth={1.7} /> Login</Button>
                       <Button
                         variant="ghost"
                         disabled={!api}

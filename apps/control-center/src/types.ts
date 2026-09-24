@@ -931,6 +931,7 @@ export interface RouterControlApi {
   removeChatGptSubscriptionAccount(accountId: string): Promise<unknown>;
   setChatGptAccountSelection(selection: string): Promise<unknown>;
   addClaudeSubscriptionAccount(label?: string): Promise<unknown>;
+  loginClaudeSubscriptionAccount(accountId?: string): Promise<unknown>;
   removeClaudeSubscriptionAccount(accountId: string): Promise<unknown>;
   setClaudeAccountSelection(selection: string): Promise<unknown>;
   toggleClaudeAccountState(accountId: string, action: "enable" | "disable"): Promise<unknown>;

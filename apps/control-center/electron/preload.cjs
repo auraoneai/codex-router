@@ -69,6 +69,7 @@ const routerControl = Object.freeze({
   removeChatGptSubscriptionAccount: (accountId) => call("removeChatGptSubscriptionAccount", { accountId }),
   setChatGptAccountSelection: (selection) => call("setChatGptAccountSelection", { selection }),
   addClaudeSubscriptionAccount: (label) => call("addClaudeSubscriptionAccount", { label }),
+  loginClaudeSubscriptionAccount: (accountId) => call("loginClaudeSubscriptionAccount", { accountId }),
   removeClaudeSubscriptionAccount: (accountId) => call("removeClaudeSubscriptionAccount", { accountId }),
   setClaudeAccountSelection: (selection) => call("setClaudeAccountSelection", { selection }),
   toggleClaudeAccountState: (accountId, action) => call("toggleClaudeAccountState", { accountId, action }),

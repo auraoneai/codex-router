@@ -2216,6 +2216,24 @@ export function registerIpcHandlers({
     const cmd = action === "enable" ? "enable" : "disable";
     return runJson(["claude-account-pool", cmd, id], { timeoutMs: 60_000 });
   });
+  handleAction("loginClaudeSubscriptionAccount", async ({ accountId } = {}) => {
+    const executable = executablePath("claude");
+    if (!executable) throw new Error("Claude Code CLI is not installed.");
+    let email;
+    if (accountId) {
+      const id = stringValue(accountId, "Account id", CLAUDE_ACCOUNT_ID);
+      const pool = await runJson(["claude-account-pool", "status"], { timeoutMs: 20_000 });
+      const account = pool?.accounts?.[id];
+      if (account?.identity?.email) {
+        email = account.identity.email;
+      }
+    }
+    const args = ["auth", "login"];
+    if (email) {
+      args.push("--email", email);
+    }
+    return openTerminalCommand(executable, args, discoverSourceRoot());
+  }, { requiresCompatibleRouter: false });
   handleAction("setPresence", async ({ mode } = {}) => runJson(["presence", "set", oneOf(mode, PRESENCE_MODES, "Presence mode")]));
   handleAction("controlService", async ({ action = "status" } = {}) => {
     const value = oneOf(action, SERVICE_COMMANDS, "Service action");
