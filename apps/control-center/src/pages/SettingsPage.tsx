@@ -5,8 +5,10 @@ import { compactNumber } from "../lib";
 import { LANGUAGE_OPTIONS, type LanguageId, type Translate } from "../i18n";
 import type {
   ChatGptAccountPool,
+  ClaudeAccountPool,
   ChatGptSessionStatus,
   ChatGptSubscriptionAccount,
+  ClaudeSubscriptionAccount,
   DoctorSnapshot,
   EngineeringPolicyCandidate,
   EngineeringPolicySnapshot,
@@ -120,7 +122,7 @@ function engineeringUsageLabel(engineering: EngineeringPolicySnapshot | undefine
   };
 }
 
-export function SettingsPage({ target, engineering, models = [], health, presence, chatgptSession, accountPool, accountPoolError, api, theme, onTheme, language, onLanguage, t, refreshing, onRefresh, runAction }: {
+export function SettingsPage({ target, engineering, models = [], health, presence, chatgptSession, accountPool, accountPoolError, claudeAccountPool, claudeAccountPoolError, api, theme, onTheme, language, onLanguage, t, refreshing, onRefresh, runAction }: {
   target?: RouterTarget;
   engineering?: EngineeringPolicySnapshot;
   models?: RouterModel[];
@@ -129,6 +131,8 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
   chatgptSession?: ChatGptSessionStatus;
   accountPool?: ChatGptAccountPool;
   accountPoolError?: string;
+  claudeAccountPool?: ClaudeAccountPool;
+  claudeAccountPoolError?: string;
   api?: RouterControlApi;
   theme: "light" | "dark";
   onTheme: (theme: "light" | "dark") => void;
@@ -147,10 +151,13 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
   const [engineeringEditor, setEngineeringEditor] = useState<EngineeringEditor | null>(null);
   const [repairReport, setRepairReport] = useState<DoctorSnapshot | null>(null);
   const [newAccountLabel, setNewAccountLabel] = useState("");
+  const [newClaudeAccountLabel, setNewClaudeAccountLabel] = useState("");
   const [removeAccountId, setRemoveAccountId] = useState<string | null>(null);
+  const [removeClaudeAccountId, setRemoveClaudeAccountId] = useState<string | null>(null);
   const [loginPendingId, setLoginPendingId] = useState<string | null>(null);
   const [loginRetryingId, setLoginRetryingId] = useState<string | null>(null);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [claudeAccountError, setClaudeAccountError] = useState<string | null>(null);
   const [accountOverlays, setAccountOverlays] = useState<AccountOverlay[]>([]);
   const refreshRef = useRef(onRefresh);
   refreshRef.current = onRefresh;
@@ -406,6 +413,34 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
         )));
       }
     }
+  };
+
+  const claudeAccounts = useMemo(() => {
+    return Object.values(claudeAccountPoolError ? {} : claudeAccountPool?.accounts || {})
+      .filter((account) => account.state !== "revoked");
+  }, [claudeAccountPool, claudeAccountPoolError]);
+
+  const claudeAccountSelection = claudeAccountPool?.policy?.selectedAccountId;
+
+  const addClaudeAccount = async () => {
+    if (!api) return;
+    setClaudeAccountError(null);
+    try {
+      await runAction("Add Claude account", async () => {
+        await api.addClaudeSubscriptionAccount(newClaudeAccountLabel);
+        setNewClaudeAccountLabel("");
+      });
+    } catch (err: any) {
+      setClaudeAccountError(err?.message || "No valid Claude Code credentials found. Please run 'claude login' in your terminal first.");
+    }
+  };
+
+  const removeClaudeAccount = async (accountId: string) => {
+    if (!api || !accountId) return;
+    setRemoveClaudeAccountId(null);
+    await runAction("Remove Claude subscription account", async () => {
+      await api.removeClaudeSubscriptionAccount(accountId);
+    });
   };
 
   // Repair reinstalls and restarts the service, so it can outlast several
@@ -845,6 +880,104 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
           </section>
 
           <section className="panel-section">
+            <SectionHeading
+              title="Claude accounts"
+              description="Save multiple Claude subscription accounts and automatically rotate them on rate limits. Anthropic API and Claude Code routes use these accounts."
+            />
+            {claudeAccountPoolError ? (
+              <InlineNotice tone="danger" title="Claude account state unavailable">
+                {claudeAccountPoolError}
+              </InlineNotice>
+            ) : claudeAccountError ? (
+              <InlineNotice tone="danger" title="Claude account import failed">
+                {claudeAccountError}
+              </InlineNotice>
+            ) : null}
+            <div className="settings-actions claude-account-create">
+              <input
+                aria-label="New Claude account label"
+                value={newClaudeAccountLabel}
+                maxLength={120}
+                placeholder="Account label (optional)"
+                onChange={(event) => setNewClaudeAccountLabel(event.target.value)}
+              />
+              <Button
+                variant="secondary"
+                disabled={!api || Boolean(claudeAccountPoolError)}
+                onClick={() => void addClaudeAccount()}
+              ><Plus aria-hidden size={14} strokeWidth={1.7} /> Add Claude account</Button>
+            </div>
+            <div className="settings-list">
+              {claudeAccounts.map((account) => {
+                const isSelected = claudeAccountSelection === account.id;
+                const isPaused = account.state === "paused";
+                const isAuthInvalid = account.health?.state === "reauth-required";
+                const isCooling = account.health?.state === "cooling";
+                const isDrained = account.health?.state === "drained";
+
+                const statusLabel = isPaused
+                  ? "Paused"
+                  : isAuthInvalid
+                    ? "Sign-in required"
+                    : isCooling
+                      ? "Cooling down"
+                      : isDrained
+                        ? "Quota exhausted"
+                        : "Ready";
+
+                const title = account.identity?.email || account.label || "Claude account";
+                const labelPrefix = account.identity?.email && account.label ? `${account.label} · ` : "";
+                const tier = account.tier ? ` · ${account.tier.toUpperCase()}` : "";
+
+                const fiveHourUsage = account.usage?.fiveHour;
+                const weeklyUsage = account.usage?.weekly;
+                const usageParts: string[] = [];
+                if (fiveHourUsage && Number.isFinite(fiveHourUsage.remainingPercent)) {
+                  usageParts.push(`5h: ${Math.round(fiveHourUsage.remainingPercent!)}% remaining`);
+                }
+                if (weeklyUsage && Number.isFinite(weeklyUsage.remainingPercent)) {
+                  usageParts.push(`weekly: ${Math.round(weeklyUsage.remainingPercent!)}% remaining`);
+                }
+                const usageLabel = usageParts.length > 0 ? usageParts.join(" · ") : "Usage pending first request";
+
+                return (
+                  <div
+                    className="setting-row claude-account-row"
+                    key={account.id}
+                  >
+                    <div>
+                      <strong><UserRound aria-hidden size={14} strokeWidth={1.7} /> {title} {isSelected ? <Badge tone="accent">Selected</Badge> : null} {isPaused ? <Badge tone="neutral">Paused</Badge> : null}</strong>
+                      <small>{labelPrefix}{statusLabel}{tier} · {usageLabel}</small>
+                    </div>
+                    <div className="settings-actions">
+                      <Button
+                        variant={isSelected ? "secondary" : "ghost"}
+                        aria-pressed={isSelected}
+                        aria-label={isSelected ? `Selected Claude account: ${title}` : `Select Claude account: ${title}`}
+                        disabled={!api || isPaused}
+                        onClick={() => api && void runAction("Switch Claude account", () => api.setClaudeAccountSelection(account.id))}
+                      >{isSelected ? <><Check aria-hidden size={13} strokeWidth={1.9} /> Selected</> : <><Check aria-hidden size={13} strokeWidth={1.9} /> Select</>}</Button>
+                      <Button
+                        variant="ghost"
+                        disabled={!api}
+                        onClick={() => api && void runAction(isPaused ? "Enable Claude account" : "Pause Claude account", () => api.toggleClaudeAccountState(account.id, isPaused ? "enable" : "disable"))}
+                      >{isPaused ? "Resume" : "Pause"}</Button>
+                      <Button
+                        variant="ghost"
+                        disabled={!api}
+                        onClick={() => setRemoveClaudeAccountId(account.id)}
+                      ><Trash2 aria-hidden size={13} strokeWidth={1.7} /> Remove</Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {!claudeAccountPoolError && !claudeAccounts.length ? (
+              <div className="surface-summary"><ShieldCheck aria-hidden size={20} strokeWidth={1.6} /><div><strong>No saved Claude accounts</strong><small>Log in with 'claude' in terminal, then click 'Add account' to import into the rotation pool.</small></div></div>
+            ) : null}
+          </section>
+
+          <section className="panel-section">
             <SectionHeading title={t("settings.service.title")} description={t("settings.service.description")} />
             <div className="settings-list">
               <div className="setting-row">
@@ -1100,6 +1233,22 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
           <Button variant="danger" disabled={!api || !removeAccountId || loginPendingId === removeAccountId} onClick={() => {
             const id = removeAccountId;
             if (id) void removeSubscriptionAccount(id);
+          }}>Remove account</Button>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(removeClaudeAccountId)}
+        title="Remove Claude subscription account?"
+        description="This revokes the pool entry and deletes its isolated credentials profile."
+        onClose={() => setRemoveClaudeAccountId(null)}
+      >
+        <p className="dialog-copy">The account will be removed from the rotation pool and its isolated credential home deleted.</p>
+        <div className="dialog-actions">
+          <Button variant="secondary" onClick={() => setRemoveClaudeAccountId(null)}>Cancel</Button>
+          <Button variant="danger" disabled={!api || !removeClaudeAccountId} onClick={() => {
+            const id = removeClaudeAccountId;
+            if (id) void removeClaudeAccount(id);
           }}>Remove account</Button>
         </div>
       </Dialog>

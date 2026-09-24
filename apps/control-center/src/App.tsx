@@ -40,6 +40,7 @@ import {
 import type {
   AccountUsage,
   ChatGptAccountPool,
+  ClaudeAccountPool,
   ChatGptSessionStatus,
   ModelViewFocus,
   ModelViewFocusRequest,
@@ -63,6 +64,7 @@ const INITIAL_DATA_READY: RouterDataReady = {
   health: false,
   accountUsage: false,
   accountPool: false,
+  claudeAccountPool: false,
   providerUsage: false,
 };
 
@@ -119,6 +121,7 @@ export default function App() {
   const [providers, setProviders] = useState<ProviderSetupSnapshot>();
   const [accountUsage, setAccountUsage] = useState<AccountUsage>();
   const [accountPool, setAccountPool] = useState<ChatGptAccountPool>();
+  const [claudeAccountPool, setClaudeAccountPool] = useState<ClaudeAccountPool>();
   const [chatgptSession, setChatgptSession] = useState<ChatGptSessionStatus>();
   const [providerUsage, setProviderUsage] = useState<ProviderUsageSnapshot>();
   const [presence, setPresence] = useState<PresenceSnapshot>();
@@ -213,6 +216,9 @@ export default function App() {
       typeof api.getChatGptAccountPool === "function"
         ? settleRead("accountPool", api.getChatGptAccountPool(), setAccountPool)
         : Promise.resolve(),
+      typeof api.getClaudeAccountPool === "function"
+        ? settleRead("claudeAccountPool", api.getClaudeAccountPool(), setClaudeAccountPool)
+        : Promise.resolve(),
       typeof api.getChatGptSession === "function"
         ? api.getChatGptSession().then(setChatgptSession)
         : Promise.resolve(),
@@ -272,6 +278,7 @@ export default function App() {
         health: true,
         accountUsage: true,
         accountPool: true,
+        claudeAccountPool: true,
         providerUsage: true,
       });
       setLoadError("The Electron bridge is unavailable. Open this UI through the Codex Router desktop app.");
@@ -464,7 +471,7 @@ export default function App() {
       case "local": return <LocalPage {...shared} operation={operation} />;
       case "harness": return <HarnessPage {...shared} operation={operation} onNavigate={navigateTo} />;
       case "context": return <ContextPage {...shared} />;
-      case "settings": return <SettingsPage {...shared} onRefresh={refreshAll} health={health} presence={presence} chatgptSession={chatgptSession ?? snapshot?.chatgptSession} accountPool={accountPool} accountPoolError={readErrors.accountPool} engineering={snapshot?.catalog?.engineering} models={settingsModels} theme={theme} onTheme={setTheme} language={language} onLanguage={setLanguage} t={t} />;
+      case "settings": return <SettingsPage {...shared} onRefresh={refreshAll} health={health} presence={presence} chatgptSession={chatgptSession ?? snapshot?.chatgptSession} accountPool={accountPool} accountPoolError={readErrors.accountPool} claudeAccountPool={claudeAccountPool} claudeAccountPoolError={readErrors.claudeAccountPool} engineering={snapshot?.catalog?.engineering} models={settingsModels} theme={theme} onTheme={setTheme} language={language} onLanguage={setLanguage} t={t} />;
     }
   })();
 

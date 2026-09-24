@@ -19,6 +19,7 @@ export interface RouterDataReady {
   health: boolean;
   accountUsage: boolean;
   accountPool: boolean;
+  claudeAccountPool?: boolean;
   providerUsage: boolean;
 }
 
@@ -381,6 +382,41 @@ export interface ChatGptAccountPool {
   }>;
   sessions: { count: number };
   profile?: ChatGptProfileSwitch;
+}
+
+export interface ClaudeSubscriptionAccount {
+  id: string;
+  label: string;
+  state: "active" | "paused" | "revoked" | string;
+  priority: number;
+  tier?: string;
+  purpose?: string;
+  identity?: {
+    accountId?: string;
+    email?: string;
+    organizationUuid?: string;
+  };
+  subscription?: {
+    status?: "usable" | "auth_invalid" | "cooling" | string;
+  };
+  health?: {
+    state?: "healthy" | "cooling" | "drained" | "reauth-required" | "unknown" | string;
+    lastSuccessAt?: number;
+    cooldownUntil?: number;
+    cooldownReason?: string;
+  };
+  usage?: {
+    fiveHour?: { utilization: number; remainingPercent?: number; resetsAtMs?: number; status?: string };
+    weekly?: { utilization: number; remainingPercent?: number; resetsAtMs?: number; status?: string };
+  };
+  createdAt?: number | string;
+  updatedAt?: number | string;
+}
+
+export interface ClaudeAccountPool {
+  version: number;
+  policy: { enabled: boolean; mode: "switch"; selectedAccountId?: string };
+  accounts: Record<string, ClaudeSubscriptionAccount>;
 }
 
 export interface ChatGptProfileSwitch {
@@ -822,6 +858,7 @@ export interface RouterControlApi {
   getSnapshot(): Promise<RouterSnapshot>;
   getChatGptSession(): Promise<ChatGptSessionStatus>;
   getChatGptAccountPool(): Promise<ChatGptAccountPool>;
+  getClaudeAccountPool(): Promise<ClaudeAccountPool>;
   getHealth(): Promise<RouterHealth>;
   getProviders(): Promise<ProviderSetupSnapshot>;
   discoverProviderModels(provider: string, options?: { refresh?: boolean }): Promise<ProviderCatalog>;
@@ -893,6 +930,10 @@ export interface RouterControlApi {
   loginChatGptSubscriptionAccount(accountId: string): Promise<unknown>;
   removeChatGptSubscriptionAccount(accountId: string): Promise<unknown>;
   setChatGptAccountSelection(selection: string): Promise<unknown>;
+  addClaudeSubscriptionAccount(label?: string): Promise<unknown>;
+  removeClaudeSubscriptionAccount(accountId: string): Promise<unknown>;
+  setClaudeAccountSelection(selection: string): Promise<unknown>;
+  toggleClaudeAccountState(accountId: string, action: "enable" | "disable"): Promise<unknown>;
   setPresence(mode: "always" | "follow-codex"): Promise<PresenceSnapshot>;
   controlService(action: "status" | "start"): Promise<unknown>;
   controlTray(action: "enable" | "disable" | "status" | "restart"): Promise<unknown>;

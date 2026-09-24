@@ -65,6 +65,7 @@ const RETENTION_MAX_TTL_DAYS = 3_650;
 const MODEL_SLUG = /^[A-Za-z0-9][A-Za-z0-9._/:+-]{0,200}$/;
 const PROVIDER_ID = /^[a-z0-9][a-z0-9-]{0,80}$/;
 const CHATGPT_ACCOUNT_ID = /^acct_[A-Za-z0-9_-]{8,80}$/;
+const CLAUDE_ACCOUNT_ID = /^clacct_[A-Za-z0-9_-]{8,80}$/;
 const CHATGPT_LOGIN_URL = /https:\/\/auth\.openai\.com\/oauth\/authorize\?[^\s"'<>]+/;
 const CHATGPT_LOGIN_COMPLETION_TIMEOUT_MS = 10 * 60_000;
 const LOCAL_TAG = /^[A-Za-z0-9][A-Za-z0-9._/-]*(?::[A-Za-z0-9][A-Za-z0-9._-]*)?$/;
@@ -1579,6 +1580,10 @@ export function registerIpcHandlers({
     ),
     subscriptionLoginAttempts,
   ));
+  handle("getClaudeAccountPool", async () => runJson(
+    ["claude-account-pool", "status"],
+    { timeoutMs: CATALOG_MUTATION_TIMEOUT_MS },
+  ));
   const windowFor = (event) => {
     const window = BrowserWindow?.fromWebContents?.(event.sender);
     if (!window || window.isDestroyed?.()) throw new Error("Application window is unavailable.");
@@ -2193,6 +2198,23 @@ export function registerIpcHandlers({
   });
   handleAction("setChatGptAccountSelection", async ({ selection } = {}) => {
     return runJson(["chatgpt-account-pool", "select", stringValue(selection, "Account selection", CHATGPT_ACCOUNT_ID)], { timeoutMs: 60_000 });
+  });
+  handleAction("addClaudeSubscriptionAccount", async ({ label = "" } = {}) => {
+    const args = ["claude-account-pool", "add"];
+    if (typeof label === "string" && label.trim()) args.push(label.trim());
+    return runJson(args, { timeoutMs: 60_000 });
+  });
+  handleAction("removeClaudeSubscriptionAccount", async ({ accountId } = {}) => {
+    const id = stringValue(accountId, "Account id", CLAUDE_ACCOUNT_ID);
+    return runJson(["claude-account-pool", "remove", id], { timeoutMs: 60_000 });
+  });
+  handleAction("setClaudeAccountSelection", async ({ selection } = {}) => {
+    return runJson(["claude-account-pool", "select", stringValue(selection, "Account selection", CLAUDE_ACCOUNT_ID)], { timeoutMs: 60_000 });
+  });
+  handleAction("toggleClaudeAccountState", async ({ accountId, action } = {}) => {
+    const id = stringValue(accountId, "Account id", CLAUDE_ACCOUNT_ID);
+    const cmd = action === "enable" ? "enable" : "disable";
+    return runJson(["claude-account-pool", cmd, id], { timeoutMs: 60_000 });
   });
   handleAction("setPresence", async ({ mode } = {}) => runJson(["presence", "set", oneOf(mode, PRESENCE_MODES, "Presence mode")]));
   handleAction("controlService", async ({ action = "status" } = {}) => {

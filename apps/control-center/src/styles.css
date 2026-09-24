@@ -1917,16 +1917,19 @@ progress::-webkit-progress-value { border-radius: 999px; background: var(--accen
   margin-top: 13px;
 }
 
-.subscription-account-create {
+.subscription-account-create,
+.claude-account-create {
   margin-bottom: 15px;
 }
 
-.subscription-account-row {
+.subscription-account-row,
+.claude-account-row {
   min-height: 60px;
   padding-block: 16px;
 }
 
-.subscription-account-row > .settings-actions {
+.subscription-account-row > .settings-actions,
+.claude-account-row > .settings-actions {
   flex-shrink: 0;
   align-self: center;
   gap: 10px;
