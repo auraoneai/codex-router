@@ -2200,9 +2200,20 @@ export function registerIpcHandlers({
     return runJson(["chatgpt-account-pool", "select", stringValue(selection, "Account selection", CHATGPT_ACCOUNT_ID)], { timeoutMs: 60_000 });
   });
   handleAction("addClaudeSubscriptionAccount", async ({ label = "" } = {}) => {
-    const args = ["claude-account-pool", "add"];
-    if (typeof label === "string" && label.trim()) args.push(label.trim());
-    return runJson(args, { timeoutMs: 60_000 });
+    try {
+      const args = ["claude-account-pool", "add"];
+      if (typeof label === "string" && label.trim()) args.push(label.trim());
+      return await runJson(args, { timeoutMs: 60_000 });
+    } catch (err) {
+      if (/No valid Claude Code credentials/i.test(err?.message || "")) {
+        const { createClaudeSubscriptionAccount } = await import("../../../src/claude-account-pool.mjs");
+        const account = createClaudeSubscriptionAccount({
+          label: typeof label === "string" ? label.trim() : "",
+        });
+        return { account };
+      }
+      throw err;
+    }
   });
   handleAction("removeClaudeSubscriptionAccount", async ({ accountId } = {}) => {
     const id = stringValue(accountId, "Account id", CLAUDE_ACCOUNT_ID);
@@ -2229,6 +2240,8 @@ export function registerIpcHandlers({
         const account = pool?.accounts?.[id];
         if (account?.identity?.email) {
           email = account.identity.email;
+        } else if (account?.label && account.label.includes("@")) {
+          email = account.label.trim();
         }
       }
     }

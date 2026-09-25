@@ -978,12 +978,16 @@ final class RouterStore: ObservableObject {
   // disagree about which account answers next.
   @Published private(set) var chatGptAccountUsage: ChatGptAccountPoolUsage?
   @Published private(set) var chatGptAccountUsageError: String?
+  @Published private(set) var claudeAccountUsage: ChatGptAccountPoolUsage?
+  @Published private(set) var claudeAccountUsageError: String?
   // `preferred` in the snapshot is a probe-time copy of the pool's selected
   // account, so a successful `select` does not change it until the next probe.
   // Holding the selection locally keeps the preferred dot honest in between,
   // and it is dropped as soon as a snapshot agrees with it.
   @Published private(set) var chatGptPreferredOverride: String?
   @Published private(set) var chatGptAccountOperation: String?
+  @Published private(set) var claudePreferredOverride: String?
+  @Published private(set) var claudeAccountOperation: String?
   @Published private(set) var chatGptResetCreditPrompt: ChatGptResetCreditPrompt?
   @Published private(set) var chatGptResetCreditFeedback: ChatGptResetCreditFeedback?
   @Published private(set) var chatGptResetCreditCountHolds: [String: ChatGptResetCreditCountHold] = [:]
@@ -1047,6 +1051,7 @@ final class RouterStore: ObservableObject {
   private var providerPolling = false
   @Published private(set) var isIslandInspecting = false
   private var isRefreshingChatGptAccountUsage = false
+  private var isRefreshingClaudeAccountUsage = false
   private var isRefreshingAccountUsage = false
   private var lastNativeUsageRefreshAt = Date.distantPast
   private var usageDirectoryMonitorSource: DispatchSourceFileSystemObject?
@@ -2159,8 +2164,9 @@ final class RouterStore: ObservableObject {
   func refreshNativeUsage() async {
     lastNativeUsageRefreshAt = Date()
     async let chatGpt: () = refreshChatGptAccountUsage()
+    async let claude: () = refreshClaudeAccountUsage()
     async let account: () = refreshAccountUsage()
-    _ = await (chatGpt, account)
+    _ = await (chatGpt, claude, account)
   }
 
   func refreshNativeUsageIfStale(maxAge: TimeInterval = 5.0) async {
@@ -2185,6 +2191,7 @@ final class RouterStore: ObservableObject {
       Task { @MainActor [weak self] in
         guard let self else { return }
         await self.refreshChatGptAccountUsage()
+        await self.refreshClaudeAccountUsage()
       }
     }
     source.setCancelHandler {
@@ -2271,6 +2278,40 @@ final class RouterStore: ObservableObject {
       chatGptAccountUsageError = error.localizedDescription
     }
     await refreshChatGptAccountUsage()
+  }
+
+  func refreshClaudeAccountUsage() async {
+    guard !isRefreshingClaudeAccountUsage else { return }
+    isRefreshingClaudeAccountUsage = true
+    defer { isRefreshingClaudeAccountUsage = false }
+    do {
+      let output = try await runControl(arguments: ["claude-account-pool", "usage", "cached"])
+      let next = try JSONDecoder().decode(ChatGptAccountPoolUsage.self, from: output)
+      if claudeAccountUsage != next { claudeAccountUsage = next }
+      if claudeAccountUsageError != nil { claudeAccountUsageError = nil }
+      if let override = claudePreferredOverride,
+         next.accounts.first(where: { $0.preferred })?.id == override {
+        claudePreferredOverride = nil
+      }
+    } catch {
+      let nextError = error.localizedDescription
+      if claudeAccountUsageError != nextError { claudeAccountUsageError = nextError }
+    }
+  }
+
+  func preferClaudeAccount(_ accountId: String) async {
+    guard claudeAccountOperation == nil else { return }
+    claudeAccountOperation = accountId
+    defer { claudeAccountOperation = nil }
+    do {
+      _ = try await runControl(arguments: ["claude-account-pool", "select", accountId])
+      claudePreferredOverride = accountId
+      if claudeAccountUsageError != nil { claudeAccountUsageError = nil }
+    } catch {
+      claudePreferredOverride = nil
+      claudeAccountUsageError = error.localizedDescription
+    }
+    await refreshClaudeAccountUsage()
   }
 
   /// A banked reset is a one-way credit spend. A row click only opens the
@@ -10147,6 +10188,7 @@ private struct TrayView: View {
           await store.refresh()
           await store.refreshAccountUsage()
           await store.refreshChatGptAccountUsage()
+          await store.refreshClaudeAccountUsage()
           await store.refreshProviderUsage()
           await store.refreshProviderSetup()
         }

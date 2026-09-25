@@ -11,7 +11,7 @@ import {
   withClaudeAccountPoolLock,
   writeClaudeAccountPoolState,
 } from "./claude-account-pool.mjs";
-import { importClaudeAccount } from "./claude-oauth-credentials.mjs";
+import { importClaudeAccount, reconcileClaudeCliCredentials } from "./claude-oauth-credentials.mjs";
 
 export async function handleClaudeAccountPool(action, value, {
   stdout = process.stdout,
@@ -26,6 +26,10 @@ export async function handleClaudeAccountPool(action, value, {
   }
 
   if (!action || action === "status") {
+    try {
+      await reconcileClaudeCliCredentials({ filePath, homesDir });
+    } catch {}
+
     const snapshot = claudeSubscriptionAccountPoolSnapshot({ filePath, homesDir });
     let usage = {};
     try {
@@ -60,7 +64,7 @@ export async function handleClaudeAccountPool(action, value, {
       const account = await importClaudeAccount(value, { filePath, homesDir });
       stdout.write(`${JSON.stringify({ account })}\n`);
     } catch (err) {
-      throw new Error("No valid Claude Code credentials found. Please log into Claude Code with 'claude' first.", {
+      throw new Error(err?.message || "No valid Claude Code credentials found. Please log into Claude Code with 'claude' first.", {
         cause: err,
       });
     }
@@ -161,15 +165,81 @@ export async function handleClaudeAccountPool(action, value, {
       poolState = { accounts: {} };
     }
 
-    const accounts = Array.isArray(snapshot?.accounts)
+    const {
+      claudeRotationCandidates,
+      claudeAccountCooldownUntil,
+      isClaudeAccountAuthInvalid,
+    } = await import("./claude-account-rotation.mjs");
+
+    const usageList = Array.isArray(snapshot?.accounts)
       ? snapshot.accounts
-      : Object.entries(poolState.accounts || {}).map(([id, acc]) => ({
-          id,
-          label: acc.label,
-        }));
+      : snapshot?.accounts && typeof snapshot.accounts === "object"
+        ? Object.values(snapshot.accounts)
+        : [];
+    const usageById = new Map(usageList.map((a) => [a?.id, a]).filter(([id]) => id));
+
+    const candidates = claudeRotationCandidates({
+      poolPath: filePath,
+      homesDir,
+      usageById,
+    });
+    const order = candidates.map((c) => c.id);
+    const now = Date.now();
+
+    const poolAccounts = Object.values(poolState.accounts || {}).filter(
+      (a) => a && a.state !== "revoked",
+    );
+
+    const accounts = poolAccounts.map((account) => {
+      const cached = usageById.get(account.id);
+      const fiveHour = cached?.fiveHour || account.usage?.fiveHour;
+      const weekly = cached?.weekly || account.usage?.weekly;
+      const primaryRemaining = fiveHour && Number.isFinite(fiveHour.remainingPercent)
+        ? fiveHour.remainingPercent
+        : null;
+      const secondaryRemaining = weekly && Number.isFinite(weekly.remainingPercent)
+        ? weekly.remainingPercent
+        : null;
+
+      const resetsAtMs = fiveHour?.resetsAtMs || weekly?.resetsAtMs || null;
+      const resetsAtSec = resetsAtMs ? Math.floor(resetsAtMs / 1000) : null;
+
+      const isAuthInvalid = account.health?.state === "reauth-required"
+        || account.subscription?.status === "pending"
+        || isClaudeAccountAuthInvalid(account.id);
+
+      const cooldownUntil = claudeAccountCooldownUntil(account.id) || null;
+      const isCooling = Boolean(cooldownUntil && cooldownUntil > now);
+
+      let health = "healthy";
+      if (isAuthInvalid) {
+        health = "unknown";
+      } else if (isCooling) {
+        health = "soft";
+      } else if (account.health?.state === "drained" || (primaryRemaining !== null && primaryRemaining <= 0)) {
+        health = "drained";
+      } else if (primaryRemaining !== null && primaryRemaining <= 15) {
+        health = "soft";
+      }
+
+      return {
+        id: account.id,
+        label: account.identity?.email || account.label || "Claude account",
+        preferred: poolState.policy?.selectedAccountId === account.id,
+        planType: account.tier || account.identity?.subscriptionType || "pro",
+        health,
+        cooling: isCooling,
+        cooldownUntil,
+        primaryRemainingPercent: primaryRemaining,
+        secondaryRemainingPercent: secondaryRemaining,
+        resetsAt: resetsAtSec,
+        authInvalid: isAuthInvalid,
+      };
+    });
 
     stdout.write(`${JSON.stringify({
       fetchedAt: snapshot?.fetchedAt || new Date().toISOString(),
+      rotation: order,
       accounts,
     })}\n`);
     return;

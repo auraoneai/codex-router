@@ -305,14 +305,17 @@ private struct IslandOverlayView: View {
     .foregroundStyle(.white)
     .onAppear {
       display.setActiveRequestCount(activeSessions.count)
-      display.setAccountRowCount(store.chatGptAccountUsage?.accounts.count ?? 0)
+      display.setAccountRowCount(max(store.chatGptAccountUsage?.accounts.count ?? 0, store.claudeAccountUsage?.accounts.count ?? 0))
     }
     .onChange(of: store.activeRequests.count) { count in
       display.setActiveRequestCount(activeSessions.count)
       if count == 0 { selectedSessionID = nil }
     }
-    .onChange(of: store.chatGptAccountUsage?.accounts.count) { count in
-      display.setAccountRowCount(count ?? 0)
+    .onChange(of: store.chatGptAccountUsage?.accounts.count) { _ in
+      display.setAccountRowCount(max(store.chatGptAccountUsage?.accounts.count ?? 0, store.claudeAccountUsage?.accounts.count ?? 0))
+    }
+    .onChange(of: store.claudeAccountUsage?.accounts.count) { _ in
+      display.setAccountRowCount(max(store.chatGptAccountUsage?.accounts.count ?? 0, store.claudeAccountUsage?.accounts.count ?? 0))
     }
     .onChange(of: store.chatGptResetCreditPrompt?.accountId) { accountId in
       if accountId != nil {
@@ -2324,27 +2327,56 @@ private struct IslandDenseSwitch: View {
   }
 }
 
-/// Per-account quota for every ChatGPT subscription in the pool, in the order
-/// rotation will use them. The top row is the account the next turn gets.
+private enum IslandQuotaTab: String, CaseIterable, Identifiable {
+  case chatgpt = "ChatGPT"
+  case claude = "Claude"
+
+  var id: String { rawValue }
+}
+
+/// Per-account quota for ChatGPT and Claude subscriptions in the pool, in the
+/// order rotation will use them. The top row is the account the next turn gets.
 private struct IslandAccountQuotaTable: View {
   @ObservedObject var store: RouterStore
+  @State private var selectedTab: IslandQuotaTab = .chatgpt
+
+  private var activeSnapshot: ChatGptAccountPoolUsage? {
+    switch selectedTab {
+    case .chatgpt: return store.chatGptAccountUsage
+    case .claude: return store.claudeAccountUsage
+    }
+  }
+
+  private var activePreferredOverride: String? {
+    switch selectedTab {
+    case .chatgpt: return store.chatGptPreferredOverride
+    case .claude: return store.claudePreferredOverride
+    }
+  }
+
+  private var isOperationPending: Bool {
+    switch selectedTab {
+    case .chatgpt: return store.chatGptAccountOperation != nil
+    case .claude: return store.claudeAccountOperation != nil
+    }
+  }
 
   var body: some View {
     TimelineView(.periodic(from: .now, by: 15)) { timeline in
       VStack(alignment: .leading, spacing: 2) {
         header
-        if let snapshot = store.chatGptAccountUsage, !snapshot.accounts.isEmpty {
+        if let snapshot = activeSnapshot, !snapshot.accounts.isEmpty {
           let ranks = snapshot.rotationRanks
           ForEach(snapshot.orderedRows()) { account in
             row(
               account,
               rank: ranks[account.id],
-              preferred: snapshot.isPreferred(account, override: store.chatGptPreferredOverride),
+              preferred: snapshot.isPreferred(account, override: activePreferredOverride),
               now: timeline.date
             )
           }
         } else {
-          Text(routerLocalized("Loading native Codex usage…"))
+          Text(selectedTab == .chatgpt ? routerLocalized("No ChatGPT accounts in pool") : routerLocalized("No Claude accounts in pool"))
             .font(.system(size: 9, weight: .medium, design: .rounded))
             .foregroundStyle(routerMuted)
             .frame(height: IslandAccountQuotaPresentation.rowHeight, alignment: .leading)
@@ -2364,11 +2396,35 @@ private struct IslandAccountQuotaTable: View {
     HStack(spacing: 5) {
       Color.clear
         .frame(width: IslandAccountQuotaPresentation.toggleHitWidth)
-      Text(headerTitle)
+
+      HStack(spacing: 2) {
+        ForEach(IslandQuotaTab.allCases) { tab in
+          Button {
+            selectedTab = tab
+          } label: {
+            Text(tab.rawValue)
+              .font(.system(size: 8, weight: .bold, design: .monospaced))
+              .foregroundStyle(selectedTab == tab ? routerText : routerMuted)
+              .padding(.horizontal, 5)
+              .padding(.vertical, 2)
+              .background(
+                selectedTab == tab ? Color.white.opacity(0.12) : Color.clear,
+                in: Capsule()
+              )
+          }
+          .buttonStyle(.plain)
+        }
+      }
+      .padding(1)
+      .background(Color.white.opacity(0.04), in: Capsule())
+
+      Text(headerRotationText)
         .font(.system(size: 8, weight: .semibold, design: .monospaced))
         .foregroundStyle(routerMuted)
         .lineLimit(1)
+
       Spacer()
+
       Text(shortColumnTitle)
         .frame(width: IslandAccountQuotaPresentation.quotaWidth, alignment: .trailing)
       Text("in")
@@ -2387,20 +2443,34 @@ private struct IslandAccountQuotaTable: View {
     .frame(height: IslandAccountQuotaPresentation.headerHeight)
   }
 
+  private var headerRotationText: String {
+    guard let snapshot = activeSnapshot, !snapshot.accounts.isEmpty else {
+      return ""
+    }
+    let usable = snapshot.rotation.count
+    guard usable > 0 else {
+      return "· \(routerLocalized("no rotation"))"
+    }
+    return "· \(usable)/\(snapshot.accounts.count)"
+  }
+
   /// The columns name the window they are actually showing, taken from the pool
   /// rather than assumed: an account can report a 5-hour short window while
   /// another reports none at all. The fallbacks apply only when no account
   /// contributed a duration.
   private var shortColumnTitle: String {
-    dominantLabel(store.chatGptAccountWindows.shortWindow) ?? "5h"
+    if selectedTab == .claude { return "5h" }
+    return dominantLabel(store.chatGptAccountWindows.shortWindow) ?? "5h"
   }
 
   private var longColumnTitle: String {
-    dominantLabel(store.chatGptAccountWindows.longWindow) ?? "7d"
+    if selectedTab == .claude { return "7d" }
+    return dominantLabel(store.chatGptAccountWindows.longWindow) ?? "7d"
   }
 
   private var showsBankedResets: Bool {
-    (store.chatGptAccountUsage?.accounts ?? []).contains {
+    guard selectedTab == .chatgpt else { return false }
+    return (store.chatGptAccountUsage?.accounts ?? []).contains {
       $0.bankedResetCount > 0 || store.isResetCreditCountUnverified($0.id)
         || store.canRetryPendingChatGptResetCredit($0.id)
     }
@@ -2418,19 +2488,6 @@ private struct IslandAccountQuotaTable: View {
     return counts.max { left, right in
       left.value == right.value ? left.key > right.key : left.value < right.value
     }?.key
-  }
-
-  /// Names how many subscriptions rotation can actually reach, which is the
-  /// number that matters when one has drained out of the set.
-  private var headerTitle: String {
-    guard let snapshot = store.chatGptAccountUsage, !snapshot.accounts.isEmpty else {
-      return routerLocalized("All usage")
-    }
-    let usable = snapshot.rotation.count
-    guard usable > 0 else {
-      return "\(routerLocalized("All usage")) · \(routerLocalized("no rotation"))"
-    }
-    return "\(routerLocalized("All usage")) · \(usable)/\(snapshot.accounts.count) \(routerLocalized("in rotation"))"
   }
 
   @ViewBuilder
@@ -2453,7 +2510,13 @@ private struct IslandAccountQuotaTable: View {
         .opacity(excluded ? 0.55 : 1)
 
       Button {
-        Task { await store.preferChatGptAccount(account.id) }
+        Task {
+          if selectedTab == .chatgpt {
+            await store.preferChatGptAccount(account.id)
+          } else {
+            await store.preferClaudeAccount(account.id)
+          }
+        }
       } label: {
         HStack(spacing: 5) {
           Text(IslandAccountQuotaPresentation.rankText(rank))
@@ -2491,7 +2554,7 @@ private struct IslandAccountQuotaTable: View {
         .contentShape(Rectangle())
       }
       .buttonStyle(.plain)
-      .disabled(preferred || store.chatGptAccountOperation != nil)
+      .disabled(preferred || isOperationPending)
       .help(
         preferred
           ? routerLocalized("Preferred subscription")
@@ -2502,7 +2565,7 @@ private struct IslandAccountQuotaTable: View {
         preferred ? "" : routerLocalized("Double-click to prefer this subscription")
       )
       .opacity(excluded ? 0.55 : 1)
-      if showsBankedResets {
+      if showsBankedResets && selectedTab == .chatgpt {
         bankedResetControl(for: account)
       }
     }
@@ -2603,6 +2666,23 @@ private struct IslandAccountQuotaTable: View {
   private func resolvedWindows(
     for account: ChatGptAccountPoolRow
   ) -> (short: ChatGptWindowFacts?, long: ChatGptWindowFacts?) {
+    if selectedTab == .claude {
+      let shortFacts = account.primaryRemainingPercent.map {
+        ChatGptWindowFacts(
+          durationMinutes: 300,
+          remainingPercent: $0,
+          resetsAt: account.resetsAt
+        )
+      }
+      let longFacts = account.secondaryRemainingPercent.map {
+        ChatGptWindowFacts(
+          durationMinutes: 10080,
+          remainingPercent: $0,
+          resetsAt: account.resetsAt
+        )
+      }
+      return (shortFacts, longFacts)
+    }
     let durations = store.chatGptAccountWindows
     guard durations.matches(store.chatGptAccountUsage) else { return (nil, nil) }
     return (durations.shortWindow[account.id], durations.longWindow[account.id])

@@ -369,6 +369,8 @@ enum RouterChineseText {
     "Refreshing…": "刷新中…",
     "%d accounts": "%d 个账号",
     "1 account": "1 个账号",
+    "No ChatGPT accounts in pool": "池中无 ChatGPT 账号",
+    "No Claude accounts in pool": "池中无 Claude 账号",
     "Restart": "重启",
     "Restarting…": "正在重启…",
     "Restart failed: %@": "重启失败：%@",

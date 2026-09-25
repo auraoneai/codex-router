@@ -171,7 +171,7 @@ export async function importClaudeAccount(label, {
   });
 
   if (!credentials) {
-    throw new Error("No valid Claude Code credentials found. Please log in with 'claude' first.");
+    throw new Error("No valid Claude Code credentials found. Please log into Claude Code with 'claude' first.");
   }
 
   const blob = credentials.claudeAiOauth || credentials;
@@ -211,17 +211,15 @@ export async function importClaudeAccount(label, {
     if (existingAccount) {
       const trimmedLabel = typeof label === "string" ? label.trim() : "";
       if (trimmedLabel.includes("@") && identity?.email && trimmedLabel.toLowerCase() !== identity.email.toLowerCase()) {
-        throw new Error(
-          `Claude Code is currently authenticated as ${identity.email}, which is already registered. To add ${trimmedLabel}, sign into that account with 'claude auth login --email ${trimmedLabel}' first.`,
-        );
-      }
-      if (existingAccount.health?.state !== "reauth-required" && !trimmedLabel) {
-        throw new Error(
-          `Claude account ${identity?.email || existingAccount.label || existingAccount.id} is already registered. To add a new account, sign into that account with 'claude auth login' first.`,
-        );
+        return createClaudeSubscriptionAccount({
+          label: trimmedLabel.slice(0, 120),
+          filePath,
+          homesDir,
+          now,
+        });
       }
 
-      // Update in place
+      // Re-import of the same account updates in place
       const credPath = claudeSubscriptionAccountCredentialsPath(existingAccount.id, { homesDir });
       writePrivateJson(credPath, { claudeAiOauth: blob }, { directoryMode: 0o700, fileMode: 0o600 });
 
@@ -236,7 +234,7 @@ export async function importClaudeAccount(label, {
       }
       existingAccount.health = {
         state: "healthy",
-        lastSuccessAt: existingAccount.health?.lastSuccessAt,
+        lastSuccessAt: now,
       };
       existingAccount.subscription = {
         status: "usable",
@@ -272,5 +270,94 @@ export async function importClaudeAccount(label, {
     }
 
     return sanitizeClaudeAccount(poolAccount || created);
+  }, { filePath });
+}
+
+export async function reconcileClaudeCliCredentials({
+  filePath = CLAUDE_ACCOUNT_POOL_PATH,
+  homesDir = CLAUDE_ACCOUNT_HOMES_DIR,
+  platform = process.platform,
+  env = process.env,
+  securityBinary = env.CLAUDE_SECURITY_BIN || "/usr/bin/security",
+  execFileSyncImpl = execFileSync,
+  credentialsFile = env.CLAUDE_CREDENTIALS_FILE || defaultClaudeCredentialsPath(),
+  profileUrl = PROFILE_URL,
+  fetchImpl = globalThis.fetch,
+  now = Date.now(),
+} = {}) {
+  if (discoveryDisabled()) return null;
+
+  const credentials = readClaudeCodeCredentials({
+    platform,
+    env,
+    securityBinary,
+    execFileSyncImpl,
+    credentialsFile,
+  });
+  if (!credentials) return null;
+
+  const blob = credentials.claudeAiOauth || credentials;
+  const accessToken = typeof blob.accessToken === "string" ? blob.accessToken.trim() : "";
+  if (!accessToken) return null;
+  const fingerprint = credentialFingerprint(blob);
+
+  return await withClaudeAccountPoolLock(async () => {
+    const state = readClaudeAccountPoolState(filePath);
+    let identity;
+
+    // Check if these credentials belong to an account already
+    let matchedAccount;
+    for (const acc of Object.values(state.accounts || {})) {
+      if (acc.state === "revoked") continue;
+      const credPath = claudeSubscriptionAccountCredentialsPath(acc.id, { homesDir });
+      if (existsSync(credPath)) {
+        try {
+          const storedCreds = JSON.parse(readFileSync(credPath, "utf8"));
+          if (credentialFingerprint(storedCreds) === fingerprint) {
+            matchedAccount = acc;
+            break;
+          }
+        } catch {}
+      }
+    }
+
+    if (matchedAccount) {
+      if (matchedAccount.health?.state === "reauth-required" || matchedAccount.subscription?.status !== "usable") {
+        const credPath = claudeSubscriptionAccountCredentialsPath(matchedAccount.id, { homesDir });
+        writePrivateJson(credPath, { claudeAiOauth: blob }, { directoryMode: 0o700, fileMode: 0o600 });
+        if (!matchedAccount.identity?.email) {
+          identity = await resolveClaudeIdentity(accessToken, { profileUrl, fetchImpl });
+          if (identity) matchedAccount.identity = identity;
+        }
+        matchedAccount.health = { state: "healthy", lastSuccessAt: now };
+        matchedAccount.subscription = { status: "usable" };
+        writeClaudeAccountPoolState(state, filePath);
+        return sanitizeClaudeAccount(matchedAccount);
+      }
+      return null;
+    }
+
+    // Credentials do not belong to an active healthy account
+    const pendingAccount = Object.values(state.accounts || {}).find(
+      (acc) => acc.state !== "revoked" && (acc.subscription?.status === "pending" || acc.health?.state === "reauth-required"),
+    );
+
+    if (pendingAccount) {
+      identity = await resolveClaudeIdentity(accessToken, { profileUrl, fetchImpl });
+      const credPath = claudeSubscriptionAccountCredentialsPath(pendingAccount.id, { homesDir });
+      writePrivateJson(credPath, { claudeAiOauth: blob }, { directoryMode: 0o700, fileMode: 0o600 });
+      if (identity) {
+        pendingAccount.identity = identity;
+        if (!pendingAccount.label || /^Claude account \d+$/.test(pendingAccount.label)) {
+          pendingAccount.label = identity.email;
+        }
+      }
+      pendingAccount.health = { state: "healthy", lastSuccessAt: now };
+      pendingAccount.subscription = { status: "usable" };
+      writeClaudeAccountPoolState(state, filePath);
+      return sanitizeClaudeAccount(pendingAccount);
+    }
+
+    return null;
   }, { filePath });
 }
