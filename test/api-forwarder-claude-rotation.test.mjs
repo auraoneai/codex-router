@@ -10,6 +10,10 @@ import { fileURLToPath } from "node:url";
 import { openPort } from "./port-pool.mjs";
 import { protectPrivateFile } from "../src/file-security.mjs";
 import { isClaudeAccountAuthInvalid } from "../src/claude-account-rotation.mjs";
+import {
+  injectClaudeAttributionSystemPrompt,
+  CLAUDE_CODE_ATTRIBUTION_HEADER_TEXT,
+} from "../src/claude-attribution.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const internalKey = "test-claude-pool-forwarder-internal-key-12345678";
@@ -627,3 +631,33 @@ test("Fail-closed: pool configured + all credentials unreadable fails with 503 a
     rmSync(testRoot, { recursive: true, force: true });
   }
 });
+
+test("Claude attribution system prompt injection", () => {
+  // Case 1: undefined system
+  const p1 = {};
+  injectClaudeAttributionSystemPrompt(p1);
+  assert.deepEqual(p1.system, [{ type: "text", text: CLAUDE_CODE_ATTRIBUTION_HEADER_TEXT }]);
+
+  // Case 2: string system
+  const p2 = { system: "You are a helpful assistant." };
+  injectClaudeAttributionSystemPrompt(p2);
+  assert.equal(p2.system, `${CLAUDE_CODE_ATTRIBUTION_HEADER_TEXT}\n\nYou are a helpful assistant.`);
+
+  // Case 3: string system already containing header
+  const p3 = { system: `${CLAUDE_CODE_ATTRIBUTION_HEADER_TEXT}\n\nExisting prompt` };
+  injectClaudeAttributionSystemPrompt(p3);
+  assert.equal(p3.system, `${CLAUDE_CODE_ATTRIBUTION_HEADER_TEXT}\n\nExisting prompt`);
+
+  // Case 4: array system
+  const p4 = { system: [{ type: "text", text: "You are a helpful assistant." }] };
+  injectClaudeAttributionSystemPrompt(p4);
+  assert.equal(p4.system.length, 2);
+  assert.equal(p4.system[0].text, CLAUDE_CODE_ATTRIBUTION_HEADER_TEXT);
+  assert.equal(p4.system[1].text, "You are a helpful assistant.");
+
+  // Case 5: array system already containing header
+  const p5 = { system: [{ type: "text", text: CLAUDE_CODE_ATTRIBUTION_HEADER_TEXT }] };
+  injectClaudeAttributionSystemPrompt(p5);
+  assert.equal(p5.system.length, 1);
+});
+

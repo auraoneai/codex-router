@@ -128,6 +128,10 @@ import {
   claudeSharedRejection,
   parseClaudeUnifiedHeaders,
 } from "./rate-limit-headers.mjs";
+import {
+  CLAUDE_CODE_ATTRIBUTION_HEADER_TEXT,
+  injectClaudeAttributionSystemPrompt,
+} from "./claude-attribution.mjs";
 
 installStableFetchTransport();
 
@@ -1487,9 +1491,9 @@ function normalizeBody(buffer, contentType, route) {
   const targetPath = adapter?.targetPath
     ? adapter.targetPath({ model, body: payload })
     : undefined;
-  // The provider still answers protocol, auth profile, and identity; the
-  // endpoint answers where the request goes and what authenticates it. For
-  // every provider but a per-model-endpoint one they are the same object.
+  if (provider.protocol === "anthropic" || provider.id === "anthropic-api") {
+    injectClaudeAttributionSystemPrompt(payload);
+  }
   const endpoint = endpointForModel(model);
   return {
     body: Buffer.from(JSON.stringify(payload), "utf8"),
@@ -1849,11 +1853,22 @@ async function runClaudeAccountAttempts(normalized, {
       continue;
     }
 
+    let attemptBody = upstreamBody;
+    try {
+      const parsedBody = typeof attemptBody === "string"
+        ? JSON.parse(attemptBody)
+        : JSON.parse(attemptBody.toString("utf8"));
+      if (parsedBody && typeof parsedBody === "object") {
+        injectClaudeAttributionSystemPrompt(parsedBody);
+        attemptBody = JSON.stringify(parsedBody);
+      }
+    } catch {}
+
     const baseUrl = providerBaseUrl(normalized.endpoint) || "https://api.anthropic.com";
     const target = upstreamTarget({ baseUrl }, normalized, route, requestUrl.search);
     const headers = upstreamHeaders(
       request.headers,
-      upstreamBody,
+      attemptBody,
       tokenSession.accessToken,
       normalized.provider,
       {
@@ -1875,7 +1890,7 @@ async function runClaudeAccountAttempts(normalized, {
       attemptResponse = await fetch(target, {
         method: request.method,
         headers,
-        body: upstreamBody,
+        body: attemptBody,
         signal: controller.signal,
         redirect: route === "/embeddings" ? "error" : "follow",
       });
