@@ -41,7 +41,28 @@ export async function handleClaudeAccountPool(action, value, {
       : usage.accounts && typeof usage.accounts === "object"
         ? Object.values(usage.accounts)
         : [];
-    const usageById = new Map(usageList.map((a) => [a?.id, a]).filter(([id]) => id));
+    let usageById = new Map(usageList.map((a) => [a?.id, a]).filter(([id]) => id));
+
+    const activeUsableAccounts = Object.values(snapshot.accounts || {}).filter(
+      (a) => a?.state === "active" && (a?.subscription?.status === "usable" || a?.subscription?.usable === true),
+    );
+    const hasMissingUsage = activeUsableAccounts.some((a) => !usageById.has(a.id));
+    if (hasMissingUsage && activeUsableAccounts.length > 0) {
+      try {
+        const { probeClaudeAccountUsage } = await import("./claude-usage-probe.mjs");
+        const probed = await probeClaudeAccountUsage({
+          poolPath: filePath,
+          homesDir,
+          cachePath: usagePath,
+        });
+        const freshList = Array.isArray(probed?.accounts)
+          ? probed.accounts
+          : probed?.accounts && typeof probed.accounts === "object"
+            ? Object.values(probed.accounts)
+            : [];
+        usageById = new Map(freshList.map((a) => [a?.id, a]).filter(([id]) => id));
+      } catch {}
+    }
 
     const accountsWithUsage = {};
     for (const [id, account] of Object.entries(snapshot.accounts || {})) {
@@ -62,6 +83,12 @@ export async function handleClaudeAccountPool(action, value, {
   if (action === "add") {
     try {
       const account = await importClaudeAccount(value, { filePath, homesDir });
+      if (account?.subscription?.status === "usable") {
+        try {
+          const { probeClaudeAccountUsage } = await import("./claude-usage-probe.mjs");
+          await probeClaudeAccountUsage({ poolPath: filePath, homesDir, cachePath: usagePath });
+        } catch {}
+      }
       stdout.write(`${JSON.stringify({ account })}\n`);
     } catch (err) {
       throw new Error(err?.message || "No valid Claude Code credentials found. Please log into Claude Code with 'claude' first.", {
@@ -143,19 +170,13 @@ export async function handleClaudeAccountPool(action, value, {
 
   if (action === "usage") {
     let snapshot;
-    if (value === "cached") {
+    const isCachedOnly = value === "cached";
+    if (isCachedOnly) {
       try {
         snapshot = JSON.parse(readFileSync(usagePath, "utf8"));
       } catch {
         snapshot = { accounts: [] };
       }
-    } else {
-      const { probeClaudeAccountUsage } = await import("./claude-usage-probe.mjs");
-      snapshot = await probeClaudeAccountUsage({
-        poolPath: filePath,
-        homesDir,
-        cachePath: usagePath,
-      });
     }
 
     let poolState;
@@ -165,18 +186,45 @@ export async function handleClaudeAccountPool(action, value, {
       poolState = { accounts: {} };
     }
 
-    const {
-      claudeRotationCandidates,
-      claudeAccountCooldownUntil,
-      isClaudeAccountAuthInvalid,
-    } = await import("./claude-account-rotation.mjs");
+    const poolAccounts = Object.values(poolState.accounts || {}).filter(
+      (a) => a && a.state !== "revoked",
+    );
+    const usableAccounts = poolAccounts.filter(
+      (a) => a.subscription?.status === "usable" || a.subscription?.usable === true,
+    );
 
     const usageList = Array.isArray(snapshot?.accounts)
       ? snapshot.accounts
       : snapshot?.accounts && typeof snapshot.accounts === "object"
         ? Object.values(snapshot.accounts)
         : [];
-    const usageById = new Map(usageList.map((a) => [a?.id, a]).filter(([id]) => id));
+    let usageById = new Map(usageList.map((a) => [a?.id, a]).filter(([id]) => id));
+
+    const cacheAgeMs = snapshot?.fetchedAt ? (Date.now() - new Date(snapshot.fetchedAt).getTime()) : Infinity;
+    const hasMissingUsableAccount = usableAccounts.some((a) => !usageById.has(a.id));
+
+    if (!isCachedOnly || hasMissingUsableAccount || (usableAccounts.length > 0 && cacheAgeMs > 300_000)) {
+      try {
+        const { probeClaudeAccountUsage } = await import("./claude-usage-probe.mjs");
+        snapshot = await probeClaudeAccountUsage({
+          poolPath: filePath,
+          homesDir,
+          cachePath: usagePath,
+        });
+        const freshList = Array.isArray(snapshot?.accounts)
+          ? snapshot.accounts
+          : snapshot?.accounts && typeof snapshot.accounts === "object"
+            ? Object.values(snapshot.accounts)
+            : [];
+        usageById = new Map(freshList.map((a) => [a?.id, a]).filter(([id]) => id));
+      } catch {}
+    }
+
+    const {
+      claudeRotationCandidates,
+      claudeAccountCooldownUntil,
+      isClaudeAccountAuthInvalid,
+    } = await import("./claude-account-rotation.mjs");
 
     const candidates = claudeRotationCandidates({
       poolPath: filePath,
@@ -185,11 +233,6 @@ export async function handleClaudeAccountPool(action, value, {
     });
     const order = candidates.map((c) => c.id);
     const now = Date.now();
-
-    const poolAccounts = Object.values(poolState.accounts || {}).filter(
-      (a) => a && a.state !== "revoked",
-    );
-
     const accounts = poolAccounts.map((account) => {
       const cached = usageById.get(account.id);
       const fiveHour = cached?.fiveHour || account.usage?.fiveHour;

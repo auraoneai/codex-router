@@ -41,7 +41,9 @@ test("provider registry exposes configured API and OAuth model families", () => 
       .map((model) => model.slug),
     [
       "ainetcafe/kimi-k3",
+      "anthropic-api/claude-fable-5.1",
       "anthropic-api/claude-opus-4.8",
+      "anthropic-api/claude-opus-5.5",
       "antigravity-oauth/gemini-3.1-pro",
       "antigravity-oauth/gemini-3.5-flash",
       "antigravity-oauth/gemini-3.6-flash",
@@ -685,7 +687,9 @@ test("provider registry exposes configured API and OAuth model families", () => 
     (model) => model.supportsImageDetailOriginal === true && model.provider !== "kiro-prism",
   ).map((model) => model.slug);
   assert.deepEqual(originalDetailSlugs.sort(), [
+    "anthropic-api/claude-fable-5.1",
     "anthropic-api/claude-opus-4.8",
+    "anthropic-api/claude-opus-5.5",
     "deepseek/deepseek-v4-flash-vision-exp",
     "grok-api/grok-4.5",
     "grok-oauth/grok-4.5",

@@ -172,6 +172,7 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
   const [loginRetryingId, setLoginRetryingId] = useState<string | null>(null);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [claudeAccountError, setClaudeAccountError] = useState<string | null>(null);
+  const [loginPendingClaudeId, setLoginPendingClaudeId] = useState<string | null>(null);
   const [accountOverlays, setAccountOverlays] = useState<AccountOverlay[]>([]);
   const refreshRef = useRef(onRefresh);
   refreshRef.current = onRefresh;
@@ -310,6 +311,38 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [loginAttempt?.error, loginAttempt?.status, loginPendingId, loginPendingUsable, loginRetryingId, observedLoginAttempt?.status]);
+
+  const loginPendingClaudeUsable = loginPendingClaudeId
+    ? claudeAccountPool?.accounts?.[loginPendingClaudeId]?.subscription?.status === "usable"
+      && claudeAccountPool?.accounts?.[loginPendingClaudeId]?.subscription?.authenticated !== false
+    : false;
+
+  useEffect(() => {
+    if (!loginPendingClaudeId) return;
+    if (loginPendingClaudeUsable) {
+      setLoginPendingClaudeId(null);
+      if (api && typeof api.syncClaudeAccountUsage === "function") {
+        void api.syncClaudeAccountUsage().then(() => refreshRef.current());
+      }
+      return;
+    }
+    let cancelled = false;
+    let timer: number | undefined;
+    const deadline = Date.now() + 5 * 60_000;
+    const poll = async () => {
+      if (Date.now() > deadline) {
+        if (!cancelled) setLoginPendingClaudeId(null);
+        return;
+      }
+      await refreshRef.current();
+      if (!cancelled) timer = window.setTimeout(() => void poll(), 1_500);
+    };
+    timer = window.setTimeout(() => void poll(), 1_500);
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [api, loginPendingClaudeId, loginPendingClaudeUsable]);
   const trayControlsUnavailable = trayCapability?.supported === false;
   const repairFailures = useMemo(
     () => (repairReport?.checks ?? []).filter((check) => check.status === "fail"),
@@ -436,13 +469,34 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
 
   const claudeAccountSelection = claudeAccountPool?.policy?.selectedAccountId;
 
+  const loginClaudeAccount = async (account: ClaudeAccount) => {
+    if (!api || !account.id || loginPendingClaudeId === account.id) return;
+    setLoginPendingClaudeId(account.id);
+    try {
+      await runAction(`Login ${account.identity?.email || account.label || "Claude account"}`, () => api.loginClaudeSubscriptionAccount(account.id));
+    } catch (err: any) {
+      setLoginPendingClaudeId(null);
+      setClaudeAccountError(err?.message || "Could not launch Claude login in terminal.");
+    }
+  };
+
   const addClaudeAccount = async () => {
     if (!api) return;
     setClaudeAccountError(null);
     try {
       await runAction("Add Claude account", async () => {
-        await api.addClaudeSubscriptionAccount(newClaudeAccountLabel);
+        const res = await api.addClaudeSubscriptionAccount(newClaudeAccountLabel);
         setNewClaudeAccountLabel("");
+        const addedAccount = (res as any)?.account;
+        if (addedAccount?.id) {
+          if (addedAccount.subscription?.status === "usable") {
+            if (typeof api.syncClaudeAccountUsage === "function") {
+              void api.syncClaudeAccountUsage().then(() => refreshRef.current());
+            }
+          } else if (addedAccount.subscription?.status === "pending") {
+            void loginClaudeAccount(addedAccount);
+          }
+        }
       });
     } catch (err: any) {
       setClaudeAccountError(err?.message || "No valid Claude Code credentials found. Please run 'claude login' in your terminal first.");
@@ -932,21 +986,25 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
                 const isSelected = claudeAccountSelection === account.id;
                 const isPaused = account.state === "paused";
                 const isPending = account.subscription?.status === "pending";
+                const isLoggingIn = loginPendingClaudeId === account.id;
                 const isAuthInvalid = account.health?.state === "reauth-required" || isPending;
+                const isUsable = !isAuthInvalid && account.subscription?.status === "usable";
                 const isCooling = account.health?.state === "cooling";
                 const isDrained = account.health?.state === "drained";
 
                 const statusLabel = isPaused
                   ? "Paused"
-                  : isPending
-                    ? "Sign-in required"
-                    : isAuthInvalid
-                      ? "Re-auth required"
-                      : isCooling
-                        ? "Cooling down"
-                        : isDrained
-                          ? "Quota exhausted"
-                          : "Ready";
+                  : isLoggingIn
+                    ? "Authenticating in Terminal..."
+                    : isPending
+                      ? "Sign-in required"
+                      : isAuthInvalid
+                        ? "Re-auth required"
+                        : isCooling
+                          ? "Cooling down"
+                          : isDrained
+                            ? "Quota exhausted"
+                            : "Ready";
 
                 const title = account.identity?.email || account.label || "Claude account";
                 const labelPrefix = account.identity?.email && account.label && account.label.toLowerCase() !== account.identity.email.toLowerCase() ? `${account.label} · ` : "";
@@ -963,11 +1021,13 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
                   const resetStr = formatTimeUntil(weeklyUsage.resetsAtMs);
                   usageParts.push(`weekly: ${Math.round(weeklyUsage.remainingPercent!)}% remaining${resetStr ? ` (${resetStr})` : ""}`);
                 }
-                const usageLabel = isPending
-                  ? "Click Login to authenticate"
-                  : usageParts.length > 0
-                    ? usageParts.join(" · ")
-                    : "Usage pending first request";
+                const usageLabel = isLoggingIn
+                  ? "Waiting for sign-in in Terminal..."
+                  : isPending
+                    ? "Click Login to authenticate"
+                    : usageParts.length > 0
+                      ? usageParts.join(" · ")
+                      : "Usage pending first request";
 
                 return (
                   <div
@@ -983,23 +1043,23 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
                         variant={isSelected ? "secondary" : "ghost"}
                         aria-pressed={isSelected}
                         aria-label={isSelected ? `Selected Claude account: ${title}` : `Select Claude account: ${title}`}
-                        disabled={!api || isPaused || isPending}
+                        disabled={!api || isPaused || isPending || isLoggingIn}
                         onClick={() => api && void runAction("Switch Claude account", () => api.setClaudeAccountSelection(account.id))}
                       >{isSelected ? <><Check aria-hidden size={13} strokeWidth={1.9} /> Selected</> : <><Check aria-hidden size={13} strokeWidth={1.9} /> Select</>}</Button>
                       <Button
-                        variant={isPending ? "secondary" : "ghost"}
-                        title={(!isAuthInvalid && account.subscription?.status === "usable") ? "Account is authenticated. Click to re-authenticate." : "Sign in to this account"}
-                        disabled={!api || isPaused}
-                        onClick={() => api && void runAction(`Login ${title}`, () => api.loginClaudeSubscriptionAccount(account.id))}
-                      ><LogIn aria-hidden size={13} strokeWidth={1.7} /> Login</Button>
+                        variant={(!isUsable && !isLoggingIn) ? "secondary" : "ghost"}
+                        title={isUsable ? "Account is authenticated" : "Sign in to this account"}
+                        disabled={!api || isPaused || isLoggingIn || isUsable}
+                        onClick={() => void loginClaudeAccount(account)}
+                      >{isLoggingIn ? <><RefreshCw aria-hidden size={13} strokeWidth={1.7} className="spin" /> Logging in...</> : <><LogIn aria-hidden size={13} strokeWidth={1.7} /> Login</>}</Button>
                       <Button
                         variant="ghost"
-                        disabled={!api}
+                        disabled={!api || isLoggingIn}
                         onClick={() => api && void runAction(isPaused ? "Enable Claude account" : "Pause Claude account", () => api.toggleClaudeAccountState(account.id, isPaused ? "enable" : "disable"))}
                       >{isPaused ? "Resume" : "Pause"}</Button>
                       <Button
                         variant="ghost"
-                        disabled={!api}
+                        disabled={!api || isLoggingIn}
                         onClick={() => setRemoveClaudeAccountId(account.id)}
                       ><Trash2 aria-hidden size={13} strokeWidth={1.7} /> Remove</Button>
                     </div>

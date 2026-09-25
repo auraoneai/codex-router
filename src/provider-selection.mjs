@@ -29,6 +29,7 @@ import {
   effectiveProviderCredentialStatus,
   providerApiKeyAuthoritySnapshot,
 } from "./provider-api-key-routing.mjs";
+import { claudeAccountPoolConfigured } from "./claude-account-pool.mjs";
 
 const RETIRED_PROVIDER_ALIASES = new Map([["chatgpt-oauth", "grok-oauth"]]);
 
@@ -112,6 +113,8 @@ export function configuredProviderIds() {
       } else if (provider.id === "devin-cli" && devinCliStatus().configured) {
         configured.push(provider.id);
       }
+    } else if (provider.id === "anthropic-api" && claudeAccountPoolConfigured()) {
+      configured.push(provider.id);
     } else if (providerNeedsNoKey(provider)) {
       // Nothing to configure: local providers run on this machine, while
       // anonymous providers authenticate by the provider's free-model policy.

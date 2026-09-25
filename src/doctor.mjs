@@ -1247,10 +1247,12 @@ if (TARGET === "codex" && existsSync(SEARCH_SIDECARS_PATH)) {
 for (const provider of PROVIDERS.values()) {
   if (provider.kind !== "openai-compatible") continue;
   if (credentialDiscoveryOff) continue;
-  const status = effectiveProviderCredentialStatus(provider, {
-    persistent: true,
-    poolAuthoritySnapshot,
-  });
+  const status = (provider.id === "anthropic-api" && claudeAccountPoolConfigured())
+    ? { configured: true, source: "Claude account pool" }
+    : effectiveProviderCredentialStatus(provider, {
+        persistent: true,
+        poolAuthoritySnapshot,
+      });
   const credentialType = credentialLabel(provider);
   const credentialNoun = credentialType === "API key" ? "key" : credentialType.toLowerCase();
   // A keyless provider has no key to name, so calling its row a "key" and

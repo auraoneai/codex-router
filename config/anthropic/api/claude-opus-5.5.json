@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "slug": "anthropic-api/claude-opus-5.5",
+      "gatewayModel": "anthropic-api-claude-opus-5-5",
+      "upstreamModel": "claude-opus-5-5",
+      "provider": "anthropic-api",
+      "listed": true,
+      "displayName": "Claude Opus 5.5",
+      "description": "Claude Opus 5.5 through Claude subscription accounts for frontier complex reasoning and coding.",
+      "priority": 11,
+      "defaultEffort": "high",
+      "reasoningLevels": [
+        {
+          "effort": "low",
+          "description": "Minimal thinking, fastest responses"
+        },
+        {
+          "effort": "medium",
+          "description": "Balanced adaptive thinking"
+        },
+        {
+          "effort": "high",
+          "description": "Adaptive deep reasoning for agentic work"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extended thinking, recommended for coding"
+        },
+        {
+          "effort": "max",
+          "description": "Unconstrained thinking on every response"
+        }
+      ],
+      "contextWindow": 1048576,
+      "autoCompact": 900000,
+      "inputModalities": [
+        "text",
+        "image"
+      ],
+      "requestProfile": "anthropic-reasoning",
+      "supportsImageDetailOriginal": true,
+      "compHash": "anthropic-api-claude-opus-5-5-v1"
+    }
+  ]
+}

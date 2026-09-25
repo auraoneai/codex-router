@@ -964,6 +964,10 @@ const STATIC_MODEL_SLUG_ALIASES = new Map([
   // public slug routable while catalog publication carries picker state to
   // the protocol-namespaced replacement.
   ["opencode-go/grok-4.5", "opencode-go-responses/grok-4.5"],
+  ["anthropic/claude-fable-5.1", "anthropic-api/claude-fable-5.1"],
+  ["anthropic/claude-opus-5.5", "anthropic-api/claude-opus-5.5"],
+  ["claude/fable-5.1", "anthropic-api/claude-fable-5.1"],
+  ["claude/opus-5.5", "anthropic-api/claude-opus-5.5"],
 ]);
 
 function validatedStaticModelSlugAliases({ models, providers }) {
