@@ -74,13 +74,13 @@ test("preload sends only the engineering choice and observed revision", async ()
   await api.setEngineeringRole(
     "reviewer",
     [{ model: "gpt-5.6-sol", effort: "low" }],
-    [{ model: "kiro-prism/claude-opus-5", effort: "max" }],
+    [{ model: "kiro-prism/claude-opus-5.5", effort: "max" }],
     8,
   );
   assert.deepEqual(JSON.parse(JSON.stringify(calls[1])), ["router-control:setEngineeringRole", {
     role: "reviewer",
     candidates: [{ model: "gpt-5.6-sol", effort: "low" }],
-    optionalCandidates: [{ model: "kiro-prism/claude-opus-5", effort: "max" }],
+    optionalCandidates: [{ model: "kiro-prism/claude-opus-5.5", effort: "max" }],
     revision: 8,
     reset: false,
   }]);

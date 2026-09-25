@@ -272,7 +272,7 @@ test("catalog presence alone is insufficient; the exact offered agent binding mu
 
 test("high-risk reviewer resolution excludes the author's model family", () => {
   const sol = "gpt-6-sol";
-  const opus = "kiro-prism/claude-opus-5";
+  const opus = "kiro-prism/claude-opus-5.5";
   const result = resolveEngineeringAssignment({
     policy: enabledPolicy(),
     role: "reviewer",

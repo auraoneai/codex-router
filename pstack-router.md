@@ -220,7 +220,7 @@ Observed usable publication identities (live inference remains untested here):
   `claude-sonnet-5`.
 - Deputy/integrator/reviewer: native Codex `gpt-5.6-sol` through the signed-in
   OpenAI path. It does not traverse Kiro Prism.
-- Premium reviewer: `kiro-prism/claude-opus-5`, upstream `claude-opus-5`.
+- Premium reviewer: `kiro-prism/claude-opus-5.5`, upstream `claude-opus-5.5`.
 - Additional worker tiers: `kiro-prism/gpt-5.6-luna` and
   `kiro-prism/gpt-5.6-terra`, when eligible for the task.
 
@@ -322,7 +322,7 @@ Example **proposed engineering configuration**, not an already installed schema:
     "reviewer": {
       "primary": { "model": "kiro-prism/claude-sonnet-5", "effort": "max" },
       "fallbacks": [
-        { "model": "kiro-prism/claude-opus-5", "effort": "max" }
+        { "model": "kiro-prism/claude-opus-5.5", "effort": "max" }
       ],
       "requireDifferentFamilyFromAuthor": true
     }
