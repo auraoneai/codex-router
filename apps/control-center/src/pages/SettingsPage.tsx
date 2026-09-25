@@ -912,7 +912,7 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
                 aria-label="New Claude account label"
                 value={newClaudeAccountLabel}
                 maxLength={120}
-                placeholder="Optional nickname (e.g. Work, Personal)"
+                placeholder="Account email or nickname (optional)"
                 onChange={(event) => setNewClaudeAccountLabel(event.target.value)}
               />
               <Button
@@ -920,15 +920,6 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
                 disabled={!api || Boolean(claudeAccountPoolError)}
                 onClick={() => void addClaudeAccount()}
               ><Plus aria-hidden size={14} strokeWidth={1.7} /> Add Claude account</Button>
-              <Button
-                variant="ghost"
-                disabled={!api}
-                onClick={() => {
-                  if (!api) return;
-                  const emailCandidate = newClaudeAccountLabel.trim().includes("@") ? newClaudeAccountLabel.trim() : undefined;
-                  void runAction("Sign in with Claude CLI", () => api.loginClaudeSubscriptionAccount(emailCandidate));
-                }}
-              ><LogIn aria-hidden size={14} strokeWidth={1.7} /> Sign in in Terminal</Button>
               <Button
                 variant="ghost"
                 title="Sync live usage and quota reset times from Anthropic"
@@ -940,19 +931,22 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
               {claudeAccounts.map((account) => {
                 const isSelected = claudeAccountSelection === account.id;
                 const isPaused = account.state === "paused";
-                const isAuthInvalid = account.health?.state === "reauth-required";
+                const isPending = account.subscription?.status === "pending";
+                const isAuthInvalid = account.health?.state === "reauth-required" || isPending;
                 const isCooling = account.health?.state === "cooling";
                 const isDrained = account.health?.state === "drained";
 
                 const statusLabel = isPaused
                   ? "Paused"
-                  : isAuthInvalid
+                  : isPending
                     ? "Sign-in required"
-                    : isCooling
-                      ? "Cooling down"
-                      : isDrained
-                        ? "Quota exhausted"
-                        : "Ready";
+                    : isAuthInvalid
+                      ? "Re-auth required"
+                      : isCooling
+                        ? "Cooling down"
+                        : isDrained
+                          ? "Quota exhausted"
+                          : "Ready";
 
                 const title = account.identity?.email || account.label || "Claude account";
                 const labelPrefix = account.identity?.email && account.label && account.label.toLowerCase() !== account.identity.email.toLowerCase() ? `${account.label} · ` : "";
@@ -969,7 +963,11 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
                   const resetStr = formatTimeUntil(weeklyUsage.resetsAtMs);
                   usageParts.push(`weekly: ${Math.round(weeklyUsage.remainingPercent!)}% remaining${resetStr ? ` (${resetStr})` : ""}`);
                 }
-                const usageLabel = usageParts.length > 0 ? usageParts.join(" · ") : "Usage pending first request";
+                const usageLabel = isPending
+                  ? "Click Login to authenticate"
+                  : usageParts.length > 0
+                    ? usageParts.join(" · ")
+                    : "Usage pending first request";
 
                 return (
                   <div
@@ -985,12 +983,12 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
                         variant={isSelected ? "secondary" : "ghost"}
                         aria-pressed={isSelected}
                         aria-label={isSelected ? `Selected Claude account: ${title}` : `Select Claude account: ${title}`}
-                        disabled={!api || isPaused}
+                        disabled={!api || isPaused || isPending}
                         onClick={() => api && void runAction("Switch Claude account", () => api.setClaudeAccountSelection(account.id))}
                       >{isSelected ? <><Check aria-hidden size={13} strokeWidth={1.9} /> Selected</> : <><Check aria-hidden size={13} strokeWidth={1.9} /> Select</>}</Button>
                       <Button
-                        variant="ghost"
-                        title={(!isAuthInvalid && account.subscription?.status === "usable") ? "Account is authenticated and ready. Click to re-authenticate." : "Sign in to this account"}
+                        variant={isPending ? "secondary" : "ghost"}
+                        title={(!isAuthInvalid && account.subscription?.status === "usable") ? "Account is authenticated. Click to re-authenticate." : "Sign in to this account"}
                         disabled={!api || isPaused}
                         onClick={() => api && void runAction(`Login ${title}`, () => api.loginClaudeSubscriptionAccount(account.id))}
                       ><LogIn aria-hidden size={13} strokeWidth={1.7} /> Login</Button>

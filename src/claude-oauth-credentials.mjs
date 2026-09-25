@@ -170,6 +170,8 @@ export async function importClaudeAccount(label, {
     credentialsFile,
   });
 
+  const trimmedLabel = typeof label === "string" ? label.trim() : "";
+
   if (!credentials) {
     throw new Error("No valid Claude Code credentials found. Please log into Claude Code with 'claude' first.");
   }
@@ -181,7 +183,9 @@ export async function importClaudeAccount(label, {
   // Resolve identity if accessToken available
   let identity;
   if (accessToken) {
-    identity = await resolveClaudeIdentity(accessToken, { profileUrl, fetchImpl });
+    try {
+      identity = await resolveClaudeIdentity(accessToken, { profileUrl, fetchImpl });
+    } catch {}
   }
 
   return await withClaudeAccountPoolLock(async () => {
@@ -192,6 +196,10 @@ export async function importClaudeAccount(label, {
     for (const acc of Object.values(state.accounts || {})) {
       if (acc.state === "revoked") continue;
       if (identity?.accountId && acc.identity?.accountId === identity.accountId) {
+        existingAccount = acc;
+        break;
+      }
+      if (identity?.email && acc.identity?.email && acc.identity.email.toLowerCase() === identity.email.toLowerCase()) {
         existingAccount = acc;
         break;
       }
@@ -209,8 +217,11 @@ export async function importClaudeAccount(label, {
     }
 
     if (existingAccount) {
-      const trimmedLabel = typeof label === "string" ? label.trim() : "";
-      if (trimmedLabel.includes("@") && identity?.email && trimmedLabel.toLowerCase() !== identity.email.toLowerCase()) {
+      const email = identity?.email || existingAccount.identity?.email;
+      const isDifferentEmail = trimmedLabel.includes("@")
+        && (!email || trimmedLabel.toLowerCase() !== email.toLowerCase());
+
+      if (isDifferentEmail) {
         return createClaudeSubscriptionAccount({
           label: trimmedLabel.slice(0, 120),
           filePath,
@@ -245,11 +256,8 @@ export async function importClaudeAccount(label, {
     }
 
     // Create new account
-    const accountLabel = (label && typeof label === "string" && label.trim())
-      ? label.trim().slice(0, 120)
-      : identity?.email
-        ? identity.email.slice(0, 120)
-        : "";
+    const accountLabel = trimmedLabel
+      || (identity?.email ? identity.email.slice(0, 120) : "");
 
     const created = createClaudeSubscriptionAccount({
       label: accountLabel,
@@ -301,14 +309,27 @@ export async function reconcileClaudeCliCredentials({
   if (!accessToken) return null;
   const fingerprint = credentialFingerprint(blob);
 
+  // Resolve identity upfront so we know whose credentials these are
+  let identity;
+  try {
+    identity = await resolveClaudeIdentity(accessToken, { profileUrl, fetchImpl });
+  } catch {}
+
   return await withClaudeAccountPoolLock(async () => {
     const state = readClaudeAccountPoolState(filePath);
-    let identity;
 
-    // Check if these credentials belong to an account already
+    // 1. Check if these credentials belong to an already-established account
     let matchedAccount;
     for (const acc of Object.values(state.accounts || {})) {
       if (acc.state === "revoked") continue;
+      if (identity?.accountId && acc.identity?.accountId === identity.accountId) {
+        matchedAccount = acc;
+        break;
+      }
+      if (identity?.email && acc.identity?.email && acc.identity.email.toLowerCase() === identity.email.toLowerCase()) {
+        matchedAccount = acc;
+        break;
+      }
       const credPath = claudeSubscriptionAccountCredentialsPath(acc.id, { homesDir });
       if (existsSync(credPath)) {
         try {
@@ -322,28 +343,38 @@ export async function reconcileClaudeCliCredentials({
     }
 
     if (matchedAccount) {
-      if (matchedAccount.health?.state === "reauth-required" || matchedAccount.subscription?.status !== "usable") {
-        const credPath = claudeSubscriptionAccountCredentialsPath(matchedAccount.id, { homesDir });
-        writePrivateJson(credPath, { claudeAiOauth: blob }, { directoryMode: 0o700, fileMode: 0o600 });
-        if (!matchedAccount.identity?.email) {
-          identity = await resolveClaudeIdentity(accessToken, { profileUrl, fetchImpl });
-          if (identity) matchedAccount.identity = identity;
-        }
-        matchedAccount.health = { state: "healthy", lastSuccessAt: now };
-        matchedAccount.subscription = { status: "usable" };
-        writeClaudeAccountPoolState(state, filePath);
-        return sanitizeClaudeAccount(matchedAccount);
+      // Re-save matching credentials in place and ensure healthy
+      const credPath = claudeSubscriptionAccountCredentialsPath(matchedAccount.id, { homesDir });
+      writePrivateJson(credPath, { claudeAiOauth: blob }, { directoryMode: 0o700, fileMode: 0o600 });
+      if (identity && !matchedAccount.identity?.email) {
+        matchedAccount.identity = identity;
       }
-      return null;
+      matchedAccount.health = { state: "healthy", lastSuccessAt: now };
+      matchedAccount.subscription = { status: "usable" };
+      writeClaudeAccountPoolState(state, filePath);
+      return sanitizeClaudeAccount(matchedAccount);
     }
 
-    // Credentials do not belong to an active healthy account
-    const pendingAccount = Object.values(state.accounts || {}).find(
-      (acc) => acc.state !== "revoked" && (acc.subscription?.status === "pending" || acc.health?.state === "reauth-required"),
-    );
+    // 2. Credentials do not belong to any active established account.
+    // Match against a pending account waiting for this identity.
+    let pendingAccount;
+    if (identity?.email) {
+      const emailLower = identity.email.toLowerCase();
+      pendingAccount = Object.values(state.accounts || {}).find(
+        (acc) => acc.state !== "revoked" && (acc.subscription?.status === "pending" || acc.health?.state === "reauth-required")
+          && (acc.label?.toLowerCase() === emailLower || acc.identity?.email?.toLowerCase() === emailLower),
+      );
+    }
+
+    // Fall back to a pending account with a generic label (not a different email)
+    if (!pendingAccount) {
+      pendingAccount = Object.values(state.accounts || {}).find(
+        (acc) => acc.state !== "revoked" && (acc.subscription?.status === "pending" || acc.health?.state === "reauth-required")
+          && (!acc.label?.includes("@") || (identity?.email && acc.label.toLowerCase() === identity.email.toLowerCase())),
+      );
+    }
 
     if (pendingAccount) {
-      identity = await resolveClaudeIdentity(accessToken, { profileUrl, fetchImpl });
       const credPath = claudeSubscriptionAccountCredentialsPath(pendingAccount.id, { homesDir });
       writePrivateJson(credPath, { claudeAiOauth: blob }, { directoryMode: 0o700, fileMode: 0o600 });
       if (identity) {
