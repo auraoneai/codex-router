@@ -9,7 +9,7 @@
       "listed": true,
       "displayName": "Claude Opus 5.5",
       "description": "Claude Opus 5.5 through Claude subscription accounts for frontier complex reasoning and coding.",
-      "priority": 11,
+      "priority": 200,
       "defaultEffort": "high",
       "reasoningLevels": [
         {

@@ -113,3 +113,33 @@ test("an absent catalog default leaves the agent model names untouched", () => {
   assert.equal(env.CLAUDE_CODE_SUBAGENT_MODEL, undefined);
   assert.equal(env.ANTHROPIC_DEFAULT_OPUS_MODEL, "claude-opus-5");
 });
+
+test("sets custom model option for Fable and display name for Opus when present in catalog", () => {
+  const env = claudeRouterEnvironment({
+    environment: {},
+    secret: SECRET,
+    args: [],
+    catalog: {
+      defaultModel: "codex_router/anthropic/anthropic-api/claude-opus-5.5",
+      models: [
+        {
+          slug: "anthropic-api/claude-fable-5.1",
+          id: "codex_router/anthropic/anthropic-api/claude-fable-5.1",
+          displayName: "Claude Fable 5.1",
+        },
+        {
+          slug: "anthropic-api/claude-opus-5.5",
+          id: "codex_router/anthropic/anthropic-api/claude-opus-5.5",
+          displayName: "Claude Opus 5.5",
+        },
+      ],
+    },
+    settings: {},
+  });
+  assert.equal(env.ANTHROPIC_MODEL, "codex_router/anthropic/anthropic-api/claude-opus-5.5");
+  assert.equal(env.ANTHROPIC_DEFAULT_OPUS_MODEL, "codex_router/anthropic/anthropic-api/claude-opus-5.5");
+  assert.equal(env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME, "Claude Opus 5.5");
+  assert.equal(env.ANTHROPIC_CUSTOM_MODEL_OPTION, "codex_router/anthropic/anthropic-api/claude-fable-5.1");
+  assert.equal(env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME, "Claude Fable 5.1");
+});
+

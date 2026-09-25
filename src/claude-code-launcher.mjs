@@ -102,6 +102,20 @@ export function claudeRouterEnvironment({
       if (!routedModel(env[name])) env[name] = sessionModel;
     }
   }
+
+  const fable = catalog?.models?.find?.((m) => m.slug === "anthropic-api/claude-fable-5.1" || m.slug?.endsWith("claude-fable-5.1"));
+  if (fable && !env.ANTHROPIC_CUSTOM_MODEL_OPTION) {
+    env.ANTHROPIC_CUSTOM_MODEL_OPTION = fable.id;
+    env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME = "Claude Fable 5.1";
+    env.ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION = "Claude Fable 5.1 (Claude account pool)";
+  }
+
+  const opus = catalog?.models?.find?.((m) => m.slug === "anthropic-api/claude-opus-5.5" || m.slug?.endsWith("claude-opus-5.5"));
+  if (opus && env.ANTHROPIC_DEFAULT_OPUS_MODEL === opus.id && !env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME) {
+    env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME = "Claude Opus 5.5";
+    env.ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION = "Claude Opus 5.5 (Claude account pool)";
+  }
+
   return env;
 }
 

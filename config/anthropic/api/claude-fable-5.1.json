@@ -9,7 +9,7 @@
       "listed": true,
       "displayName": "Claude Fable 5.1",
       "description": "Claude Fable 5.1 through Claude subscription accounts for high-capability coding and reasoning.",
-      "priority": 10,
+      "priority": 190,
       "defaultEffort": "high",
       "reasoningLevels": [
         {
