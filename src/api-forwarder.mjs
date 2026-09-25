@@ -1894,7 +1894,6 @@ async function runClaudeAccountAttempts(normalized, {
         signal: controller.signal,
         redirect: route === "/embeddings" ? "error" : "follow",
       });
-      console.error(`[api-forwarder-debug] runClaudeAccountAttempts candidate=${candidate.id} status=${attemptResponse.status} body=${(await attemptResponse.clone().text()).slice(0, 150)}`);
       latencyTrace?.finishAttemptRecord?.(attemptRecord, { response: attemptResponse });
     } catch (fetchErr) {
       latencyTrace?.finishAttemptRecord?.(attemptRecord, { error: fetchErr });
@@ -2110,7 +2109,6 @@ async function handleRequest(request, response) {
 
   const original = await readRequestBody(request);
   const normalized = normalizeBody(original, request.headers["content-type"], route);
-  console.error(`[api-forwarder-debug] route=${route} model=${normalized.model?.gatewayModel} sys=${JSON.stringify(normalized.payload?.system)?.slice(0, 100)}`);
   latencyTrace.setPayloadClass(
     normalized.body.length < 4_096
       ? "tiny"
