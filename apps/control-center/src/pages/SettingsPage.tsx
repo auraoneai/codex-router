@@ -314,7 +314,6 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
 
   const loginPendingClaudeUsable = loginPendingClaudeId
     ? claudeAccountPool?.accounts?.[loginPendingClaudeId]?.subscription?.status === "usable"
-      && claudeAccountPool?.accounts?.[loginPendingClaudeId]?.subscription?.authenticated !== false
     : false;
 
   useEffect(() => {
@@ -469,7 +468,7 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
 
   const claudeAccountSelection = claudeAccountPool?.policy?.selectedAccountId;
 
-  const loginClaudeAccount = async (account: ClaudeAccount) => {
+  const loginClaudeAccount = async (account: ClaudeSubscriptionAccount) => {
     if (!api || !account.id || loginPendingClaudeId === account.id) return;
     setLoginPendingClaudeId(account.id);
     try {
