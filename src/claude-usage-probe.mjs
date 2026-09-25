@@ -37,18 +37,20 @@ export const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 export const USAGE_PROBE_TIMEOUT_MS = 12_000;
 export const USAGE_PROBE_LIMIT = 64;
 
-function normalizeWindowJson(win) {
-  if (!win || typeof win !== "object") return undefined;
-  const used = win.utilization ?? win.used_percent ?? win.usedPercent;
-  const remaining = win.remaining_percent ?? win.remainingPercent;
-  const reset = win.reset ?? win.resets_at ?? win.resetsAt ?? win.resets_at_ms ?? win.resetsAtMs;
+function normalizeWindowJson(win, limit) {
+  if (!win && !limit) return undefined;
+  const used = limit?.percent ?? win?.utilization ?? win?.used_percent ?? win?.usedPercent;
+  const remaining = win?.remaining_percent ?? win?.remainingPercent;
+  const reset = limit?.resets_at ?? limit?.resetsAt ?? win?.reset ?? win?.resets_at ?? win?.resetsAt ?? win?.resets_at_ms ?? win?.resetsAtMs;
   let usedPercent;
   let remainingPercent;
   if (typeof remaining === "number" && Number.isFinite(remaining)) {
-    remainingPercent = remaining <= 1 ? Math.round(remaining * 100) : Math.round(remaining);
+    remainingPercent = (remaining > 0 && remaining < 1) ? Math.round(remaining * 100) : Math.round(remaining);
     usedPercent = Math.max(0, 100 - remainingPercent);
   } else if (typeof used === "number" && Number.isFinite(used)) {
-    usedPercent = used <= 1 ? Math.round(used * 100) : Math.round(used);
+    // Anthropic returns utilization in 0..100 percentage space (e.g. 1.0 for 1%, 4.0 for 4%, 100 for 100%).
+    // Test mocks occasionally supply fractional decimals strictly between 0 and 1 (e.g. 0.15 for 15%).
+    usedPercent = (used > 0 && used < 1) ? Math.round(used * 100) : Math.min(100, Math.max(0, Math.round(used)));
     remainingPercent = Math.max(0, 100 - usedPercent);
   }
   let resetsAtMs;
@@ -317,8 +319,14 @@ export async function executeProbeClaudeAccountUsage({
 
       clearClaudeAccountAuthInvalid(account.id);
       const headerReading = parseClaudeUnifiedHeaders(response.headers, { now });
-      const fiveHour = headerReading?.fiveHour || normalizeWindowJson(body?.five_hour || body?.fiveHour) || prev?.fiveHour || null;
-      const weekly = headerReading?.weekly || normalizeWindowJson(body?.seven_day || body?.weekly || body?.sevenDay) || prev?.weekly || null;
+      const sessionLimit = Array.isArray(body?.limits)
+        ? body.limits.find((l) => l?.group === "session" || l?.kind === "session")
+        : undefined;
+      const weeklyLimit = Array.isArray(body?.limits)
+        ? body.limits.find((l) => l?.group === "weekly" || l?.kind === "weekly_all" || l?.kind === "weekly")
+        : undefined;
+      const fiveHour = headerReading?.fiveHour || normalizeWindowJson(body?.five_hour || body?.fiveHour, sessionLimit) || prev?.fiveHour || null;
+      const weekly = headerReading?.weekly || normalizeWindowJson(body?.seven_day || body?.weekly || body?.sevenDay, weeklyLimit) || prev?.weekly || null;
       const fable = headerReading?.fable || normalizeWindowJson(body?.seven_day_oi || body?.fable || body?.sevenDayOi) || prev?.fable || null;
       const status = headerReading?.status || body?.status || "allowed";
       const windowStatuses = headerReading?.windowStatuses || {};
