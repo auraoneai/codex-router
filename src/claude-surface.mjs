@@ -176,8 +176,11 @@ function responsesToolChoice(choice) {
 }
 
 function requestedEffort(payload) {
+  // "none" is Prism's off rung: GPT-5.6 sends it verbatim and Prism maps it to
+  // thinking.type=disabled for Claude, so an explicit off request survives.
+  if (payload?.thinking?.type === "disabled") return "none";
   const effort = payload?.output_config?.effort;
-  if (["minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(effort)) {
+  if (["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(effort)) {
     return effort;
   }
   if (["adaptive", "enabled"].includes(payload?.thinking?.type)) return "high";
@@ -206,7 +209,16 @@ export function claudeMessagesToResponses(payload) {
     ...(payload.top_p !== undefined ? { top_p: payload.top_p } : {}),
     ...(tools ? { tools } : {}),
     ...(payload.tool_choice ? { tool_choice: responsesToolChoice(payload.tool_choice) } : {}),
-    ...(effort ? { reasoning: { effort, summary: "auto" } } : {}),
+    ...(effort
+      ? {
+          reasoning: {
+            effort,
+            ...(effort !== "none" && payload?.thinking?.display !== "omitted"
+              ? { summary: "auto" }
+              : {}),
+          },
+        }
+      : {}),
     stream: payload.stream === true,
   };
 }

@@ -315,3 +315,16 @@ test("model listing and count_tokens keep working when pool-served", async () =>
     await app.close();
   }
 });
+
+test("effort off switch and every Kiro rung survive the Claude bridge", async () => {
+  const { claudeMessagesToResponses } = await import("../src/claude-surface.mjs");
+  const base = { model: "kiro-prism/claude-opus-5.5", messages: [{ role: "user", content: "hi" }] };
+  for (const effort of ["low", "medium", "high", "xhigh", "max", "none"]) {
+    const out = claudeMessagesToResponses({ ...base, output_config: { effort } });
+    assert.equal(out.reasoning.effort, effort);
+  }
+  const off = claudeMessagesToResponses({ ...base, thinking: { type: "disabled" }, output_config: { effort: "high" } });
+  assert.deepEqual(off.reasoning, { effort: "none" });
+  const omitted = claudeMessagesToResponses({ ...base, thinking: { type: "adaptive", display: "omitted" }, output_config: { effort: "max" } });
+  assert.deepEqual(omitted.reasoning, { effort: "max" });
+});
