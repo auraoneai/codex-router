@@ -15,6 +15,7 @@ import { isManagedCodexBaseUrl } from "./caller-auth.mjs";
 import { applyInstructionOverlay } from "./instruction-overlays.mjs";
 import {
   ANNOUNCED_MODELS_PATH,
+  CHATGPT_ACCOUNT_HOMES_DIR,
   CODEX_PROVIDER_MODE_PATH,
   CONFIG_PATH,
   LEGACY_PORTS,
@@ -30,6 +31,7 @@ import {
   runCodex,
 } from "./codex-binary.mjs";
 import { readUserModels } from "./user-models.mjs";
+import { refreshAccountCatalogSnapshots } from "./account-catalog-snapshots.mjs";
 import { syncRoutedCodexAgents } from "./codex-agent-catalog.mjs";
 import {
   MODEL_BY_SLUG,
@@ -1287,6 +1289,21 @@ export function publishCatalog({ refreshNative = refresh, output = true } = {}) 
     if (error && typeof error === "object") error.catalogRollbackSafe = true;
     throw error;
   }
+  // Best effort, after the global publish committed: stale per-account
+  // snapshots are what a later profile switch restores.
+  let accountSnapshots = { updated: [], skipped: [] };
+  if (!loginFree) {
+    try {
+      accountSnapshots = refreshAccountCatalogSnapshots({
+        homesDir: CHATGPT_ACCOUNT_HOMES_DIR,
+        publishedModels: JSON.parse(readFileSync(MERGED_CATALOG_PATH, "utf8")).models,
+        globalNativeSlugs: nativeBaseSlugs,
+        announcedModelsPath: ANNOUNCED_MODELS_PATH,
+      });
+    } catch (error) {
+      process.stderr.write(`${JSON.stringify({ warning: "account_catalog_snapshots_failed", message: String(error?.message || error) })}\n`);
+    }
+  }
   const result = {
     path: MERGED_CATALOG_PATH,
     models: merged.length,
@@ -1301,6 +1318,7 @@ export function publishCatalog({ refreshNative = refresh, output = true } = {}) 
       ? merged.filter((model) => !MODEL_BY_SLUG.has(String(model.slug))).length
       : 0,
     aliased_models: Object.keys(aliases).length,
+    account_snapshots_updated: accountSnapshots.updated.length,
     login_free: loginFree,
     routed_catalog_active: routedCatalog || loginFree,
     openai_authenticated: openaiAuthenticated,

@@ -316,15 +316,28 @@ test("model listing and count_tokens keep working when pool-served", async () =>
   }
 });
 
-test("effort off switch and every Kiro rung survive the Claude bridge", async () => {
+test("every Kiro rung survives the Claude bridge and thinking is never switched off", async () => {
   const { claudeMessagesToResponses } = await import("../src/claude-surface.mjs");
   const base = { model: "kiro-prism/claude-opus-5.5", messages: [{ role: "user", content: "hi" }] };
-  for (const effort of ["low", "medium", "high", "xhigh", "max", "none"]) {
+  for (const effort of ["low", "medium", "high", "xhigh", "max"]) {
     const out = claudeMessagesToResponses({ ...base, output_config: { effort } });
     assert.equal(out.reasoning.effort, effort);
   }
-  const off = claudeMessagesToResponses({ ...base, thinking: { type: "disabled" }, output_config: { effort: "high" } });
-  assert.deepEqual(off.reasoning, { effort: "none" });
+  // disabled thinking and a "none" effort are unspecified: no effort is sent.
+  const none = claudeMessagesToResponses({ ...base, output_config: { effort: "none" } });
+  assert.equal(none.reasoning, undefined);
+  const disabled = claudeMessagesToResponses({ ...base, thinking: { type: "disabled" } });
+  assert.equal(disabled.reasoning, undefined);
+  const disabledWithEffort = claudeMessagesToResponses({ ...base, thinking: { type: "disabled" }, output_config: { effort: "high" } });
+  assert.deepEqual(disabledWithEffort.reasoning, { effort: "high", summary: "auto" });
+  // bare adaptive thinking leaves effort to Prism's default.
+  const adaptive = claudeMessagesToResponses({ ...base, thinking: { type: "adaptive" } });
+  assert.deepEqual(adaptive.reasoning, { summary: "auto" });
+  const adaptiveOmitted = claudeMessagesToResponses({ ...base, thinking: { type: "adaptive", display: "omitted" } });
+  assert.equal(adaptiveOmitted.reasoning, undefined);
   const omitted = claudeMessagesToResponses({ ...base, thinking: { type: "adaptive", display: "omitted" }, output_config: { effort: "max" } });
   assert.deepEqual(omitted.reasoning, { effort: "max" });
+  for (const out of [none, disabled, disabledWithEffort, adaptive, adaptiveOmitted, omitted]) {
+    assert.notEqual(out.reasoning?.effort, "none");
+  }
 });

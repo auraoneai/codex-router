@@ -54,6 +54,8 @@ const AGENT_MODEL_VARIABLES = [
   "ANTHROPIC_DEFAULT_HAIKU_MODEL",
 ];
 
+const CLAUDE_EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
+
 export function claudeRouterEnvironment({
   environment = process.env,
   args = [],
@@ -83,6 +85,16 @@ export function claudeRouterEnvironment({
   delete env.CLAUDE_CODE_USE_VERTEX;
   delete env.CLAUDE_CODE_USE_FOUNDRY;
   delete env.CLAUDE_CODE_USE_MANTLE;
+  // Thinking is never switched off through the router.
+  delete env.CLAUDE_CODE_DISABLE_THINKING;
+  if (String(env.MAX_THINKING_TOKENS ?? "").trim() === "0") delete env.MAX_THINKING_TOKENS;
+  // Claude Code downgrades a settings-sourced effortLevel "max" to "high" on
+  // the wire but honors CLAUDE_CODE_EFFORT_LEVEL verbatim, so export the
+  // effective level unless the caller already chose one.
+  const effort = typeof settings?.effortLevel === "string" ? settings.effortLevel.trim() : "";
+  if (!String(env.CLAUDE_CODE_EFFORT_LEVEL ?? "").trim() && CLAUDE_EFFORT_LEVELS.has(effort)) {
+    env.CLAUDE_CODE_EFFORT_LEVEL = effort;
+  }
 
   const saved = typeof settings?.model === "string" ? settings.model : "";
   const routedDefault = catalog?.defaultModel ? String(catalog.defaultModel) : "";

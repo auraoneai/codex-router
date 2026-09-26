@@ -176,15 +176,25 @@ function responsesToolChoice(choice) {
 }
 
 function requestedEffort(payload) {
-  // "none" is Prism's off rung: GPT-5.6 sends it verbatim and Prism maps it to
-  // thinking.type=disabled for Claude, so an explicit off request survives.
-  if (payload?.thinking?.type === "disabled") return "none";
+  // Thinking is never switched off on the router: thinking.type "disabled" and a
+  // "none" effort are treated as unspecified, so Prism applies its own default.
+  // A bare adaptive/enabled thinking block likewise sends no effort.
   const effort = payload?.output_config?.effort;
-  if (["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(effort)) {
+  if (["minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(effort)) {
     return effort;
   }
-  if (["adaptive", "enabled"].includes(payload?.thinking?.type)) return "high";
   return undefined;
+}
+
+function requestedReasoning(payload) {
+  const effort = requestedEffort(payload);
+  const thinkingOn = ["adaptive", "enabled"].includes(payload?.thinking?.type);
+  const summary = (effort || thinkingOn) && payload?.thinking?.display !== "omitted";
+  if (!effort && !summary) return undefined;
+  return {
+    ...(effort ? { effort } : {}),
+    ...(summary ? { summary: "auto" } : {}),
+  };
 }
 
 export function claudeMessagesToResponses(payload) {
@@ -196,7 +206,7 @@ export function claudeMessagesToResponses(payload) {
     });
   }
   const tools = responsesTools(payload.tools);
-  const effort = requestedEffort(payload);
+  const reasoning = requestedReasoning(payload);
   const instructions = textBlocks(payload.system);
   return {
     model: claudeRoutedSlug(requestedModel),
@@ -209,16 +219,7 @@ export function claudeMessagesToResponses(payload) {
     ...(payload.top_p !== undefined ? { top_p: payload.top_p } : {}),
     ...(tools ? { tools } : {}),
     ...(payload.tool_choice ? { tool_choice: responsesToolChoice(payload.tool_choice) } : {}),
-    ...(effort
-      ? {
-          reasoning: {
-            effort,
-            ...(effort !== "none" && payload?.thinking?.display !== "omitted"
-              ? { summary: "auto" }
-              : {}),
-          },
-        }
-      : {}),
+    ...(reasoning ? { reasoning } : {}),
     stream: payload.stream === true,
   };
 }

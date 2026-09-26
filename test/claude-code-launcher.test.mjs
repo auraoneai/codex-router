@@ -143,3 +143,27 @@ test("sets custom model option for Fable and display name for Opus when present 
   assert.equal(env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME, "Claude Fable 5.1");
 });
 
+
+test("the launcher exports the effective effort and never switches thinking off", () => {
+  const fromSettings = claudeRouterEnvironment({
+    environment: { CLAUDE_CODE_DISABLE_THINKING: "1", MAX_THINKING_TOKENS: "0" },
+    secret: SECRET,
+    catalog: {},
+    settings: { effortLevel: "max" },
+  });
+  assert.equal(fromSettings.CLAUDE_CODE_EFFORT_LEVEL, "max");
+  assert.equal(fromSettings.CLAUDE_CODE_DISABLE_THINKING, undefined);
+  assert.equal(fromSettings.MAX_THINKING_TOKENS, undefined);
+
+  const fromEnv = claudeRouterEnvironment({
+    environment: { CLAUDE_CODE_EFFORT_LEVEL: "xhigh", MAX_THINKING_TOKENS: "32000" },
+    secret: SECRET,
+    catalog: {},
+    settings: { effortLevel: "medium" },
+  });
+  assert.equal(fromEnv.CLAUDE_CODE_EFFORT_LEVEL, "xhigh");
+  assert.equal(fromEnv.MAX_THINKING_TOKENS, "32000");
+
+  const unset = claudeRouterEnvironment({ environment: {}, secret: SECRET, catalog: {}, settings: {} });
+  assert.equal(unset.CLAUDE_CODE_EFFORT_LEVEL, undefined);
+});

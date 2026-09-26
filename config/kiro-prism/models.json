@@ -97,10 +97,6 @@
       "defaultEffort": "medium",
       "reasoningLevels": [
         {
-          "effort": "none",
-          "description": "No reasoning effort"
-        },
-        {
           "effort": "low",
           "description": "Low reasoning effort"
         },
@@ -142,10 +138,6 @@
       "priority": 99,
       "defaultEffort": "medium",
       "reasoningLevels": [
-        {
-          "effort": "none",
-          "description": "No reasoning effort"
-        },
         {
           "effort": "low",
           "description": "Low reasoning effort"
@@ -189,10 +181,6 @@
       "defaultEffort": "medium",
       "reasoningLevels": [
         {
-          "effort": "none",
-          "description": "No reasoning effort"
-        },
-        {
           "effort": "low",
           "description": "Low reasoning effort"
         },
@@ -229,7 +217,7 @@
       "upstreamModel": "kimi-k3",
       "provider": "kiro-prism",
       "listed": true,
-      "displayName": "Kimi K3 \u00b7 Modal (Kiro Prism)",
+      "displayName": "Kimi K3 · Modal (Kiro Prism)",
       "description": "Moonshot Kimi K3 through Kiro Prism's budget-capped Modal endpoint",
       "priority": 99,
       "defaultEffort": "medium",
@@ -263,7 +251,7 @@
       "upstreamModel": "deepseek-v4.1-flash",
       "provider": "kiro-prism",
       "listed": true,
-      "displayName": "DeepSeek V4.1 Flash \u00b7 Modal (Kiro Prism)",
+      "displayName": "DeepSeek V4.1 Flash · Modal (Kiro Prism)",
       "description": "DeepSeek V4.1 Flash through Kiro Prism's budget-capped Modal Shared API endpoints",
       "priority": 99,
       "defaultEffort": "high",
@@ -297,7 +285,7 @@
       "upstreamModel": "qwen3-8-max-vl-thinking",
       "provider": "kiro-prism",
       "listed": true,
-      "displayName": "Qwen 3.8 Max VL Thinking \u00b7 Modal (Kiro Prism)",
+      "displayName": "Qwen 3.8 Max VL Thinking · Modal (Kiro Prism)",
       "description": "Qwen 3.8 Max VL Thinking through Kiro Prism's budget-capped Modal Shared API endpoints",
       "priority": 99,
       "defaultEffort": "high",
@@ -331,7 +319,7 @@
       "upstreamModel": "glm-5-3-flash",
       "provider": "kiro-prism",
       "listed": true,
-      "displayName": "GLM 5.3 Flash \u00b7 Modal (Kiro Prism)",
+      "displayName": "GLM 5.3 Flash · Modal (Kiro Prism)",
       "description": "GLM 5.3 Flash through Kiro Prism's budget-capped Modal Shared API endpoints",
       "priority": 99,
       "defaultEffort": "medium",
