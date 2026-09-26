@@ -423,6 +423,12 @@ test("opencode gets a limit its schema accepts, compacting where Codex does", ()
   });
   // No compaction threshold, no limit: unknown rather than a guess.
   assert.equal(models["x-ai/grok-4.6"].limit, undefined);
+  // Reasoning variants mirror the registry levels; "none" is never offered.
+  assert.deepEqual(Object.keys(models["moonshot/kimi-k3"].variants), ["low", "high"]);
+  assert.deepEqual(models["moonshot/kimi-k3"].variants.high, { reasoningEffort: "high" });
+  for (const model of Object.values(models)) {
+    assert.equal(model.variants?.none, undefined);
+  }
 });
 
 test("Command Code models carry only the fields its loader reads", () => {

@@ -90,6 +90,8 @@ function opencodeLimit(model) {
   return { context, input: threshold, output: measured };
 }
 
+const OPENCODE_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
+
 function opencodeProvider({ models, baseUrl, secret }) {
   return {
     npm: "@ai-sdk/openai",
@@ -104,9 +106,15 @@ function opencodeProvider({ models, baseUrl, secret }) {
     },
     models: Object.fromEntries(models.map((model) => {
       const limit = opencodeLimit(model);
+      // opencode's per-model effort picker. "none" is never published: the
+      // router does not offer a thinking-off variant.
+      const variants = efforts(model, OPENCODE_EFFORTS);
       return [String(model.slug), {
         name: String(model.displayName || model.slug),
         ...(limit ? { limit } : {}),
+        ...(variants.length
+          ? { variants: Object.fromEntries(variants.map((effort) => [effort, { reasoningEffort: effort }])) }
+          : {}),
       }];
     })),
   };
