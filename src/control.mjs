@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -3743,6 +3743,34 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
         };
       }
     }
+    // A token can look valid locally -- unexpired, well-formed -- while
+    // ChatGPT has already revoked it (a sign-in elsewhere, a sign-out). Only
+    // the usage probe learns that, from its 401. Carry that verdict into the
+    // account so the Control Center says a new sign-in is needed and offers
+    // one, instead of "Ready". A probe older than the stored login describes
+    // a token that has since been replaced, and is ignored.
+    try {
+      const { CHATGPT_ACCOUNT_USAGE_CACHE_PATH } = await import("./paths.mjs");
+      const usage = JSON.parse(readFileSync(CHATGPT_ACCOUNT_USAGE_CACHE_PATH, "utf8"));
+      for (const row of usage?.accounts || []) {
+        const account = safe.accounts?.[row?.id];
+        if (!account || row.authInvalid !== true || account.subscription?.loginInProgress === true) continue;
+        const home = row.id === selectedProfile.selection && selectedProfile.home
+          ? selectedProfile.home
+          : chatGPTSubscriptionAccountHome(row.id);
+        let loginChangedAt = 0;
+        try {
+          loginChangedAt = statSync(path.join(home, "auth.json")).mtimeMs;
+        } catch {}
+        const probedAt = Date.parse(row.fetchedAt || usage.fetchedAt);
+        if (!Number.isFinite(probedAt) || probedAt < loginChangedAt) continue;
+        account.subscription = {
+          ...(account.subscription || {}),
+          revoked: true,
+          revokedReason: row.authErrorCode || "token_revoked",
+        };
+      }
+    } catch {}
     const profile = chatGPTProfileSwitchSnapshot();
     const loginAttempts = {};
     for (const failure of recovery.failures) {

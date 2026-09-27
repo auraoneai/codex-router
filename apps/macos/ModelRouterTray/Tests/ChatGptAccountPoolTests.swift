@@ -340,6 +340,12 @@ struct ChatGptAccountPoolTests {
         health: .healthy, planType: "pro", hasError: true, inRotation: true
       ) == "probe failed"
     )
+    // A revoked token (the probe's 401) needs a new sign-in, not a retry.
+    #expect(
+      IslandAccountQuotaPresentation.tagKey(
+        health: .unknown, planType: nil, hasError: true, inRotation: false, authInvalid: true
+      ) == "login expired"
+    )
     // An unread account that rotation still trusts shows what it is instead.
     #expect(
       IslandAccountQuotaPresentation.tagKey(

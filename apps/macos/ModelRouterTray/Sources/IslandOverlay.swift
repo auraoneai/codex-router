@@ -2273,8 +2273,12 @@ enum IslandAccountQuotaPresentation {
     health: ChatGptAccountHealth,
     planType: String?,
     hasError: Bool,
-    inRotation: Bool
+    inRotation: Bool,
+    authInvalid: Bool = false
   ) -> String? {
+    // A revoked login is not a flaky probe: the probe's 401 is the answer, and
+    // the fix is signing in again, so say that instead of "probe failed".
+    if authInvalid { return "login expired" }
     if hasError { return "probe failed" }
     switch health {
     case .drained: return "spent"
@@ -2537,7 +2541,8 @@ private struct IslandAccountQuotaTable: View {
             health: account.health,
             planType: account.planType,
             hasError: account.error != nil,
-            inRotation: !excluded
+            inRotation: !excluded,
+            authInvalid: account.authInvalid
           ) {
             Text(routerLocalized(tag).uppercased())
               .font(.system(size: 7, weight: .semibold, design: .monospaced))
@@ -2648,6 +2653,7 @@ private struct IslandAccountQuotaTable: View {
         ? routerLocalized("Next turn uses this subscription")
         : routerFormat("In rotation, position %d", rank)
     }
+    if account.authInvalid { return routerLocalized("login expired") }
     if account.error != nil { return routerLocalized("Usage probe failed for this subscription") }
     if account.health == .drained { return routerLocalized("Out of rotation: quota is spent") }
     return routerLocalized("Out of rotation")

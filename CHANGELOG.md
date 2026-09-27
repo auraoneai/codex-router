@@ -1,6 +1,14 @@
 # Changelog
 
 ## Unreleased
+- **A revoked ChatGPT login says so, and can be signed in again.** A token
+  ChatGPT has revoked still looks valid locally, so the Control Center showed
+  the account as "Ready · Usage unavailable" and disabled its Login button,
+  while the island tagged it "probe failed". The usage probe's 401 is now
+  carried into the account pool status: the Control Center reads "Sign-in
+  required (login revoked)" and enables Login, and the island tags the row
+  "login expired". A probe older than the stored login is ignored, so a new
+  sign-in clears the verdict at once.
 - **Claude Team seats drain Standard before Premium, as ChatGPT drains Plus
   before Pro.** The pool never read the seat a login holds, so every account
   ranked as the same unknown plan. The tier now comes from the

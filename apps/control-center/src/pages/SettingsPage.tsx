@@ -877,9 +877,14 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
               {subscriptionAccounts.map((account) => {
                 const optimisticPending = isOptimisticAccountId(account.id);
                 const accountLoginAttempt = accountPool?.loginAttempts?.[account.id];
+                // A locally valid token ChatGPT has revoked is not "Ready": only
+                // a new sign-in brings the account back.
+                const revoked = account.subscription?.revoked === true;
                 const status = optimisticPending
                   ? "Adding…"
-                  : account.subscription?.usable ? "Ready" : account.subscription?.expired ? "Session expired" : "Sign-in required";
+                  : revoked
+                    ? "Sign-in required (login revoked)"
+                    : account.subscription?.usable ? "Ready" : account.subscription?.expired ? "Session expired" : "Sign-in required";
                 const title = account.subscription?.email || account.label || "ChatGPT account";
                 const label = account.subscription?.email && account.label ? `${account.label} · ` : "";
                 const usage = account.subscription?.usage;
@@ -887,7 +892,9 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
                   ? "Saving account"
                   : usage && Number.isFinite(usage.remainingPercent)
                     ? `${usage.period} · ${Math.round(usage.remainingPercent)}% remaining`
-                    : "Usage unavailable";
+                    : revoked
+                      ? "Usage unavailable until you sign in again"
+                      : "Usage unavailable";
                 return (
                   <div
                     className="setting-row subscription-account-row"
@@ -909,7 +916,7 @@ export function SettingsPage({ target, engineering, models = [], health, presenc
                       >{accountSelection === account.id ? <><Check aria-hidden size={13} strokeWidth={1.9} /> Selected</> : <><Check aria-hidden size={13} strokeWidth={1.9} /> Select</>}</Button>
                       <Button
                         variant="ghost"
-                        disabled={!api || optimisticPending || account.state !== "active" || accountLoginAttempt?.retryable === false || (account.subscription?.usable === true && accountLoginAttempt?.status !== "failed") || loginPendingId === account.id}
+                        disabled={!api || optimisticPending || account.state !== "active" || accountLoginAttempt?.retryable === false || (account.subscription?.usable === true && !revoked && accountLoginAttempt?.status !== "failed") || loginPendingId === account.id}
                         onClick={() => {
                           if (!api) return;
                           setLoginError(null);

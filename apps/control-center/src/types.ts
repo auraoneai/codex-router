@@ -359,6 +359,9 @@ export interface ChatGptSubscriptionAccount {
     status?: "pending" | "usable" | "expired" | "invalid" | string;
     authenticated?: boolean;
     usable?: boolean;
+    /** ChatGPT refused the token (the usage probe's 401) though it looks valid locally. */
+    revoked?: boolean;
+    revokedReason?: string;
     expired?: boolean;
     hasAccountId?: boolean;
     expiresInHours?: number;

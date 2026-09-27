@@ -188,3 +188,34 @@ test("cached usage shows only a boolean retry hint for a matching private reset 
     rmSync(isolated, { recursive: true, force: true });
   }
 });
+
+test("a login the usage probe saw revoked reads as needing sign-in until the login is replaced", () => {
+  const target = run("chatgpt-account-pool", "add", "Revoked elsewhere").account.id;
+  const before = run("chatgpt-account-pool", "status");
+  assert.ok(before.accounts[target]);
+  const homeAuth = before.profile?.active === target
+    ? path.join(stateDir, "auth.json")
+    : path.join(stateDir, "chatgpt-accounts", target, "auth.json");
+  mkdirSync(path.dirname(homeAuth), { recursive: true });
+  writeFileSync(homeAuth, JSON.stringify({ tokens: { account_id: "revoked-lineage" } }), { mode: 0o600 });
+
+  const usagePath = path.join(stateDir, "chatgpt-account-usage.json");
+  const probedAt = new Date(Date.now() + 1000).toISOString();
+  writeFileSync(usagePath, JSON.stringify({
+    fetchedAt: probedAt,
+    accounts: [{ id: target, authInvalid: true, authErrorCode: "token_revoked", fetchedAt: probedAt, error: "401" }],
+  }), { mode: 0o600 });
+  const revoked = run("chatgpt-account-pool", "status");
+  assert.equal(revoked.accounts[target].subscription?.revoked, true);
+  assert.equal(revoked.accounts[target].subscription?.revokedReason, "token_revoked");
+
+  // A new sign-in replaces the login after the probe: the old verdict no
+  // longer describes it.
+  writeFileSync(usagePath, JSON.stringify({
+    fetchedAt: new Date(Date.now() - 60_000).toISOString(),
+    accounts: [{ id: target, authInvalid: true, fetchedAt: new Date(Date.now() - 60_000).toISOString() }],
+  }), { mode: 0o600 });
+  writeFileSync(homeAuth, JSON.stringify({ tokens: { account_id: "revoked-lineage" }, last_refresh: new Date().toISOString() }), { mode: 0o600 });
+  const relogged = run("chatgpt-account-pool", "status");
+  assert.equal(relogged.accounts[target].subscription?.revoked, undefined);
+});
