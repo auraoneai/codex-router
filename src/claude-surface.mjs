@@ -458,6 +458,28 @@ async function handleStream(request, response, upstream, requestedModel) {
   }
 }
 
+const SESSION_UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+// Claude Code names its session in `X-Claude-Code-Session-Id` and inside
+// `metadata.user_id` (the older `..._session_<uuid>` string, or the newer JSON
+// form with `session_id`). The re-entered Responses request carries it as
+// `session-id`, so the router's conversation affinity -- which keeps a Claude
+// Code session on one pooled account and one prompt cache -- sees the same id
+// on every turn.
+export function claudeCodeSessionId(headers = {}, body = {}) {
+  const header = headers["x-claude-code-session-id"];
+  const fromHeader = (Array.isArray(header) ? header[0] : header)?.match?.(SESSION_UUID)?.[0];
+  if (fromHeader) return fromHeader;
+  const userId = body?.metadata?.user_id;
+  if (typeof userId !== "string" || !userId) return undefined;
+  try {
+    const parsed = JSON.parse(userId);
+    const id = typeof parsed?.session_id === "string" ? parsed.session_id.match(SESSION_UUID)?.[0] : undefined;
+    if (id) return id;
+  } catch {}
+  return userId.match(/session_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)?.[1];
+}
+
 export async function handleClaudeRequest(request, response, route, { responsesUrl, routedModels }) {
   if (request.method === "HEAD" && route === `${CLAUDE_ROUTE_PREFIX}/api/hello`) {
     response.writeHead(200);
@@ -497,9 +519,14 @@ export async function handleClaudeRequest(request, response, route, { responsesU
     payload.model = assertPublishedModel(payload.model, routedModels);
     const controller = new AbortController();
     request.once("aborted", () => controller.abort());
+    const sessionId = claudeCodeSessionId(request.headers, body);
     const upstream = await directLoopbackFetch(responsesUrl, {
       method: "POST",
-      headers: { "content-type": "application/json", accept: payload.stream ? "text/event-stream" : "application/json" },
+      headers: {
+        "content-type": "application/json",
+        accept: payload.stream ? "text/event-stream" : "application/json",
+        ...(sessionId ? { "session-id": sessionId } : {}),
+      },
       body: JSON.stringify(payload),
       signal: controller.signal,
     });

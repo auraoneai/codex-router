@@ -92,12 +92,68 @@ export function claudeOAuthSession(accountId, {
   }
 }
 
+// The token endpoint is overridable so tests never reach the real one.
+function defaultTokenUrl() {
+  return process.env.MODEL_ROUTER_CLAUDE_OAUTH_TOKEN_URL || OAUTH_TOKEN_URL;
+}
+
+async function markReauthRequired(accountId, { filePath, now, status }) {
+  await withClaudeAccountPoolLock(async () => {
+    const state = readClaudeAccountPoolState(filePath);
+    const account = state.accounts[accountId];
+    if (!account) return;
+    account.health = {
+      ...account.health,
+      state: "reauth-required",
+      lastError: "invalid_grant: reauthentication required",
+      lastErrorAt: new Date(now).toISOString(),
+      lastStatus: status,
+    };
+    account.subscription = {
+      ...account.subscription,
+      status: "invalid",
+    };
+    writeClaudeAccountPoolState(state, filePath);
+  }, { filePath });
+}
+
+async function markRefreshed(accountId, { filePath, now }) {
+  await withClaudeAccountPoolLock(async () => {
+    const state = readClaudeAccountPoolState(filePath);
+    const account = state.accounts[accountId];
+    if (!account) return;
+    account.health = {
+      ...account.health,
+      state: "healthy",
+      lastSuccessAt: new Date(now).toISOString(),
+    };
+    account.subscription = {
+      ...account.subscription,
+      status: "usable",
+    };
+    writeClaudeAccountPoolState(state, filePath);
+  }, { filePath });
+}
+
+// Returns the account's session with a usable access token when one can be
+// had. `force` refreshes even an unexpired token (the caller just saw it 401).
+//
+// Refresh tokens are single-use: Anthropic rotates them on every refresh. The
+// forwarder, the usage probe, and `control` are separate processes, so the
+// whole read-refresh-write sequence runs under a per-account file lock, and
+// the credentials are re-read inside it. A process that waited on the lock
+// finds the token another process already stored and uses it, instead of
+// spending the rotated-away refresh token and earning an `invalid_grant` that
+// would strike a perfectly healthy account.
+//
+// A session with `refreshFailed` set could not be refreshed: "invalid_grant"
+// means the login is gone for good, anything else is transient.
 export async function ensureFreshClaudeOAuthToken(accountId, {
   force = false,
   filePath = CLAUDE_ACCOUNT_POOL_PATH,
   homesDir = CLAUDE_ACCOUNT_HOMES_DIR,
   now = Date.now(),
-  tokenUrl = OAUTH_TOKEN_URL,
+  tokenUrl = defaultTokenUrl(),
   clientId = OAUTH_CLIENT_ID,
   fetchImpl = globalThis.fetch,
 } = {}) {
@@ -117,30 +173,46 @@ export async function ensureFreshClaudeOAuthToken(accountId, {
     return await inFlightRefreshes.get(accountId);
   }
 
+  const credPath = claudeSubscriptionAccountCredentialsPath(accountId, { homesDir });
   const refreshPromise = (async () => {
     try {
-      const response = await fetchImpl(tokenUrl, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          grant_type: "refresh_token",
-          refresh_token: current.refreshToken,
-          client_id: clientId,
-        }),
-        signal: AbortSignal.timeout(10_000),
-      });
+      return await withClaudeAccountPoolLock(async () => {
+        const latest = claudeOAuthSession(accountId, { filePath, homesDir, now }) || current;
+        // Another process refreshed while this one waited for the lock.
+        const rotatedElsewhere = latest.tokenFingerprint !== current.tokenFingerprint;
+        if (latest.accessToken && !latest.needsRefresh && (!force || rotatedElsewhere)) {
+          return latest;
+        }
+        if (!latest.refreshToken) return latest;
 
-      if (response.ok) {
-        const data = await response.json();
-        const newAccessToken = typeof data.access_token === "string" ? data.access_token.trim() : "";
-        const expiresIn = Number(data.expires_in) || 3600;
-        const newRefreshToken = typeof data.refresh_token === "string" ? data.refresh_token.trim() : "";
-        const newExpiresAt = now + expiresIn * 1000;
+        let response;
+        try {
+          response = await fetchImpl(tokenUrl, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              grant_type: "refresh_token",
+              refresh_token: latest.refreshToken,
+              client_id: clientId,
+            }),
+            signal: AbortSignal.timeout(10_000),
+          });
+        } catch {
+          // Network/timeout error: transient, the account stays eligible.
+          return { ...latest, refreshFailed: "transient" };
+        }
 
-        return await withClaudeAccountPoolLock(async () => {
-          const credPath = claudeSubscriptionAccountCredentialsPath(accountId, { homesDir });
+        let data;
+        try {
+          data = await response.json();
+        } catch {}
+
+        const newAccessToken = typeof data?.access_token === "string" ? data.access_token.trim() : "";
+        if (response.ok && newAccessToken) {
+          const expiresIn = Number(data.expires_in) || 3600;
+          const newRefreshToken = typeof data.refresh_token === "string" ? data.refresh_token.trim() : "";
           let blob = {};
           if (existsSync(credPath)) {
             try {
@@ -149,82 +221,39 @@ export async function ensureFreshClaudeOAuthToken(accountId, {
             } catch {}
           }
           blob.accessToken = newAccessToken;
-          blob.expiresAt = newExpiresAt;
+          blob.expiresAt = now + expiresIn * 1000;
           if (newRefreshToken) {
             blob.refreshToken = newRefreshToken;
           }
           if (data.scope) {
             blob.scope = data.scope;
           }
-
           writePrivateJson(credPath, { claudeAiOauth: blob }, { directoryMode: 0o700, fileMode: 0o600 });
-
-          const state = readClaudeAccountPoolState(filePath);
-          const account = state.accounts[accountId];
-          if (account) {
-            account.health = {
-              ...account.health,
-              state: "healthy",
-              lastSuccessAt: new Date(now).toISOString(),
-            };
-            account.subscription = {
-              ...account.subscription,
-              status: "usable",
-            };
-            writeClaudeAccountPoolState(state, filePath);
-          }
-
+          await markRefreshed(accountId, { filePath, now }).catch(() => {});
           return claudeOAuthSession(accountId, { filePath, homesDir, now });
-        }, { filePath });
-      }
+        }
 
-      // Handle failure per claude-swap taxonomy
-      const status = response.status;
-      let errorBody;
-      try {
-        errorBody = await response.json();
-      } catch {}
+        // Handle failure per claude-swap taxonomy
+        const status = response.status;
+        const errorText = typeof data?.error === "string"
+          ? data.error
+          : typeof data?.error_code === "string"
+            ? data.error_code
+            : "";
 
-      const errorText = typeof errorBody?.error === "string"
-        ? errorBody.error
-        : typeof errorBody?.error_code === "string"
-          ? errorBody.error_code
-          : "";
+        if ((status === 400 || status === 401 || status === 403) && errorText === "invalid_grant") {
+          // Permanent failure: mark account reauth-required
+          await markReauthRequired(accountId, { filePath, now, status }).catch(() => {});
+          return { ...latest, refreshFailed: "invalid_grant" };
+        }
 
-      if ((status === 400 || status === 401 || status === 403) && errorText === "invalid_grant") {
-        // Permanent failure: mark account reauth-required
-        await withClaudeAccountPoolLock(async () => {
-          const state = readClaudeAccountPoolState(filePath);
-          const account = state.accounts[accountId];
-          if (account) {
-            account.health = {
-              ...account.health,
-              state: "reauth-required",
-              lastError: "invalid_grant: reauthentication required",
-              lastErrorAt: new Date(now).toISOString(),
-              lastStatus: status,
-            };
-            account.subscription = {
-              ...account.subscription,
-              status: "invalid",
-            };
-            writeClaudeAccountPoolState(state, filePath);
-          }
-        }, { filePath });
-
-        return claudeOAuthSession(accountId, { filePath, homesDir, now });
-      }
-
-      if (errorText === "invalid_client") {
-        // Systemic client-id issue: do not strike the individual account
-        return current;
-      }
-
-      // Transient failure (network, 5xx, etc.): account stays eligible with stale token
-      return current;
+        // invalid_client is systemic (not this account's fault); 5xx and a
+        // 2xx without a token are transient. The account stays eligible.
+        return { ...latest, refreshFailed: errorText || `http_${status}` };
+      }, { filePath: credPath });
     } catch {
-      // Network/timeout error: transient, return current
-      return current;
+      // The lock itself failed: transient, return what we had.
+      return { ...current, refreshFailed: "transient" };
     } finally {
       inFlightRefreshes.delete(accountId);
     }

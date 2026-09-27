@@ -45,6 +45,7 @@ enum RouterControlContractPolicy {
       || arguments == ["vision-bridge", "pull-status"]
       || arguments == ["chatgpt-session", "status"]
       || arguments == ["chatgpt-account-pool", "usage", "cached"]
+      || arguments == ["claude-account-pool", "usage", "cached"]
       || arguments == ["health", "--json"]
     {
       return .read
@@ -5042,6 +5043,10 @@ struct ChatGptAccountPoolRow: Decodable, Equatable, Identifiable {
   let primaryRemainingPercent: Double?
   let secondaryRemainingPercent: Double?
   let resetsAt: TimeInterval?
+  /// Per-window resets. Only the Claude projection sends them; ChatGPT rows
+  /// leave both nil and keep using `resetsAt`.
+  let primaryResetsAt: TimeInterval?
+  let secondaryResetsAt: TimeInterval?
   let error: String?
   let resetCredits: ChatGptAccountResetCredits?
   let authInvalid: Bool
@@ -5050,6 +5055,7 @@ struct ChatGptAccountPoolRow: Decodable, Equatable, Identifiable {
   enum CodingKeys: String, CodingKey {
     case id, label, preferred, planType, health
     case primaryRemainingPercent, secondaryRemainingPercent, resetsAt, error
+    case primaryResetsAt, secondaryResetsAt
     case resetCredits, authInvalid, resetAttemptPending
   }
 
@@ -5065,6 +5071,8 @@ struct ChatGptAccountPoolRow: Decodable, Equatable, Identifiable {
     secondaryRemainingPercent = try container.decodeIfPresent(
       Double.self, forKey: .secondaryRemainingPercent)
     resetsAt = try container.decodeIfPresent(TimeInterval.self, forKey: .resetsAt)
+    primaryResetsAt = try container.decodeIfPresent(TimeInterval.self, forKey: .primaryResetsAt)
+    secondaryResetsAt = try container.decodeIfPresent(TimeInterval.self, forKey: .secondaryResetsAt)
     error = try container.decodeIfPresent(String.self, forKey: .error)
     resetCredits = try container.decodeIfPresent(ChatGptAccountResetCredits.self, forKey: .resetCredits)
     authInvalid = (try container.decodeIfPresent(Bool.self, forKey: .authInvalid)) ?? false
@@ -5080,6 +5088,8 @@ struct ChatGptAccountPoolRow: Decodable, Equatable, Identifiable {
     primaryRemainingPercent: Double? = nil,
     secondaryRemainingPercent: Double? = nil,
     resetsAt: TimeInterval? = nil,
+    primaryResetsAt: TimeInterval? = nil,
+    secondaryResetsAt: TimeInterval? = nil,
     error: String? = nil,
     resetCredits: ChatGptAccountResetCredits? = nil,
     authInvalid: Bool = false,
@@ -5093,6 +5103,8 @@ struct ChatGptAccountPoolRow: Decodable, Equatable, Identifiable {
     self.primaryRemainingPercent = primaryRemainingPercent
     self.secondaryRemainingPercent = secondaryRemainingPercent
     self.resetsAt = resetsAt
+    self.primaryResetsAt = primaryResetsAt
+    self.secondaryResetsAt = secondaryResetsAt
     self.error = error
     self.resetCredits = resetCredits
     self.authInvalid = authInvalid

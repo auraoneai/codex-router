@@ -112,13 +112,24 @@ import {
   readClaudeAccountPoolState,
 } from "./claude-account-pool.mjs";
 import {
+  COOLDOWN_MS as CLAUDE_COOLDOWN_MS,
+  claudeModelFamily,
+  claudeRejectionResetAt,
   claudePoolExhaustionReport,
   claudeRotationCandidates,
   coolClaudeAccount,
+  coolClaudeAccountFamily,
   isClaudeAccountAuthInvalid,
   markClaudeAccountAuthInvalid,
+  nextClaudePoolResetAt,
   rememberClaudeAccount,
 } from "./claude-account-rotation.mjs";
+import {
+  probeClaudeAccountUsage,
+  scheduleClaudePostTurnUsageProbe,
+  scheduleClaudeResetAwareProbe,
+  triggerClaudeEmergencyDepletionProbe,
+} from "./claude-usage-probe.mjs";
 import {
   cachedClaudeAccountUsageById,
   recordClaudeAccountUsage,
@@ -1774,6 +1785,80 @@ function healthPayload() {
   return { ok, service: "codex-router-api-forwarder", providers };
 }
 
+// Background quota probing for the Claude pool, driven from this process on
+// purpose: the forwarder is what routes Claude traffic, so the cooldown and
+// auth-invalid marks a probe makes land in the same in-memory maps rotation
+// reads. Mirrors the ChatGPT router's schedule -- a steady interval, one probe
+// just after a known reset, an emergency probe when the pool runs dry, and a
+// post-turn probe -- and every trigger is best-effort and off the turn's path.
+const CLAUDE_USAGE_PROBE_INTERVAL_MS = 2 * 60_000;
+const CLAUDE_USAGE_PROBES_ENABLED = !/^(0|off|false|no)$/i.test(
+  String(process.env.MODEL_ROUTER_CLAUDE_USAGE_PROBES || ""),
+);
+
+function claudeProbeOptions() {
+  return {
+    poolPath: CLAUDE_ACCOUNT_POOL_PATH,
+    homesDir: CLAUDE_ACCOUNT_HOMES_DIR,
+    cachePath: CLAUDE_ACCOUNT_USAGE_CACHE_PATH,
+  };
+}
+
+function claudePoolProbeable() {
+  if (!CLAUDE_USAGE_PROBES_ENABLED) return false;
+  try {
+    return claudeAccountPoolConfigured();
+  } catch {
+    return false;
+  }
+}
+
+function runClaudeUsageProbe() {
+  if (!claudePoolProbeable()) return;
+  probeClaudeAccountUsage(claudeProbeOptions()).catch(() => {});
+}
+
+function claudeEmergencyProbe() {
+  if (!claudePoolProbeable()) return;
+  try {
+    triggerClaudeEmergencyDepletionProbe({ probeOptions: claudeProbeOptions() });
+  } catch {}
+}
+
+function claudePostTurnProbe() {
+  if (!claudePoolProbeable()) return;
+  try {
+    scheduleClaudePostTurnUsageProbe(15_000, { probeOptions: claudeProbeOptions() });
+  } catch {}
+}
+
+function claudeResetProbe(usageById) {
+  if (!claudePoolProbeable()) return;
+  try {
+    const nextReset = nextClaudePoolResetAt(usageById);
+    if (nextReset) scheduleClaudeResetAwareProbe(nextReset, { probeOptions: claudeProbeOptions() });
+  } catch {}
+}
+
+if (CLAUDE_USAGE_PROBES_ENABLED) {
+  const claudeUsageProbeTimer = setInterval(runClaudeUsageProbe, CLAUDE_USAGE_PROBE_INTERVAL_MS);
+  claudeUsageProbeTimer.unref?.();
+  // One early probe so a restart does not leave rotation and the tray on a
+  // reading from before it.
+  const claudeStartupProbe = setTimeout(runClaudeUsageProbe, 10_000);
+  claudeStartupProbe.unref?.();
+}
+
+async function bufferedClaudeFailure(attemptResponse, signal) {
+  let body;
+  try {
+    body = await readResponseBody(attemptResponse, { signal });
+  } catch {
+    body = Buffer.alloc(0);
+  }
+  return new Response(body, { status: attemptResponse.status, headers: attemptResponse.headers });
+}
+
 async function runClaudeAccountAttempts(normalized, {
   request,
   upstreamBody,
@@ -1788,40 +1873,60 @@ async function runClaudeAccountAttempts(normalized, {
   homesDir = CLAUDE_ACCOUNT_HOMES_DIR,
   usagePath = CLAUDE_ACCOUNT_USAGE_CACHE_PATH,
 } = {}) {
+  const family = claudeModelFamily(normalized.model?.upstreamModel);
   const usageById = cachedClaudeAccountUsageById({ usagePath });
+  claudeResetProbe(usageById);
   const candidates = claudeRotationCandidates({
     conversationId,
     usageById,
     poolPath,
     homesDir,
+    family,
   });
-  if (candidates.length === 0) {
-    const exhaustion = claudePoolExhaustionReport({ poolPath, homesDir, usageById });
+  const exhaustedResult = () => {
+    const exhaustion = claudePoolExhaustionReport({
+      poolPath, homesDir, usageById: cachedClaudeAccountUsageById({ usagePath }), family,
+    });
     if (exhaustion?.exhausted && (exhaustion.drained > 0 || exhaustion.cooling > 0)) {
+      claudeEmergencyProbe();
       return { exhausted: true, exhaustion };
     }
+    return undefined;
+  };
+  if (candidates.length === 0) {
+    const exhausted = exhaustedResult();
+    if (exhausted) return exhausted;
+    claudeEmergencyProbe();
     return {
       unavailable: true,
       message: "The Claude account pool is configured, but no usable Claude account credentials could be resolved.",
     };
   }
 
-  const attempted = new Set();
-  let candidateIndex = 0;
-  let headerless429Hops = 0;
+  // The attribution prompt is the same for every account, so the body is
+  // built once and every attempt replays identical bytes.
+  let attemptBody = upstreamBody;
+  try {
+    const parsedBody = typeof attemptBody === "string"
+      ? JSON.parse(attemptBody)
+      : JSON.parse(attemptBody.toString("utf8"));
+    if (parsedBody && typeof parsedBody === "object") {
+      injectClaudeAttributionSystemPrompt(parsedBody);
+      attemptBody = JSON.stringify(parsedBody);
+    }
+  } catch {}
 
-  while (candidateIndex < candidates.length) {
+  const baseUrl = providerBaseUrl(normalized.endpoint) || "https://api.anthropic.com";
+  const target = upstreamTarget({ baseUrl }, normalized, route, requestUrl.search);
+  // The last account-specific failure, relayed as-is when every account has
+  // been tried and the pool is not simply out of quota.
+  let lastFailure;
+
+  for (const candidate of candidates) {
     if (typeof isResponseCommitted === "function" && isResponseCommitted()) {
       return { committed: true };
     }
-
-    const candidate = candidates[candidateIndex];
-    candidateIndex++;
-
-    if (attempted.has(candidate.id)) {
-      continue;
-    }
-    attempted.add(candidate.id);
+    if (controller.signal.aborted) break;
 
     let poolState;
     try {
@@ -1830,222 +1935,193 @@ async function runClaudeAccountAttempts(normalized, {
       poolState = null;
     }
     const account = poolState?.accounts?.[candidate.id];
-    if (!account || account.state !== "active" || account.paused) {
-      continue;
-    }
+    if (!account || account.state !== "active" || account.paused) continue;
+    if (isClaudeAccountAuthInvalid(candidate.id, { tokenFingerprint: candidate.tokenFingerprint })) continue;
 
-    if (isClaudeAccountAuthInvalid(candidate.id, { tokenFingerprint: candidate.tokenFingerprint })) {
-      continue;
-    }
-
-    let tokenSession;
-    try {
-      tokenSession = await ensureFreshClaudeOAuthToken(candidate.id, { homesDir });
-    } catch (refreshErr) {
+    let tokenSession = await ensureFreshClaudeOAuthToken(candidate.id, { homesDir, filePath: poolPath });
+    if (tokenSession?.refreshFailed === "invalid_grant") {
       markClaudeAccountAuthInvalid(candidate.id, {
-        tokenFingerprint: candidate.tokenFingerprint,
-        reason: refreshErr?.message || "refresh_failed",
-        poolPath,
+        tokenFingerprint: tokenSession.tokenFingerprint,
+        reason: "invalid_grant",
       });
       continue;
     }
-    if (!tokenSession?.accessToken) {
-      continue;
-    }
+    // An expired token whose refresh failed transiently would only 401.
+    if (!tokenSession?.accessToken || tokenSession.expired) continue;
 
-    let attemptBody = upstreamBody;
-    try {
-      const parsedBody = typeof attemptBody === "string"
-        ? JSON.parse(attemptBody)
-        : JSON.parse(attemptBody.toString("utf8"));
-      if (parsedBody && typeof parsedBody === "object") {
-        injectClaudeAttributionSystemPrompt(parsedBody);
-        attemptBody = JSON.stringify(parsedBody);
-      }
-    } catch {}
+    let refreshedAfter401 = false;
+    let waitedOnRetryAfter = false;
 
-    const baseUrl = providerBaseUrl(normalized.endpoint) || "https://api.anthropic.com";
-    const target = upstreamTarget({ baseUrl }, normalized, route, requestUrl.search);
-    const headers = upstreamHeaders(
-      request.headers,
-      attemptBody,
-      tokenSession.accessToken,
-      normalized.provider,
-      {
-        "anthropic-beta": "oauth-2025-04-20",
-        ...affinityHeaders,
-      },
-      normalized.endpoint,
-      "claude-oauth",
-    );
+    // One account: the first attempt, plus at most one forced-refresh retry
+    // after a 401 and one short Retry-After wait after a transient 429.
+    for (;;) {
+      const headers = upstreamHeaders(
+        request.headers,
+        attemptBody,
+        tokenSession.accessToken,
+        normalized.provider,
+        {
+          "anthropic-beta": "oauth-2025-04-20",
+          ...affinityHeaders,
+        },
+        normalized.endpoint,
+        "claude-oauth",
+      );
 
-    const attemptRecord = latencyTrace?.beginAttempt?.({
-      provider: canonicalProviderId(normalized.provider.id),
-      model: normalized.model?.upstreamModel,
-      kind: "claude_account_attempt",
-    });
-
-    let attemptResponse;
-    try {
-      attemptResponse = await fetch(target, {
-        method: request.method,
-        headers,
-        body: attemptBody,
-        signal: controller.signal,
-        redirect: route === "/embeddings" ? "error" : "follow",
+      const attemptRecord = latencyTrace?.beginAttempt?.({
+        provider: canonicalProviderId(normalized.provider.id),
+        model: normalized.model?.upstreamModel,
+        kind: "claude_account_attempt",
       });
-      latencyTrace?.finishAttemptRecord?.(attemptRecord, { response: attemptResponse });
-    } catch (fetchErr) {
-      latencyTrace?.finishAttemptRecord?.(attemptRecord, { error: fetchErr });
-      if (typeof isResponseCommitted === "function" && isResponseCommitted()) {
-        throw fetchErr;
+
+      let attemptResponse;
+      try {
+        attemptResponse = await fetch(target, {
+          method: request.method,
+          headers,
+          body: attemptBody,
+          signal: controller.signal,
+          redirect: route === "/embeddings" ? "error" : "follow",
+        });
+        latencyTrace?.finishAttemptRecord?.(attemptRecord, { response: attemptResponse });
+      } catch (fetchErr) {
+        latencyTrace?.finishAttemptRecord?.(attemptRecord, { error: fetchErr });
+        if (controller.signal.aborted || (typeof isResponseCommitted === "function" && isResponseCommitted())) {
+          throw fetchErr;
+        }
+        break; // transport failure: next account
       }
-      continue;
-    }
 
-    const unified = parseClaudeUnifiedHeaders(attemptResponse.headers);
-    const retryAfter = retryAfterSeconds(attemptResponse.headers);
-
-    if (attemptResponse.ok) {
-      rememberClaudeAccount(conversationId, candidate.id);
-      return {
-        ok: true,
-        status: attemptResponse.status,
-        response: attemptResponse,
-        headers: attemptResponse.headers,
+      const accountResult = (response, extra = {}) => ({
+        ok: response.ok,
+        status: response.status,
+        response,
+        headers: response.headers,
         accountId: candidate.id,
         account,
         target,
         poolPath,
         usagePath,
-      };
-    }
-
-    if (attemptResponse.status === 401) {
-      markClaudeAccountAuthInvalid(candidate.id, {
-        tokenFingerprint: tokenSession.tokenFingerprint,
-        reason: "unauthorized_401",
-        poolPath,
+        ...extra,
       });
-      if (!isResponseCommitted?.()) {
+
+      if (attemptResponse.ok) {
+        rememberClaudeAccount(conversationId, candidate.id);
+        claudePostTurnProbe();
+        return accountResult(attemptResponse);
+      }
+
+      const status = attemptResponse.status;
+
+      if (status === 401) {
         await attemptResponse.body?.cancel().catch(() => {});
-        continue;
-      }
-      return {
-        ok: false,
-        status: 401,
-        response: attemptResponse,
-        headers: attemptResponse.headers,
-        accountId: candidate.id,
-        account,
-        target,
-      };
-    }
-
-    if (attemptResponse.status === 403) {
-      const bodyText = (await readResponseBody(attemptResponse, { signal: controller.signal })).toString("utf8");
-      if (bodyText.includes("oauth_not_allowed_for_organization")) {
-        coolClaudeAccount(candidate.id, Date.now() + 5 * 60 * 1000, { poolPath });
-      }
-      if (!isResponseCommitted?.()) {
-        continue;
-      }
-      return {
-        ok: false,
-        status: 403,
-        response: new Response(bodyText, { status: 403, headers: attemptResponse.headers }),
-        headers: attemptResponse.headers,
-        accountId: candidate.id,
-        account,
-        target,
-      };
-    }
-
-    if (attemptResponse.status === 429) {
-      const isUnifiedRejection = unified?.status === "rejected" || claudeSharedRejection(attemptResponse.headers);
-      const hasUnifiedHeaders = Boolean(unified?.fiveHour || unified?.weekly || unified?.fable || unified?.status);
-
-      if (isUnifiedRejection || hasUnifiedHeaders) {
-        const resetsAt = unified?.fiveHour?.resetsAtMs || unified?.weekly?.resetsAtMs;
-        const cd = resetsAt && resetsAt > Date.now() ? resetsAt : Date.now() + 5 * 60 * 1000;
-        coolClaudeAccount(candidate.id, cd, { poolPath });
-        recordClaudeAccountUsage(candidate.id, attemptResponse.headers, {
-          plan: account?.subscription?.plan,
-          email: account?.identity?.email,
-          poolPath,
-          usagePath,
+        // The access token can be revoked while the refresh token is still
+        // good (a newer Claude Code login on the same account does exactly
+        // this). Refresh once and retry before giving up on the account.
+        if (!refreshedAfter401) {
+          refreshedAfter401 = true;
+          const refreshed = await ensureFreshClaudeOAuthToken(candidate.id, {
+            homesDir,
+            filePath: poolPath,
+            force: true,
+          });
+          if (refreshed?.accessToken && !refreshed.expired && !refreshed.refreshFailed &&
+              refreshed.tokenFingerprint !== tokenSession.tokenFingerprint) {
+            tokenSession = refreshed;
+            continue;
+          }
+        }
+        markClaudeAccountAuthInvalid(candidate.id, {
+          tokenFingerprint: tokenSession.tokenFingerprint,
+          reason: "unauthorized_401",
         });
-        if (!isResponseCommitted?.()) {
-          await attemptResponse.body?.cancel().catch(() => {});
-          continue;
-        }
-        return {
-          ok: false,
-          status: 429,
-          response: attemptResponse,
-          headers: attemptResponse.headers,
-          accountId: candidate.id,
-          account,
-          target,
-        };
-      } else if (retryAfter !== undefined && retryAfter > 0) {
-        if (retryAfter <= 60 && !isResponseCommitted?.()) {
-          await attemptResponse.body?.cancel().catch(() => {});
-          await sleep(retryAfter * 1000);
-          attempted.delete(candidate.id);
-          candidateIndex = Math.max(0, candidateIndex - 1);
-          continue;
-        }
-        return {
-          ok: false,
-          status: 429,
-          response: attemptResponse,
-          headers: attemptResponse.headers,
-          accountId: candidate.id,
-          account,
-          target,
-        };
-      } else {
-        if (headerless429Hops === 0 && candidateIndex < candidates.length && !isResponseCommitted?.()) {
-          headerless429Hops++;
-          await attemptResponse.body?.cancel().catch(() => {});
-          await sleep(2000);
-          continue;
-        }
-        return {
-          ok: false,
-          status: 429,
-          response: attemptResponse,
-          headers: attemptResponse.headers,
-          accountId: candidate.id,
-          account,
-          target,
-        };
+        lastFailure = { status, accountId: candidate.id };
+        break;
       }
-    }
 
-    if (!isResponseCommitted?.()) {
-      await attemptResponse.body?.cancel().catch(() => {});
-      continue;
+      if (status === 403) {
+        const buffered = await bufferedClaudeFailure(attemptResponse, controller.signal);
+        const bodyText = await buffered.clone().text().catch(() => "");
+        if (bodyText.includes("oauth_not_allowed_for_organization")) {
+          coolClaudeAccount(candidate.id, Date.now() + CLAUDE_COOLDOWN_MS);
+        }
+        lastFailure = { status, accountId: candidate.id, result: accountResult(buffered, { recordUsage: false }) };
+        break;
+      }
+
+      if (status === 429) {
+        const now = Date.now();
+        const unified = parseClaudeUnifiedHeaders(attemptResponse.headers, { now });
+        const retryAfter = retryAfterSeconds(attemptResponse.headers);
+        if (unified) {
+          try {
+            recordClaudeAccountUsage(candidate.id, unified, {
+              plan: account?.subscription?.plan,
+              email: account?.identity?.email,
+              usagePath,
+            });
+          } catch {}
+        }
+        const buffered = await bufferedClaudeFailure(attemptResponse, controller.signal);
+        const failure = accountResult(buffered, { recordUsage: false });
+
+        if (claudeSharedRejection(unified)) {
+          // The shared 5h/7d quota is spent: bench the account until the
+          // windows that signed the rejection have all reset.
+          coolClaudeAccount(candidate.id, claudeRejectionResetAt(unified, now) || now + CLAUDE_COOLDOWN_MS);
+          claudeEmergencyProbe();
+          lastFailure = { status, accountId: candidate.id, result: failure };
+          break;
+        }
+        if (unified?.status === "rejected") {
+          // Only the Fable family bucket is spent. Every other model keeps
+          // this account; Fable turns move on.
+          const familyReset = Number(unified.fable?.resetsAtMs);
+          coolClaudeAccountFamily(
+            candidate.id,
+            "fable",
+            Number.isFinite(familyReset) && familyReset > now ? familyReset : now + CLAUDE_COOLDOWN_MS,
+          );
+          lastFailure = { status, accountId: candidate.id, result: failure };
+          break;
+        }
+        // Not a quota verdict: a burst or concurrency limit. Absorb one short
+        // Retry-After on the same account, otherwise pass it over briefly --
+        // the unified headers every OAuth response carries are not a reason
+        // to bench it for hours.
+        if (!waitedOnRetryAfter && retryAfter !== undefined && retryAfter > 0 && retryAfter <= 60 &&
+            !controller.signal.aborted) {
+          waitedOnRetryAfter = true;
+          await sleep(retryAfter * 1000, undefined, { signal: controller.signal }).catch(() => {});
+          continue;
+        }
+        coolClaudeAccount(candidate.id, now + CLAUDE_COOLDOWN_MS);
+        lastFailure = { status, accountId: candidate.id, result: failure };
+        break;
+      }
+
+      if (status >= 500) {
+        // The upstream, not the account, failed; another account may land.
+        const buffered = await bufferedClaudeFailure(attemptResponse, controller.signal);
+        lastFailure = { status, accountId: candidate.id, result: accountResult(buffered, { recordUsage: false }) };
+        break;
+      }
+
+      // Any other 4xx describes the request, not the account: every account
+      // would refuse it the same way. Relay it now instead of spending the
+      // whole pool and answering with a generic 503.
+      return accountResult(attemptResponse);
     }
-    return {
-      ok: false,
-      status: attemptResponse.status,
-      response: attemptResponse,
-      headers: attemptResponse.headers,
-      accountId: candidate.id,
-      account,
-      target,
-    };
   }
 
-  const exhaustion = claudePoolExhaustionReport({ poolPath, homesDir, usageById });
-  if (exhaustion?.exhausted && (exhaustion.drained > 0 || exhaustion.cooling > 0)) {
-    return { exhausted: true, exhaustion };
-  }
+  const exhausted = exhaustedResult();
+  if (exhausted) return exhausted;
+  if (lastFailure?.result) return lastFailure.result;
   return {
     unavailable: true,
-    message: "The Claude account pool could not complete this request before response bytes were committed.",
+    message: lastFailure?.status === 401
+      ? "Every Claude account in the pool was refused as unauthorized. Re-add the affected accounts with a fresh Claude Code login."
+      : "No Claude account in the pool could complete this request.",
   };
 }
 
@@ -2244,15 +2320,22 @@ async function handleRequest(request, response) {
       if (claudeAttemptResult.response) {
         upstream = claudeAttemptResult.response;
         target = claudeAttemptResult.target;
-        claudeAccountInfo = {
-          accountId: claudeAttemptResult.accountId,
-          account: claudeAttemptResult.account,
-          poolPath: claudeAttemptResult.poolPath,
-          usagePath: claudeAttemptResult.usagePath,
-        };
+        // A failure the attempt loop already recorded (or a 401, whose
+        // recording would clear the auth-invalid mark) is relayed without
+        // being recorded a second time.
+        claudeAccountInfo = claudeAttemptResult.recordUsage === false
+          ? undefined
+          : {
+              accountId: claudeAttemptResult.accountId,
+              account: claudeAttemptResult.account,
+              poolPath: claudeAttemptResult.poolPath,
+              usagePath: claudeAttemptResult.usagePath,
+            };
         claudeAttemptSuccess = true;
       }
     } catch (rotationError) {
+      // A client that went away is not a rotation failure to fall back from.
+      if (controller.signal.aborted) throw rotationError;
       // Rotation-never-fails-a-turn: a throwing rotation dependency leaves the request
       // completing on the legacy credential if available.
       console.error(`[api-forwarder] Claude rotation dependency failed: ${formatErrorChain(rotationError)}`);

@@ -32,6 +32,31 @@ struct ChatGptAccountPoolTests {
      "secondaryRemainingPercent":27,"resetsAt":1790061047}]}
   """
 
+  @Test("Claude rows decode per-window resets and keep missing windows nil")
+  func claudeRowsCarryPerWindowResets() throws {
+    let json = """
+    {"fetchedAt":"2026-09-27T20:00:00.000Z","rotation":["clacct_a"],
+     "accounts":[
+      {"id":"clacct_a","label":"a@example.com","preferred":true,"planType":"max20",
+       "health":"healthy","primaryRemainingPercent":80,"secondaryRemainingPercent":12,
+       "resetsAt":1790700000,"primaryResetsAt":1790600000,"secondaryResetsAt":1790700000,
+       "authInvalid":false},
+      {"id":"clacct_b","label":"b@example.com","health":"auth_invalid",
+       "primaryRemainingPercent":null,"secondaryRemainingPercent":null,"resetsAt":null,
+       "authInvalid":true}]}
+    """
+    let usage = try JSONDecoder().decode(ChatGptAccountPoolUsage.self, from: Data(json.utf8))
+    let first = try #require(usage.accounts.first)
+    #expect(first.primaryResetsAt == 1790600000)
+    #expect(first.secondaryResetsAt == 1790700000)
+    let second = usage.accounts[1]
+    // A verdict the tray does not know is not a reason to drop the row.
+    #expect(second.health == .unknown)
+    #expect(second.authInvalid)
+    #expect(second.primaryRemainingPercent == nil)
+    #expect(second.primaryResetsAt == nil)
+  }
+
   static func decodeLive() throws -> ChatGptAccountPoolUsage {
     try JSONDecoder().decode(
       ChatGptAccountPoolUsage.self,

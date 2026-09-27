@@ -16,6 +16,9 @@ import {
   rememberedClaudeAccount,
   resetClaudeRotationStateForTests,
   tierWeight,
+  claudeRejectionResetAt,
+  coolClaudeAccountFamily,
+  leftoverHealth,
 } from "../src/claude-account-rotation.mjs";
 import {
   claudeSubscriptionAccountCredentialsPath,
@@ -212,4 +215,106 @@ test("claudePoolExhaustionReport reports all-drained status with earliest reset"
   assert.equal(report.drained, 2);
   assert.equal(report.nextResetAt, resetTime2);
   assert.match(report.message, /All 2 Claude accounts in the pool are currently unavailable/);
+});
+
+test("an expired access token with a refresh token stays in rotation; a refused login does not", () => {
+  const options = fixture();
+  const now = Date.now();
+  const expired = createTestAccount(options, { label: "Expired", expiresAt: now - 60_000, refreshToken: "rt-expired" });
+  const refused = createTestAccount(options, { label: "Refused", expiresAt: now - 60_000, refreshToken: "rt-refused" });
+  const noRefresh = createTestAccount(options, { label: "NoRefresh", expiresAt: now - 60_000, refreshToken: "" });
+  const state = readClaudeAccountPoolState(options.filePath);
+  state.accounts[refused.id].health = { state: "reauth-required" };
+  writeClaudeAccountPoolState(state, options.filePath);
+
+  const candidates = claudeRotationCandidates({ poolPath: options.filePath, homesDir: options.homesDir, now });
+  assert.deepEqual(candidates.map((c) => c.id), [expired.id]);
+  assert.equal(candidates[0].needsRefresh, true);
+  assert.ok(candidates[0].tokenFingerprint, "candidates carry the fingerprint the attempt loop checks");
+
+  const report = claudePoolExhaustionReport({ poolPath: options.filePath, homesDir: options.homesDir, now });
+  assert.equal(report, null, "a refreshable account is not an exhausted pool");
+  void noRefresh;
+});
+
+test("a drained window whose reset has passed no longer keeps the account out", () => {
+  const options = fixture();
+  const now = Date.now();
+  const recovered = createTestAccount(options, { label: "Recovered", refreshToken: "rt-recovered" });
+  const spent = createTestAccount(options, { label: "Spent", refreshToken: "rt-spent" });
+  const usageById = new Map([
+    [recovered.id, { id: recovered.id, fiveHour: { remainingPercent: 0, resetsAtMs: now - 60_000 } }],
+    [spent.id, { id: spent.id, fiveHour: { remainingPercent: 0, resetsAtMs: now + 3600_000 } }],
+  ]);
+  assert.equal(leftoverHealth(usageById.get(recovered.id), undefined, recovered.id, { now }), "unknown");
+  const ids = claudeRotationCandidates({ poolPath: options.filePath, homesDir: options.homesDir, usageById, now })
+    .map((c) => c.id);
+  assert.deepEqual(ids, [recovered.id]);
+});
+
+test("the exhaustion report never names a reset time in the past", () => {
+  const options = fixture();
+  const now = Date.now();
+  const a = createTestAccount(options, { label: "A", refreshToken: "rt-a" });
+  const b = createTestAccount(options, { label: "B", refreshToken: "rt-b" });
+  const usageById = new Map([
+    // Five-hour window spent, weekly also spent and resetting later: the
+    // account is back only when both have reset.
+    [a.id, {
+      id: a.id,
+      fiveHour: { remainingPercent: 0, resetsAtMs: now + 60_000 },
+      weekly: { remainingPercent: 0, resetsAtMs: now + 7200_000 },
+    }],
+    [b.id, { id: b.id, fiveHour: { remainingPercent: 0, resetsAtMs: now + 3600_000 } }],
+  ]);
+  const report = claudePoolExhaustionReport({ poolPath: options.filePath, homesDir: options.homesDir, usageById, now });
+  assert.equal(report.exhausted, true);
+  assert.ok(report.nextResetAt > now);
+  assert.equal(report.nextResetAt, now + 3600_000);
+});
+
+test("a spent Fable family bucket benches the account for Fable only", () => {
+  const options = fixture();
+  const now = Date.now();
+  const a = createTestAccount(options, { label: "A", refreshToken: "rt-fa" });
+  const b = createTestAccount(options, { label: "B", refreshToken: "rt-fb" });
+  const usageById = new Map([
+    [a.id, {
+      id: a.id,
+      fiveHour: { remainingPercent: 70, resetsAtMs: now + 3600_000 },
+      fable: { remainingPercent: 0, resetsAtMs: now + 86_400_000 },
+    }],
+  ]);
+  const fable = claudeRotationCandidates({ poolPath: options.filePath, homesDir: options.homesDir, usageById, family: "fable", now });
+  assert.deepEqual(fable.map((c) => c.id), [b.id]);
+  const other = claudeRotationCandidates({ poolPath: options.filePath, homesDir: options.homesDir, usageById, now });
+  assert.ok(other.some((c) => c.id === a.id), "non-Fable models keep the account");
+
+  coolClaudeAccountFamily(b.id, "fable", now + 60_000);
+  const fableCooled = claudeRotationCandidates({ poolPath: options.filePath, homesDir: options.homesDir, family: "fable", now });
+  assert.equal(fableCooled[0].id, a.id, "a family cooldown moves Fable turns off the account");
+});
+
+test("a cached auth-invalid row stops applying once the account holds a different token", () => {
+  const options = fixture();
+  const account = createTestAccount(options, { label: "Relogged", accessToken: "fresh-login-token", refreshToken: "rt-relog" });
+  const usageById = new Map([
+    [account.id, { id: account.id, authInvalid: true, authTokenFingerprint: "0000000000000000" }],
+  ]);
+  const ids = claudeRotationCandidates({ poolPath: options.filePath, homesDir: options.homesDir, usageById })
+    .map((c) => c.id);
+  assert.deepEqual(ids, [account.id]);
+});
+
+test("a shared rejection benches the account until the latest rejected window resets", () => {
+  const now = Date.now();
+  const reading = {
+    status: "rejected",
+    windowStatuses: { fiveHour: "allowed", weekly: "rejected" },
+    fiveHour: { remainingPercent: 40, resetsAtMs: now + 3600_000 },
+    weekly: { remainingPercent: 0, resetsAtMs: now + 3 * 86_400_000 },
+  };
+  assert.equal(claudeRejectionResetAt(reading, now), now + 3 * 86_400_000,
+    "a weekly rejection is not lifted at the five-hour reset");
+  assert.equal(claudeRejectionResetAt({ status: "rejected" }, now), undefined);
 });

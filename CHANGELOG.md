@@ -1,6 +1,36 @@
 # Changelog
 
 ## Unreleased
+- **Claude account rotation keeps every account in play and brings spent ones
+  back on its own.** The Claude subscription pool now behaves like the ChatGPT
+  pool. An account whose access token had expired was dropped from rotation
+  before anything could refresh it; it is now refreshed on use. A spent 5h or
+  weekly window counted as drained forever, because nothing re-read a drained
+  account; a window whose reset time has passed now reads as unknown, and the
+  forwarder schedules probes itself: every two minutes, just after a known
+  reset, when the pool runs dry, and after a turn. Any 429 used to bench an
+  account until its five-hour reset, since OAuth responses always carry the
+  unified headers; only a real shared rejection does now, and it lasts until
+  the latest rejected window resets. A Fable-only (7d_oi) rejection benches
+  the account for Fable models only. A 401 refreshes the token and retries
+  once before giving the account up. Token refresh runs under a per-account
+  file lock and re-reads the stored login, so the forwarder and the probe no
+  longer spend one single-use refresh token twice and strike a healthy account
+  as `reauth-required`. A request-shaped 4xx is relayed instead of being
+  retried on every account and turned into a 503.
+- **A Claude pool conversation stays on one account from every client.**
+  LiteLLM dropped the router's `X-Codex-Router-Conversation` header, so
+  account affinity never engaged for routed traffic. The Claude pool model
+  groups now forward it. The Claude Code Messages surface passes Claude Code's
+  session id when it re-enters Responses, and a client that names no thread
+  gets a stable id from its opening messages.
+- **The island's Claude percentages update and read correctly.** The tray's
+  `claude-account-pool usage cached` read was classified as a mutation, so a
+  router/tray version mismatch froze Claude's figures while ChatGPT's kept
+  updating. `cached` also started live probes from the tray on every state
+  change; it now only reads the file. The projection uses rotation's own
+  health rules, reports a window whose reset has passed as unknown instead of
+  0%, and gives each window its own reset time.
 - **An apostrophe in a harness config no longer moves the router's route into
   somebody else's value.** `yaml-structure.mjs` treated every `'` and `"` as a
   quoting indicator, but YAML only gives a quote that meaning where a node can

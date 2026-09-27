@@ -86,6 +86,22 @@ export function renderLiteLlmConfig() {
     "  callbacks: [grok_service_tier_callback.grok_service_tier_callback]",
     "  drop_params: true",
     "  request_timeout: 600",
+    // LiteLLM drops the router's `x-*` hop headers unless a model group opts
+    // in. The Claude subscription pool keys account affinity on
+    // `X-Codex-Router-Conversation`: without it every turn of a conversation
+    // is re-ranked from scratch and can land on a different account, which
+    // throws away the prompt cache and scatters one session across quotas.
+    // The forwarder strips `x-codex-*` before any provider sees them.
+    ...(() => {
+      const claudePoolModels = MODELS.filter(({ provider }) => provider === "anthropic-api");
+      return claudePoolModels.length
+        ? [
+            "  model_group_settings:",
+            "    forward_client_headers_to_llm_api:",
+            ...claudePoolModels.map((model) => `      - ${yamlString(model.gatewayModel)}`),
+          ]
+        : [];
+    })(),
     "",
     // Every model_name above has exactly one deployment, so a cooldown can
     // never route around a failure -- it can only hide it. LiteLLM cools a

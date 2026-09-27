@@ -169,11 +169,25 @@ export async function handleClaudeAccountPool(action, value, {
   }
 
   if (action === "usage") {
+    // `cached` reports what rotation is deciding on right now without spending
+    // a probe -- the tray calls it on every state-directory change, so it must
+    // never reach the network or refresh a token. The bare form probes first.
+    // The forwarder's own probe schedule is what keeps the cached file fresh.
     let snapshot;
-    const isCachedOnly = value === "cached";
-    if (isCachedOnly) {
+    if (value === "cached") {
       try {
         snapshot = JSON.parse(readFileSync(usagePath, "utf8"));
+      } catch {
+        snapshot = { accounts: [] };
+      }
+    } else {
+      const { probeClaudeAccountUsage } = await import("./claude-usage-probe.mjs");
+      try {
+        snapshot = await probeClaudeAccountUsage({
+          poolPath: filePath,
+          homesDir,
+          cachePath: usagePath,
+        });
       } catch {
         snapshot = { accounts: [] };
       }
@@ -185,12 +199,8 @@ export async function handleClaudeAccountPool(action, value, {
     } catch {
       poolState = { accounts: {} };
     }
-
     const poolAccounts = Object.values(poolState.accounts || {}).filter(
       (a) => a && a.state !== "revoked",
-    );
-    const usableAccounts = poolAccounts.filter(
-      (a) => a.subscription?.status === "usable" || a.subscription?.usable === true,
     );
 
     const usageList = Array.isArray(snapshot?.accounts)
@@ -198,85 +208,77 @@ export async function handleClaudeAccountPool(action, value, {
       : snapshot?.accounts && typeof snapshot.accounts === "object"
         ? Object.values(snapshot.accounts)
         : [];
-    let usageById = new Map(usageList.map((a) => [a?.id, a]).filter(([id]) => id));
-
-    const cacheAgeMs = snapshot?.fetchedAt ? (Date.now() - new Date(snapshot.fetchedAt).getTime()) : Infinity;
-    const hasMissingUsableAccount = usableAccounts.some((a) => !usageById.has(a.id));
-
-    if (!isCachedOnly || hasMissingUsableAccount || (usableAccounts.length > 0 && cacheAgeMs > 300_000)) {
-      try {
-        const { probeClaudeAccountUsage } = await import("./claude-usage-probe.mjs");
-        snapshot = await probeClaudeAccountUsage({
-          poolPath: filePath,
-          homesDir,
-          cachePath: usagePath,
-        });
-        const freshList = Array.isArray(snapshot?.accounts)
-          ? snapshot.accounts
-          : snapshot?.accounts && typeof snapshot.accounts === "object"
-            ? Object.values(snapshot.accounts)
-            : [];
-        usageById = new Map(freshList.map((a) => [a?.id, a]).filter(([id]) => id));
-      } catch {}
-    }
+    const rawUsageById = new Map(usageList.map((a) => [a?.id, a]).filter(([id]) => id));
 
     const {
       claudeRotationCandidates,
       claudeAccountCooldownUntil,
       isClaudeAccountAuthInvalid,
+      leftoverHealth,
+      windowIsLive,
     } = await import("./claude-account-rotation.mjs");
+    const { cachedClaudeAccountUsageById } = await import("./claude-account-usage.mjs");
 
-    const candidates = claudeRotationCandidates({
+    // Rank on exactly what the forwarder ranks on: the same file, read through
+    // the same per-row freshness rules.
+    const usageById = cachedClaudeAccountUsageById({ usagePath, force: true });
+    const order = claudeRotationCandidates({
       poolPath: filePath,
       homesDir,
       usageById,
-    });
-    const order = candidates.map((c) => c.id);
+    }).map((c) => c.id);
     const now = Date.now();
+
+    // A window whose reset has passed reports nothing: its old figure would
+    // show a refilled account as 0% until the next reading arrives.
+    const liveRemaining = (window) => (windowIsLive(window, now) ? window.remainingPercent : null);
+    const windowResetSec = (window) => {
+      const ms = Number(window?.resetsAtMs);
+      return windowIsLive(window, now) && Number.isFinite(ms) && ms > now ? Math.floor(ms / 1000) : null;
+    };
     const accounts = poolAccounts.map((account) => {
-      const cached = usageById.get(account.id);
-      const fiveHour = cached?.fiveHour || account.usage?.fiveHour;
-      const weekly = cached?.weekly || account.usage?.weekly;
-      const primaryRemaining = fiveHour && Number.isFinite(fiveHour.remainingPercent)
-        ? fiveHour.remainingPercent
-        : null;
-      const secondaryRemaining = weekly && Number.isFinite(weekly.remainingPercent)
-        ? weekly.remainingPercent
-        : null;
+      const row = rawUsageById.get(account.id) || null;
+      const fiveHour = row?.fiveHour;
+      const weekly = row?.weekly;
+      const primaryRemaining = liveRemaining(fiveHour);
+      const secondaryRemaining = liveRemaining(weekly);
 
-      const resetsAtMs = fiveHour?.resetsAtMs || weekly?.resetsAtMs || null;
-      const resetsAtSec = resetsAtMs ? Math.floor(resetsAtMs / 1000) : null;
+      // The reset that matters is the one of the tighter live window.
+      const live = [fiveHour, weekly].filter((window) => windowIsLive(window, now));
+      const binding = live.sort((left, right) => left.remainingPercent - right.remainingPercent)[0];
+      const resetsAtMs = Number(binding?.resetsAtMs);
+      const resetsAtSec = Number.isFinite(resetsAtMs) && resetsAtMs > now ? Math.floor(resetsAtMs / 1000) : null;
 
+      const verdict = row ? leftoverHealth(row, undefined, account.id, { now }) : "unknown";
       const isAuthInvalid = account.health?.state === "reauth-required"
-        || account.subscription?.status === "pending"
+        || verdict === "auth_invalid"
         || isClaudeAccountAuthInvalid(account.id);
+      const health = isAuthInvalid || !["healthy", "soft", "drained"].includes(verdict)
+        ? "unknown"
+        : verdict;
 
       const cooldownUntil = claudeAccountCooldownUntil(account.id) || null;
       const isCooling = Boolean(cooldownUntil && cooldownUntil > now);
-
-      let health = "healthy";
-      if (isAuthInvalid) {
-        health = "unknown";
-      } else if (isCooling) {
-        health = "soft";
-      } else if (account.health?.state === "drained" || (primaryRemaining !== null && primaryRemaining <= 0)) {
-        health = "drained";
-      } else if (primaryRemaining !== null && primaryRemaining <= 15) {
-        health = "soft";
-      }
 
       return {
         id: account.id,
         label: account.identity?.email || account.label || "Claude account",
         preferred: poolState.policy?.selectedAccountId === account.id,
-        planType: account.tier || account.identity?.subscriptionType || "pro",
+        planType: account.subscription?.plan || row?.plan || account.identity?.subscriptionType || null,
         health,
         cooling: isCooling,
         cooldownUntil,
         primaryRemainingPercent: primaryRemaining,
         secondaryRemainingPercent: secondaryRemaining,
         resetsAt: resetsAtSec,
+        // Each window's own reset, so the island labels a countdown with the
+        // window it belongs to rather than the binding one.
+        primaryResetsAt: windowResetSec(fiveHour),
+        secondaryResetsAt: windowResetSec(weekly),
         authInvalid: isAuthInvalid,
+        ...(isAuthInvalid ? { authErrorCode: row?.authErrorCode || "token_revoked" } : {}),
+        ...(account.state !== "active" || account.paused ? { paused: true } : {}),
+        ...(row?.error ? { error: row.error } : {}),
       };
     });
 

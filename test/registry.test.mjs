@@ -2049,3 +2049,13 @@ test("an unknown extra field on a provider fails the registry load", async () =>
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("LiteLLM forwards the router's conversation header to the Claude pool so account affinity survives the gateway hop", () => {
+  const rendered = renderLiteLlmConfig();
+  const section = rendered.split("model_group_settings:")[1]?.split("\n\n")[0] || "";
+  assert.match(section, /forward_client_headers_to_llm_api:/);
+  const forwarded = [...section.matchAll(/- "([^"]+)"/g)].map((match) => match[1]);
+  assert.ok(forwarded.length > 0, "every Claude pool model group opts in");
+  assert.ok(forwarded.every((model) => model.startsWith("anthropic-api-")),
+    "no other provider's model group receives the router's hop headers");
+});

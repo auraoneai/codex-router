@@ -2667,18 +2667,21 @@ private struct IslandAccountQuotaTable: View {
     for account: ChatGptAccountPoolRow
   ) -> (short: ChatGptWindowFacts?, long: ChatGptWindowFacts?) {
     if selectedTab == .claude {
+      // Claude's windows are fixed (5h and 7d) and each carries its own reset;
+      // `resetsAt` is only the binding window's, so it is the fallback for a
+      // router that predates the per-window fields.
       let shortFacts = account.primaryRemainingPercent.map {
         ChatGptWindowFacts(
           durationMinutes: 300,
           remainingPercent: $0,
-          resetsAt: account.resetsAt
+          resetsAt: account.primaryResetsAt ?? account.resetsAt
         )
       }
       let longFacts = account.secondaryRemainingPercent.map {
         ChatGptWindowFacts(
           durationMinutes: 10080,
           remainingPercent: $0,
-          resetsAt: account.resetsAt
+          resetsAt: account.secondaryResetsAt ?? account.resetsAt
         )
       }
       return (shortFacts, longFacts)

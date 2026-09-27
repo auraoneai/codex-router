@@ -91,7 +91,9 @@ function itemAnchor(item) {
   return `${role}:${content}`;
 }
 
-function conversationAnchorId(body) {
+// A stable id for a conversation whose client names no thread: the hash of
+// its opening items, which every later turn of that conversation repeats.
+export function conversationAnchorId(body) {
   const payload = parseBody(body);
   const anchor = [];
   for (const item of conversationItems(payload)) {

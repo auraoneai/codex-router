@@ -31,6 +31,23 @@ export function readClaudeAccountUsageDocument(usagePath = CLAUDE_ACCOUNT_USAGE_
   }
 }
 
+// When a row last learned anything. Rows carry their own time because
+// passive telemetry updates one account per response: a document-level stamp
+// would make every other account's reading look as fresh as the newest one.
+export function claudeUsageRowObservedAtMs(row, documentFetchedAt) {
+  for (const value of [row?.updatedAt, row?.fetchedAt, documentFetchedAt]) {
+    const ms = Date.parse(value);
+    if (Number.isFinite(ms)) return ms;
+  }
+  return undefined;
+}
+
+function liveDrainedWindow(window, now) {
+  if (!window || !Number.isFinite(window.remainingPercent) || window.remainingPercent > 0.5) return false;
+  const resetsAtMs = Number(window.resetsAtMs);
+  return !(Number.isFinite(resetsAtMs) && resetsAtMs > 0 && resetsAtMs <= now);
+}
+
 export function cachedClaudeAccountUsageById({
   now = Date.now(),
   usagePath = CLAUDE_ACCOUNT_USAGE_CACHE_PATH,
@@ -43,8 +60,6 @@ export function cachedClaudeAccountUsageById({
   const byId = new Map();
   try {
     const parsed = readClaudeAccountUsageDocument(usagePath);
-    const fetchedAt = Date.parse(parsed?.fetchedAt);
-    const fresh = Number.isFinite(fetchedAt) && now - fetchedAt <= USAGE_CACHE_MAX_AGE_MS;
 
     for (const account of parsed?.accounts || []) {
       if (!account?.id) continue;
@@ -53,15 +68,18 @@ export function cachedClaudeAccountUsageById({
         delete account.fable;
       }
 
+      const observedAt = claudeUsageRowObservedAtMs(account, parsed?.fetchedAt);
+      const fresh = Number.isFinite(observedAt) && now - observedAt <= USAGE_CACHE_MAX_AGE_MS;
       if (fresh) {
         byId.set(account.id, account);
-      } else {
-        // Retain drained or auth-invalid entries even when disk cache is stale
-        const fiveHourDrained = account.fiveHour?.remainingPercent !== undefined && account.fiveHour.remainingPercent <= 0.5;
-        const weeklyDrained = account.weekly?.remainingPercent !== undefined && account.weekly.remainingPercent <= 0.5;
-        if (fiveHourDrained || weeklyDrained || account.authInvalid === true) {
-          byId.set(account.id, account);
-        }
+      } else if (
+        // A stale row still keeps a spent or refused account out, but only
+        // while the spent window has not reset yet.
+        liveDrainedWindow(account.fiveHour, now) ||
+        liveDrainedWindow(account.weekly, now) ||
+        account.authInvalid === true
+      ) {
+        byId.set(account.id, account);
       }
     }
   } catch {
@@ -72,42 +90,57 @@ export function cachedClaudeAccountUsageById({
   return byId;
 }
 
+// Records the unified quota reading one upstream response carried. Any
+// response that is not a 401 proves the token works, so a stale auth-invalid
+// flag or error from an earlier probe is cleared rather than carried forward.
 export function recordClaudeAccountUsage(accountId, readingOrHeaders, {
   now = Date.now(),
   usagePath = CLAUDE_ACCOUNT_USAGE_CACHE_PATH,
   plan,
   email,
+  authOk = true,
 } = {}) {
   if (!accountId || !readingOrHeaders) return;
 
   const reading = (typeof readingOrHeaders.get === "function" ||
     (typeof readingOrHeaders === "object" && Object.keys(readingOrHeaders).some((k) => k.toLowerCase().startsWith("anthropic-ratelimit"))))
-    ? parseClaudeUnifiedHeaders(readingOrHeaders)
+    ? parseClaudeUnifiedHeaders(readingOrHeaders, { now })
     : readingOrHeaders;
+  if (!reading && !authOk) return;
 
   const current = readClaudeAccountUsageDocument(usagePath);
   const accountsMap = new Map((current.accounts || []).map((acc) => [acc.id, acc]));
 
-  const existing = accountsMap.get(accountId) || { id: accountId };
+  const existing = { ...(accountsMap.get(accountId) || { id: accountId }) };
+  if (authOk) {
+    delete existing.authInvalid;
+    delete existing.authErrorCode;
+    delete existing.authTokenFingerprint;
+    delete existing.error;
+  }
+  const r = reading || {};
   const updated = {
     ...existing,
     id: accountId,
     ...(plan ? { plan } : {}),
     ...(email ? { email } : {}),
-    ...(reading.fiveHour ? { fiveHour: reading.fiveHour } : existing.fiveHour ? { fiveHour: existing.fiveHour } : {}),
-    ...(reading.weekly ? { weekly: reading.weekly } : existing.weekly ? { weekly: existing.weekly } : {}),
-    ...(reading.fable ? { fable: reading.fable } : existing.fable ? { fable: existing.fable } : {}),
-    ...(reading.status ? { lastStatus: reading.status } : {}),
+    ...(r.fiveHour ? { fiveHour: r.fiveHour } : existing.fiveHour ? { fiveHour: existing.fiveHour } : {}),
+    ...(r.weekly ? { weekly: r.weekly } : existing.weekly ? { weekly: existing.weekly } : {}),
+    ...(r.fable ? { fable: r.fable } : existing.fable ? { fable: existing.fable } : {}),
+    ...(r.status ? { lastStatus: r.status, status: r.status } : {}),
+    ...(r.windowStatuses && Object.keys(r.windowStatuses).length ? { windowStatuses: r.windowStatuses } : {}),
     updatedAt: new Date(now).toISOString(),
   };
 
   accountsMap.set(accountId, updated);
 
   const newDocument = {
+    ...current,
     fetchedAt: new Date(now).toISOString(),
     accounts: Array.from(accountsMap.values()),
   };
 
   writePrivateJson(usagePath, newDocument, { directoryMode: 0o700, fileMode: 0o600 });
-  inMemoryCache = { at: now, byId: new Map(accountsMap) };
+  // The next read re-applies the per-row freshness rules to the new document.
+  invalidateClaudeAccountUsageCache();
 }

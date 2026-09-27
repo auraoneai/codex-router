@@ -203,6 +203,7 @@ import {
   activityMetadataFromHeaders,
   threadIdFromHeaders,
 } from "./codex-session-names.mjs";
+import { conversationAnchorId } from "./opencode-session.mjs";
 import {
   contextLengthFailure,
   gatewayErrorStatus,
@@ -1340,7 +1341,13 @@ function normalizeNativePromptCacheCompatibility(payload) {
 // router-to-forwarder hop, and hashing means even a misconfigured upstream
 // never receives the user's actual thread identifier.
 function routedConversationId(request) {
-  const threadId = request ? threadIdFromHeaders(request.headers) : undefined;
+  // Codex names its thread in a header. A client that does not (OpenCode, or
+  // anything else speaking plain Responses) is still one conversation per
+  // opening exchange, so the body anchor stands in -- account affinity for the
+  // Claude pool and Prism's prompt cache both need a stable id either way.
+  const threadId = request
+    ? threadIdFromHeaders(request.headers) || request.codexRouterConversationAnchor
+    : undefined;
   if (!threadId) return undefined;
   return createHash("sha256")
     .update(`codex-router-conversation:${threadId}`)
@@ -4573,6 +4580,11 @@ async function handleResponses(request, response, requestUrl) {
     const finishLocalhostParse = latencyTrace.startLocalhostParse();
     let payload = await parseBodyAsync(body);
     finishLocalhostParse();
+    try {
+      request.codexRouterConversationAnchor = conversationAnchorId(payload);
+    } catch {
+      request.codexRouterConversationAnchor = undefined;
+    }
     const finishRouteSelection = latencyTrace.startRouteSelection();
     controller.signal.throwIfAborted();
     requestedModel = typeof payload.model === "string" ? payload.model : "";

@@ -119,6 +119,8 @@ test("Header shape per auth kind: OAuth pool vs legacy API key", async () => {
       MODEL_ROUTER_API_PORT: String(forwarderPort),
       MODEL_ROUTER_STATE_DIR: stateDir,
       MODEL_ROUTER_QUIET: "1",
+      MODEL_ROUTER_CLAUDE_USAGE_PROBES: "off",
+      MODEL_ROUTER_CLAUDE_OAUTH_TOKEN_URL: `http://127.0.0.1:${upstreamPort}/v1/oauth/token`,
       ANTHROPIC_API_BASE_URL: `http://127.0.0.1:${upstreamPort}/v1`,
       MODEL_ROUTER_CLAUDE_ACCOUNT_POOL: poolPath,
       MODEL_ROUTER_CLAUDE_ACCOUNT_HOMES: homesDir,
@@ -193,6 +195,8 @@ test("Header shape for legacy API key when no pool is configured", async () => {
       MODEL_ROUTER_API_PORT: String(forwarderPort),
       MODEL_ROUTER_STATE_DIR: stateDir,
       MODEL_ROUTER_QUIET: "1",
+      MODEL_ROUTER_CLAUDE_USAGE_PROBES: "off",
+      MODEL_ROUTER_CLAUDE_OAUTH_TOKEN_URL: `http://127.0.0.1:${upstreamPort}/v1/oauth/token`,
       ANTHROPIC_API_BASE_URL: `http://127.0.0.1:${upstreamPort}/v1`,
       MODEL_ROUTER_CLAUDE_ACCOUNT_POOL: poolPath,
       MODEL_ROUTER_CLAUDE_ACCOUNT_HOMES: homesDir,
@@ -296,6 +300,8 @@ test("Rotation on quota-429 rotates to sibling and persists quota telemetry", as
       MODEL_ROUTER_API_PORT: String(forwarderPort),
       MODEL_ROUTER_STATE_DIR: stateDir,
       MODEL_ROUTER_QUIET: "1",
+      MODEL_ROUTER_CLAUDE_USAGE_PROBES: "off",
+      MODEL_ROUTER_CLAUDE_OAUTH_TOKEN_URL: `http://127.0.0.1:${upstreamPort}/v1/oauth/token`,
       ANTHROPIC_API_BASE_URL: `http://127.0.0.1:${upstreamPort}/v1`,
       MODEL_ROUTER_CLAUDE_ACCOUNT_POOL: poolPath,
       MODEL_ROUTER_CLAUDE_ACCOUNT_HOMES: homesDir,
@@ -407,6 +413,8 @@ test("No rotation on per-minute 429: absorbs inline and retries same account", a
       MODEL_ROUTER_API_PORT: String(forwarderPort),
       MODEL_ROUTER_STATE_DIR: stateDir,
       MODEL_ROUTER_QUIET: "1",
+      MODEL_ROUTER_CLAUDE_USAGE_PROBES: "off",
+      MODEL_ROUTER_CLAUDE_OAUTH_TOKEN_URL: `http://127.0.0.1:${upstreamPort}/v1/oauth/token`,
       ANTHROPIC_API_BASE_URL: `http://127.0.0.1:${upstreamPort}/v1`,
       MODEL_ROUTER_CLAUDE_ACCOUNT_POOL: poolPath,
       MODEL_ROUTER_CLAUDE_ACCOUNT_HOMES: homesDir,
@@ -465,7 +473,15 @@ test("401 invalidation marks account auth-invalid and rotates to next candidate"
   });
 
   const attemptedTokens = [];
+  let refreshCalls = 0;
   const upstream = http.createServer((req, res) => {
+    if (req.url === "/v1/oauth/token") {
+      // The revoked account's refresh token is gone too.
+      refreshCalls++;
+      res.writeHead(400, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "invalid_grant" }));
+      return;
+    }
     const token = req.headers.authorization;
     attemptedTokens.push(token);
     if (token === "Bearer invalid_token_1") {
@@ -496,6 +512,8 @@ test("401 invalidation marks account auth-invalid and rotates to next candidate"
       MODEL_ROUTER_API_PORT: String(forwarderPort),
       MODEL_ROUTER_STATE_DIR: stateDir,
       MODEL_ROUTER_QUIET: "1",
+      MODEL_ROUTER_CLAUDE_USAGE_PROBES: "off",
+      MODEL_ROUTER_CLAUDE_OAUTH_TOKEN_URL: `http://127.0.0.1:${upstreamPort}/v1/oauth/token`,
       ANTHROPIC_API_BASE_URL: `http://127.0.0.1:${upstreamPort}/v1`,
       MODEL_ROUTER_CLAUDE_ACCOUNT_POOL: poolPath,
       MODEL_ROUTER_CLAUDE_ACCOUNT_HOMES: homesDir,
@@ -529,6 +547,7 @@ test("401 invalidation marks account auth-invalid and rotates to next candidate"
       "Bearer invalid_token_1",
       "Bearer valid_token_2",
     ]);
+    assert.equal(refreshCalls, 1, "a 401 forces exactly one refresh before the account is given up");
 
     // Check that Account 1 was marked auth invalid by issuing a second request;
     // Account 1 must be skipped without any upstream attempt.
@@ -594,6 +613,8 @@ test("Fail-closed: pool configured + all credentials unreadable fails with 503 a
       MODEL_ROUTER_API_PORT: String(forwarderPort),
       MODEL_ROUTER_STATE_DIR: stateDir,
       MODEL_ROUTER_QUIET: "1",
+      MODEL_ROUTER_CLAUDE_USAGE_PROBES: "off",
+      MODEL_ROUTER_CLAUDE_OAUTH_TOKEN_URL: `http://127.0.0.1:${upstreamPort}/v1/oauth/token`,
       ANTHROPIC_API_BASE_URL: `http://127.0.0.1:${upstreamPort}/v1`,
       MODEL_ROUTER_CLAUDE_ACCOUNT_POOL: poolPath,
       MODEL_ROUTER_CLAUDE_ACCOUNT_HOMES: homesDir,
@@ -661,3 +682,199 @@ test("Claude attribution system prompt injection", () => {
   assert.equal(p5.system.length, 1);
 });
 
+
+// Shared harness for the rotation regressions below: one mock upstream that
+// serves both the Messages route and the OAuth token endpoint, and one
+// forwarder whose background probes are off and whose refreshes stay local.
+async function startRotationHarness(t, { accounts, onMessages, onToken }) {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "claude-fwd-rotation-"));
+  const poolPath = path.join(testRoot, "claude-account-pool.json");
+  const homesDir = path.join(testRoot, "claude-accounts");
+  const usagePath = path.join(testRoot, "claude-account-usage.json");
+  const stateDir = path.join(testRoot, "state");
+  const upstreamPort = await openPort();
+  const forwarderPort = await openPort();
+  for (const [id, options] of accounts) createTestAccount(poolPath, homesDir, id, options);
+
+  const messageTokens = [];
+  const tokenCalls = [];
+  const upstream = http.createServer(async (req, res) => {
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+    if (req.url === "/v1/oauth/token") {
+      const body = JSON.parse(raw || "{}");
+      tokenCalls.push(body.refresh_token);
+      const reply = onToken ? onToken(body) : { status: 400, body: { error: "invalid_grant" } };
+      res.writeHead(reply.status, { "content-type": "application/json" });
+      res.end(JSON.stringify(reply.body));
+      return;
+    }
+    messageTokens.push(req.headers.authorization);
+    const reply = onMessages(req, JSON.parse(raw || "{}"), messageTokens.length);
+    res.writeHead(reply.status, { "content-type": "application/json", ...(reply.headers || {}) });
+    res.end(JSON.stringify(reply.body));
+  });
+  await listen(upstream, upstreamPort);
+
+  let stderr = "";
+  const child = spawn(process.execPath, [path.join(root, "src", "api-forwarder.mjs")], {
+    cwd: root,
+    env: {
+      ...process.env,
+      MODEL_ROUTER_TARGET: "codex",
+      MODEL_ROUTER_INTERNAL_KEY: internalKey,
+      MODEL_ROUTER_API_PORT: String(forwarderPort),
+      MODEL_ROUTER_STATE_DIR: stateDir,
+      MODEL_ROUTER_QUIET: "1",
+      MODEL_ROUTER_CLAUDE_USAGE_PROBES: "off",
+      MODEL_ROUTER_CLAUDE_OAUTH_TOKEN_URL: `http://127.0.0.1:${upstreamPort}/v1/oauth/token`,
+      ANTHROPIC_API_BASE_URL: `http://127.0.0.1:${upstreamPort}/v1`,
+      MODEL_ROUTER_CLAUDE_ACCOUNT_POOL: poolPath,
+      MODEL_ROUTER_CLAUDE_ACCOUNT_HOMES: homesDir,
+      MODEL_ROUTER_CLAUDE_ACCOUNT_USAGE: usagePath,
+    },
+    stdio: ["ignore", "ignore", "pipe"],
+  });
+  child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+  t.after(async () => {
+    child.kill("SIGKILL");
+    await new Promise((resolve) => upstream.close(resolve));
+    rmSync(testRoot, { recursive: true, force: true });
+  });
+  await waitForHealth(`http://127.0.0.1:${forwarderPort}`, {
+    Authorization: `Bearer ${internalKey}`,
+  }, child, () => stderr);
+
+  const send = (model = "anthropic-api-claude-opus-4-8", headers = {}) =>
+    fetch(`http://127.0.0.1:${forwarderPort}/v1/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${internalKey}`, "Content-Type": "application/json", ...headers },
+      body: JSON.stringify({ model, max_tokens: 10, messages: [{ role: "user", content: "hi" }] }),
+    });
+  return { send, messageTokens, tokenCalls, homesDir };
+}
+
+const okMessage = (text) => ({
+  status: 200,
+  body: { id: "msg_ok", type: "message", role: "assistant", content: [{ type: "text", text }] },
+});
+
+test("a request-shaped 400 is relayed as-is and never retried on other accounts", async (t) => {
+  const harness = await startRotationHarness(t, {
+    accounts: [
+      ["clacct_badreq00001", { accessToken: "tok_a", refreshToken: "rt_a" }],
+      ["clacct_badreq00002", { accessToken: "tok_b", refreshToken: "rt_b" }],
+    ],
+    onMessages: () => ({
+      status: 400,
+      body: { type: "error", error: { type: "invalid_request_error", message: "max_tokens: too large" } },
+    }),
+  });
+  const res = await harness.send();
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.match(JSON.stringify(body), /max_tokens: too large/);
+  assert.equal(harness.messageTokens.length, 1, "the same bad request is not spent across the pool");
+});
+
+test("an account whose access token expired is refreshed on use instead of dropped", async (t) => {
+  const harness = await startRotationHarness(t, {
+    accounts: [["clacct_expired0001", {
+      accessToken: "tok_stale",
+      refreshToken: "rt_live",
+      expiresAt: Date.now() - 60_000,
+    }]],
+    onToken: (body) => (body.refresh_token === "rt_live"
+      ? { status: 200, body: { access_token: "tok_refreshed", refresh_token: "rt_next", expires_in: 3600 } }
+      : { status: 400, body: { error: "invalid_grant" } }),
+    onMessages: (req) => (req.headers.authorization === "Bearer tok_refreshed"
+      ? okMessage("REFRESHED_OK")
+      : { status: 401, body: { type: "error", error: { type: "authentication_error", message: "expired" } } }),
+  });
+  const res = await harness.send();
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).content[0].text, "REFRESHED_OK");
+  assert.deepEqual(harness.tokenCalls, ["rt_live"]);
+  assert.deepEqual(harness.messageTokens, ["Bearer tok_refreshed"]);
+  const stored = JSON.parse(readFileSync(path.join(harness.homesDir, "clacct_expired0001", "credentials.json"), "utf8"));
+  assert.equal(stored.claudeAiOauth.refreshToken, "rt_next", "the rotated refresh token is persisted");
+});
+
+test("a 401 on a revoked access token refreshes once and retries the same account", async (t) => {
+  const harness = await startRotationHarness(t, {
+    accounts: [
+      ["clacct_revoked0001", { accessToken: "tok_revoked", refreshToken: "rt_revoked_ok" }],
+      ["clacct_revoked0002", { accessToken: "tok_other", refreshToken: "rt_other" }],
+    ],
+    onToken: () => ({ status: 200, body: { access_token: "tok_new_login", expires_in: 3600 } }),
+    onMessages: (req) => (req.headers.authorization === "Bearer tok_revoked"
+      ? { status: 401, body: { type: "error", error: { type: "authentication_error", message: "revoked" } } }
+      : okMessage(req.headers.authorization)),
+  });
+  const res = await harness.send();
+  assert.equal(res.status, 200);
+  assert.deepEqual(harness.messageTokens, ["Bearer tok_revoked", "Bearer tok_new_login"],
+    "the account is retried with its refreshed token, not abandoned");
+  assert.deepEqual(harness.tokenCalls, ["rt_revoked_ok"]);
+});
+
+test("a burst 429 that carries unified headers but no rejection only passes the account over briefly", async (t) => {
+  const resetSoon = String(Math.floor((Date.now() + 4 * 3600_000) / 1000));
+  const harness = await startRotationHarness(t, {
+    accounts: [
+      ["clacct_burst000001", { accessToken: "tok_burst", refreshToken: "rt_burst", plan: "pro" }],
+      ["clacct_burst000002", { accessToken: "tok_spare", refreshToken: "rt_spare", plan: "max5" }],
+    ],
+    onMessages: (req) => (req.headers.authorization === "Bearer tok_burst"
+      ? {
+          status: 429,
+          headers: {
+            "anthropic-ratelimit-unified-status": "allowed",
+            "anthropic-ratelimit-unified-5h-utilization": "0.30",
+            "anthropic-ratelimit-unified-5h-reset": resetSoon,
+          },
+          body: { type: "error", error: { type: "rate_limit_error", message: "concurrency" } },
+        }
+      : okMessage("SPARE_OK")),
+  });
+  const res = await harness.send();
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).content[0].text, "SPARE_OK");
+  assert.deepEqual(harness.messageTokens, ["Bearer tok_burst", "Bearer tok_spare"]);
+});
+
+test("a Fable family rejection moves Fable turns off the account but keeps it for other models", async (t) => {
+  const weekOut = String(Math.floor((Date.now() + 5 * 86_400_000) / 1000));
+  const harness = await startRotationHarness(t, {
+    accounts: [
+      ["clacct_family00001", { accessToken: "tok_family", refreshToken: "rt_family", plan: "pro" }],
+      ["clacct_family00002", { accessToken: "tok_backup", refreshToken: "rt_backup", plan: "max5" }],
+    ],
+    onMessages: (req, body) => {
+      if (req.headers.authorization === "Bearer tok_family" && /fable/.test(body.model || "")) {
+        return {
+          status: 429,
+          headers: {
+            "anthropic-ratelimit-unified-status": "rejected",
+            "anthropic-ratelimit-unified-5h-status": "allowed",
+            "anthropic-ratelimit-unified-7d-status": "allowed",
+            "anthropic-ratelimit-unified-7d_oi-status": "rejected",
+            "anthropic-ratelimit-unified-7d_oi-utilization": "1.0",
+            "anthropic-ratelimit-unified-7d_oi-reset": weekOut,
+          },
+          body: { type: "error", error: { type: "rate_limit_error", message: "family spent" } },
+        };
+      }
+      return okMessage(req.headers.authorization);
+    },
+  });
+  const fable = await harness.send("anthropic-api-claude-fable-5-1");
+  assert.equal(fable.status, 200);
+  assert.deepEqual(harness.messageTokens, ["Bearer tok_family", "Bearer tok_backup"]);
+
+  harness.messageTokens.length = 0;
+  const opus = await harness.send("anthropic-api-claude-opus-4-8");
+  assert.equal(opus.status, 200);
+  assert.deepEqual(harness.messageTokens, ["Bearer tok_family"],
+    "a spent family bucket does not bench the account for every model");
+});

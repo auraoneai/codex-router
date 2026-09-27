@@ -213,3 +213,71 @@ test("transient network/500 error leaves account eligible with stale token", asy
   assert.equal(state.accounts[account.id].health.state, "healthy");
   assert.equal(session.accessToken, "init-access-token");
 });
+
+test("a refresh that waited on another process's lock uses the rotated token instead of spending the old refresh token", async () => {
+  const options = fixture();
+  clearInFlightRefreshesForTest();
+  const now = Date.now();
+  const account = setupAccountWithCredentials(options, {
+    refreshToken: "single-use-refresh",
+    expiresAt: now - 1000,
+  });
+
+  const spentRefreshTokens = [];
+  let secondCall;
+  const fakeFetch = async (_url, init) => {
+    const { refresh_token: refreshToken } = JSON.parse(init.body);
+    spentRefreshTokens.push(refreshToken);
+    if (!secondCall) {
+      // A second process starts its refresh while this one holds the lock.
+      // Clearing the in-process single-flight map makes the second call behave
+      // like a separate process: only the file lock can coordinate them.
+      clearInFlightRefreshesForTest();
+      secondCall = ensureFreshClaudeOAuthToken(account.id, { ...options, now, fetchImpl: fakeFetch });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    if (refreshToken !== "single-use-refresh") {
+      return { ok: false, status: 400, json: async () => ({ error: "invalid_grant" }) };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ access_token: "rotated-access", refresh_token: "rotated-refresh", expires_in: 3600 }),
+    };
+  };
+
+  const first = await ensureFreshClaudeOAuthToken(account.id, { ...options, now, fetchImpl: fakeFetch });
+  const second = await secondCall;
+
+  assert.deepEqual(spentRefreshTokens, ["single-use-refresh"], "the refresh token is spent exactly once");
+  assert.equal(first.accessToken, "rotated-access");
+  assert.equal(second.accessToken, "rotated-access");
+  assert.equal(second.refreshFailed, undefined);
+  const state = readClaudeAccountPoolState(options.filePath);
+  assert.notEqual(state.accounts[account.id].health?.state, "reauth-required");
+});
+
+test("force refresh after a 401 rotates even an unexpired token, and a 2xx without a token is transient", async () => {
+  const options = fixture();
+  clearInFlightRefreshesForTest();
+  const now = Date.now();
+  const account = setupAccountWithCredentials(options, { expiresAt: now + 3600_000 });
+
+  const refreshed = await ensureFreshClaudeOAuthToken(account.id, {
+    ...options,
+    now,
+    force: true,
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ access_token: "after-401", expires_in: 3600 }) }),
+  });
+  assert.equal(refreshed.accessToken, "after-401");
+
+  clearInFlightRefreshesForTest();
+  const empty = await ensureFreshClaudeOAuthToken(account.id, {
+    ...options,
+    now,
+    force: true,
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({}) }),
+  });
+  assert.equal(empty.accessToken, "after-401", "an empty token response never overwrites the stored token");
+  assert.ok(empty.refreshFailed);
+});

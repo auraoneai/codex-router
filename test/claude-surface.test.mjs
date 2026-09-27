@@ -3,6 +3,7 @@ import http from "node:http";
 import test from "node:test";
 
 import {
+  claudeCodeSessionId,
   claudeMessagesToResponses,
   handleClaudeRequest,
 } from "../src/claude-surface.mjs";
@@ -339,5 +340,47 @@ test("every Kiro rung survives the Claude bridge and thinking is never switched 
   assert.deepEqual(omitted.reasoning, { effort: "max" });
   for (const out of [none, disabled, disabledWithEffort, adaptive, adaptiveOmitted, omitted]) {
     assert.notEqual(out.reasoning?.effort, "none");
+  }
+});
+
+test("Claude Code's session id rides the re-entered request so pooled accounts stay sticky per session", async () => {
+  const sessionId = "8f14e45f-ceea-467a-9575-6f6e8d2a7c11";
+  assert.equal(claudeCodeSessionId({ "x-claude-code-session-id": sessionId }), sessionId);
+  assert.equal(
+    claudeCodeSessionId({}, { metadata: { user_id: `user_abc_account_1f0e2d3c-4b5a-4968-8776-655443322110_session_${sessionId}` } }),
+    sessionId,
+  );
+  assert.equal(
+    claudeCodeSessionId({}, { metadata: { user_id: JSON.stringify({ device_id: "d", session_id: sessionId }) } }),
+    sessionId,
+  );
+  assert.equal(claudeCodeSessionId({}, {}), undefined);
+
+  let receivedSession;
+  const app = await fixture(async (request, response) => {
+    for await (const _chunk of request) { /* drain */ }
+    receivedSession = request.headers["session-id"];
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: "resp_session",
+      status: "completed",
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    }));
+  });
+  try {
+    const response = await fetch(`${app.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-claude-code-session-id": sessionId },
+      body: JSON.stringify({
+        model: "codex_router/anthropic/openai/gpt-test",
+        max_tokens: 16,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(receivedSession, sessionId);
+  } finally {
+    await app.close();
   }
 });

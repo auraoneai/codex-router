@@ -29,13 +29,25 @@ import {
 } from "./claude-account-rotation.mjs";
 import { parseClaudeUnifiedHeaders } from "./rate-limit-headers.mjs";
 import { writePrivateJson } from "./file-security.mjs";
-import { invalidateClaudeAccountUsageCache } from "./claude-account-usage.mjs";
+import {
+  claudeUsageRowObservedAtMs,
+  invalidateClaudeAccountUsageCache,
+  readClaudeAccountUsageDocument,
+} from "./claude-account-usage.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { VERSION } from "./version.mjs";
 
 export const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 export const USAGE_PROBE_TIMEOUT_MS = 12_000;
 export const USAGE_PROBE_LIMIT = 64;
+
+// Ties a cached auth-invalid row to the token that failed, so a refreshed or
+// re-imported login is not held out by a verdict about its predecessor. A
+// prefix of a SHA-256 of the token: enough to tell tokens apart, useless as
+// a credential.
+function authFingerprintPrefix(tokenFingerprint) {
+  return typeof tokenFingerprint === "string" && tokenFingerprint ? tokenFingerprint.slice(0, 16) : undefined;
+}
 
 function normalizeWindowJson(win, limit) {
   if (!win && !limit) return undefined;
@@ -225,13 +237,15 @@ export async function executeProbeClaudeAccountUsage({
   }
 
   const probedAccounts = await Promise.all(candidates.map(async (account) => {
+    const prev = prevAccountsById.get(account.id);
     const base = {
       id: account.id,
       label: account.label || "",
       state: account.state,
       preferred: account.id === selectedId,
+      ...(account.subscription?.plan || prev?.plan ? { plan: account.subscription?.plan || prev?.plan } : {}),
+      ...(account.identity?.email || prev?.email ? { email: account.identity?.email || prev?.email } : {}),
     };
-    const prev = prevAccountsById.get(account.id);
 
     try {
       const session = await ensureFreshClaudeOAuthToken(account.id, {
@@ -241,21 +255,39 @@ export async function executeProbeClaudeAccountUsage({
         fetchImpl,
       });
 
-      if (!session?.accessToken) {
-        const isAuthInvalid = account.health?.state === "reauth-required" || session?.expired;
-        if (isAuthInvalid) {
-          markClaudeAccountAuthInvalid(account.id, {
-            tokenFingerprint: session?.tokenFingerprint,
-            reason: "No valid access token available",
-          });
-        }
+      const reauthRequired = session?.refreshFailed === "invalid_grant" ||
+        (account.health?.state === "reauth-required" && (!session?.accessToken || session?.expired));
+      if (reauthRequired) {
+        markClaudeAccountAuthInvalid(account.id, {
+          tokenFingerprint: session?.tokenFingerprint,
+          reason: "invalid_grant: reauthentication required",
+        });
         return {
           ...base,
-          fiveHour: !isAuthInvalid && prev?.fiveHour ? prev.fiveHour : null,
-          weekly: !isAuthInvalid && prev?.weekly ? prev.weekly : null,
-          fable: !isAuthInvalid && prev?.fable ? prev.fable : null,
-          ...(isAuthInvalid ? { authInvalid: true, authErrorCode: "token_revoked" } : {}),
+          fiveHour: null,
+          weekly: null,
+          fable: null,
+          authInvalid: true,
+          authErrorCode: "token_revoked",
+          ...(authFingerprintPrefix(session?.tokenFingerprint)
+            ? { authTokenFingerprint: authFingerprintPrefix(session.tokenFingerprint) }
+            : {}),
+          error: "Reauthentication required",
+          fetchedAt: new Date(now).toISOString(),
+        };
+      }
+      // No token, or an expired one whose refresh failed transiently: probing
+      // with it would only earn a 401 that says nothing about the login. Keep
+      // the last reading and try again next round.
+      if (!session?.accessToken || session?.expired) {
+        return {
+          ...base,
+          fiveHour: prev?.fiveHour ?? null,
+          weekly: prev?.weekly ?? null,
+          fable: prev?.fable ?? null,
           error: "No access token available",
+          ...(prev?.updatedAt ? { updatedAt: prev.updatedAt } : {}),
+          ...(prev?.fetchedAt ? { fetchedAt: prev.fetchedAt } : {}),
         };
       }
 
@@ -302,7 +334,11 @@ export async function executeProbeClaudeAccountUsage({
           fable: prev?.fable ?? null,
           authInvalid: true,
           authErrorCode: "token_revoked",
+          ...(authFingerprintPrefix(session.tokenFingerprint)
+            ? { authTokenFingerprint: authFingerprintPrefix(session.tokenFingerprint) }
+            : {}),
           error: errorText || `HTTP ${response.status}`,
+          fetchedAt: new Date(now).toISOString(),
         };
       }
 
@@ -359,8 +395,24 @@ export async function executeProbeClaudeAccountUsage({
     }
   }));
 
+  // The forwarder records passive readings while the probe is in flight.
+  // Re-read the document now and keep whichever row learned something later,
+  // so a probe that started before a response never overwrites its reading.
   const finalAccountsMap = new Map(prevAccountsById);
+  let latestDocument;
+  try {
+    latestDocument = readClaudeAccountUsageDocument(cachePath);
+    for (const row of latestDocument?.accounts || []) {
+      if (row?.id) finalAccountsMap.set(row.id, row);
+    }
+  } catch {}
+  const probeStartedAt = now;
   for (const acct of probedAccounts) {
+    const concurrent = finalAccountsMap.get(acct.id);
+    const concurrentAt = concurrent
+      ? claudeUsageRowObservedAtMs(concurrent, latestDocument?.fetchedAt)
+      : undefined;
+    if (concurrent && Number.isFinite(concurrentAt) && concurrentAt > probeStartedAt) continue;
     finalAccountsMap.set(acct.id, acct);
   }
   for (const id of finalAccountsMap.keys()) {

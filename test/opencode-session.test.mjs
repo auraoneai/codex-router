@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  conversationAnchorId,
   OPENCODE_SESSION_FALLBACKS,
   OPENCODE_SESSION_HEADER,
   applyOpenCodeSessionHeaders,
@@ -159,4 +160,22 @@ test("openCodeSessionHeaders returns the wire header shape", () => {
   assert.deepEqual(headers, {
     [OPENCODE_SESSION_HEADER]: "codex-router-discovery",
   });
+});
+
+test("a client that names no thread still gets one stable conversation id per conversation", () => {
+  const opening = [
+    { role: "developer", content: "You are a coding agent." },
+    { role: "user", content: "fix the login bug" },
+  ];
+  const first = conversationAnchorId({ input: opening });
+  const later = conversationAnchorId({
+    input: [...opening, { role: "assistant", content: "done" }, { role: "user", content: "now add a test" }],
+  });
+  const other = conversationAnchorId({
+    input: [opening[0], { role: "user", content: "write the release notes" }],
+  });
+  assert.match(first, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  assert.equal(later, first, "later turns of the same conversation keep the id");
+  assert.notEqual(other, first, "a different conversation gets a different id");
+  assert.equal(conversationAnchorId({ input: [] }), undefined);
 });

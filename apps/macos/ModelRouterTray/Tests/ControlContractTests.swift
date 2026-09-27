@@ -46,6 +46,16 @@ struct ControlContractTests {
         == .mutation
     )
     #expect(RouterControlContractPolicy.access(for: ["future-command"]) == .mutation)
+    // Both pools' cached usage is a file read the island polls; a contract
+    // mismatch must not freeze one provider's percentages while the other's
+    // keep updating.
+    #expect(
+      RouterControlContractPolicy.access(for: ["chatgpt-account-pool", "usage", "cached"]) == .read
+    )
+    #expect(
+      RouterControlContractPolicy.access(for: ["claude-account-pool", "usage", "cached"]) == .read
+    )
+    #expect(RouterControlContractPolicy.access(for: ["claude-account-pool", "usage"]) == .mutation)
     #expect(RouterControlContractPolicy.access(for: [
       "chatgpt-account-pool", "reset-credit", "acct_testaccount"
     ]) == .mutation)

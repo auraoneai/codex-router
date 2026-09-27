@@ -9,6 +9,7 @@ import { protectPrivateFile } from "../src/file-security.mjs";
 import {
   clearClaudeAccountUsageCacheForTests,
   cachedClaudeAccountUsageById,
+  recordClaudeAccountUsage,
 } from "../src/claude-account-usage.mjs";
 import {
   clearClaudeAccountAuthInvalid,
@@ -471,6 +472,49 @@ test("probeClaudeAccountUsage deduplicates concurrent in-flight calls", async ()
     assert.deepEqual(res1, res2);
   } finally {
     await close(server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("a probe does not overwrite a reading the forwarder recorded while it was in flight", async () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "claude-probe-merge-test-"));
+  const poolPath = path.join(stateDir, "claude-account-pool.json");
+  const homesDir = path.join(stateDir, "claude-accounts");
+  const cachePath = path.join(stateDir, "claude-account-usage.json");
+  const accountId = "clacct_0000000000000077";
+  mkdirSync(path.join(homesDir, accountId), { recursive: true, mode: 0o700 });
+  writeFileSync(path.join(homesDir, accountId, "credentials.json"), JSON.stringify({
+    claudeAiOauth: { accessToken: "merge-access", refreshToken: "merge-refresh", expiresAt: Date.now() + 3600_000 },
+  }), { mode: 0o600 });
+  writeFileSync(poolPath, JSON.stringify({
+    version: 1,
+    policy: { enabled: true, mode: "switch" },
+    accounts: { [accountId]: createValidClaudeAccountRecord(accountId) },
+  }), { mode: 0o600 });
+
+  const probeStartedAt = Date.now();
+  try {
+    await executeProbeClaudeAccountUsage({
+      poolPath,
+      homesDir,
+      cachePath,
+      now: probeStartedAt,
+      fetchImpl: async () => {
+        // A turn completes while the probe waits on the network.
+        recordClaudeAccountUsage(accountId, {
+          fiveHour: { usedPercent: 97, remainingPercent: 3, resetsAtMs: probeStartedAt + 3600_000 },
+        }, { now: probeStartedAt + 500, usagePath: cachePath });
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          json: async () => ({ five_hour: { utilization: 40, resets_at: new Date(probeStartedAt + 3600_000).toISOString() } }),
+        };
+      },
+    });
+    const row = JSON.parse(readFileSync(cachePath, "utf8")).accounts.find((a) => a.id === accountId);
+    assert.equal(row.fiveHour.remainingPercent, 3, "the newer passive reading survives the probe's write");
+  } finally {
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
