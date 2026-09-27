@@ -36,6 +36,14 @@ const bridgeSource = String.raw`
   const staleAccountFailure = searchParams.get("staleAccountFailure") === "1";
   const staleProviderUsage = searchParams.get("staleProviderUsage") === "1";
   const fallbackUsage = searchParams.get("fallbackUsage") === "1";
+  // Usage buckets are dated relative to today in local time. The Usage page
+  // charts a trailing 30-day range, so a fixed calendar date ages out of it and
+  // the fixture silently stops rendering the bars the tests look for.
+  const fixtureDate = (daysAgo) => {
+    const day = new Date(Date.now() - daysAgo * 86_400_000);
+    const pad = (value) => String(value).padStart(2, "0");
+    return day.getFullYear() + "-" + pad(day.getMonth() + 1) + "-" + pad(day.getDate());
+  };
   const pollOnceMs = Number(searchParams.get("pollOnceMs")) || 0;
   const healthPollOnceMs = Number(searchParams.get("healthPollOnceMs")) || 0;
   const staleHealth = searchParams.get("staleHealth") === "1";
@@ -418,7 +426,7 @@ const bridgeSource = String.raw`
           windowDurationMins: 300,
           resetsAt: 1800000000,
         },
-        dailyUsageBuckets: [{ startDate: "2026-08-27", tokens: 24000 }],
+        dailyUsageBuckets: [{ startDate: fixtureDate(2), tokens: 24000 }],
         summary: { lifetimeTokens: 24000, peakDailyTokens: 24000, currentStreakDays: 1 },
       };
     },
@@ -442,7 +450,7 @@ const bridgeSource = String.raw`
             last24hTokens: 31_000,
             last24hRequests: 3,
             dailyUsageBuckets: [{
-              startDate: "2026-08-28",
+              startDate: fixtureDate(1),
               tokens: 31_000,
               requests: 3,
               inputTokens: 25_000,
@@ -458,7 +466,7 @@ const bridgeSource = String.raw`
             requests: 8,
             last24hTokens: totalTokens,
             last24hRequests: 8,
-            dailyUsageBuckets: [{ startDate: "2026-08-27", tokens: totalTokens, requests: 8 }],
+            dailyUsageBuckets: [{ startDate: fixtureDate(2), tokens: totalTokens, requests: 8 }],
             account: {
               status: "available",
               metrics: [
