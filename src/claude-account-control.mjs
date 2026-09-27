@@ -64,11 +64,15 @@ export async function handleClaudeAccountPool(action, value, {
       } catch {}
     }
 
+    const { claudeSeatTier } = await import("./claude-account-rotation.mjs");
+    const { claudeOAuthSession } = await import("./claude-oauth-session.mjs");
     const accountsWithUsage = {};
     for (const [id, account] of Object.entries(snapshot.accounts || {})) {
       const accountUsage = usageById.get(id) || usage.accounts?.[id] || usage[id] || null;
+      const seat = claudeSeatTier(claudeOAuthSession(id, { homesDir }) || {});
       accountsWithUsage[id] = {
         ...account,
+        ...(seat ? { tier: seat.label } : {}),
         ...(accountUsage ? { usage: accountUsage } : {}),
       };
     }
@@ -210,7 +214,9 @@ export async function handleClaudeAccountPool(action, value, {
         : [];
     const rawUsageById = new Map(usageList.map((a) => [a?.id, a]).filter(([id]) => id));
 
+    const { claudeOAuthSession } = await import("./claude-oauth-session.mjs");
     const {
+      claudeSeatTier,
       claudeRotationCandidates,
       claudeAccountCooldownUntil,
       isClaudeAccountAuthInvalid,
@@ -264,7 +270,9 @@ export async function handleClaudeAccountPool(action, value, {
         id: account.id,
         label: account.identity?.email || account.label || "Claude account",
         preferred: poolState.policy?.selectedAccountId === account.id,
-        planType: account.subscription?.plan || row?.plan || account.identity?.subscriptionType || null,
+        // Standard vs Premium (5x) for a Team seat, read from the login itself.
+        planType: claudeSeatTier(claudeOAuthSession(account.id, { homesDir }) || {})?.label
+          || account.subscription?.plan || row?.plan || account.identity?.subscriptionType || null,
         health,
         cooling: isCooling,
         cooldownUntil,

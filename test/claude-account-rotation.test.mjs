@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync as rawWriteFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync as rawWriteFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -17,6 +17,7 @@ import {
   resetClaudeRotationStateForTests,
   tierWeight,
   claudeRejectionResetAt,
+  claudeSeatTier,
   coolClaudeAccountFamily,
   leftoverHealth,
 } from "../src/claude-account-rotation.mjs";
@@ -317,4 +318,69 @@ test("a shared rejection benches the account until the latest rejected window re
   assert.equal(claudeRejectionResetAt(reading, now), now + 3 * 86_400_000,
     "a weekly rejection is not lifted at the five-hour reset");
   assert.equal(claudeRejectionResetAt({ status: "rejected" }, now), undefined);
+});
+
+test("a Team seat's rate-limit tier separates Premium (5x) from Standard", () => {
+  assert.deepEqual(claudeSeatTier({ subscriptionType: "team", rateLimitTier: "default_claude_max_5x" }),
+    { plan: "premium", label: "Premium" });
+  assert.deepEqual(claudeSeatTier({ subscriptionType: "team", rateLimitTier: "default_raven" }),
+    { plan: "standard", label: "Standard" });
+  assert.deepEqual(claudeSeatTier({ subscriptionType: "max", rateLimitTier: "default_claude_max_20x" }),
+    { plan: "max20", label: "Max 20x" });
+  assert.deepEqual(claudeSeatTier({ subscriptionType: "pro" }), { plan: "pro", label: "Pro" });
+  assert.equal(claudeSeatTier({}), undefined);
+  assert.equal(tierWeight("premium"), 5 * tierWeight("standard"));
+});
+
+test("rotation reads the seat tier from each login and spends Standard seats before Premium ones", () => {
+  const options = fixture();
+  const seats = [
+    ["Premium A", "default_claude_max_5x"],
+    ["Standard A", "default_raven"],
+    ["Premium B", "default_claude_max_5x"],
+    ["Standard B", "default_raven"],
+  ];
+  const ids = {};
+  for (const [label, rateLimitTier] of seats) {
+    const account = createTestAccount(options, { label, refreshToken: `rt-${label}` });
+    const credPath = claudeSubscriptionAccountCredentialsPath(account.id, options);
+    const stored = JSON.parse(readFileSync(credPath, "utf8"));
+    stored.claudeAiOauth.subscriptionType = "team";
+    stored.claudeAiOauth.rateLimitTier = rateLimitTier;
+    writeFileSync(credPath, JSON.stringify(stored), { mode: 0o600 });
+    // The pool record carries no plan of its own; the login is the source.
+    const state = readClaudeAccountPoolState(options.filePath);
+    delete state.accounts[account.id].subscription.plan;
+    writeClaudeAccountPoolState(state, options.filePath);
+    ids[label] = account.id;
+  }
+  const order = claudeRotationCandidates({ poolPath: options.filePath, homesDir: options.homesDir })
+    .map((candidate) => candidate.id);
+  assert.deepEqual(order.slice(0, 2).sort(), [ids["Standard A"], ids["Standard B"]].sort());
+  assert.deepEqual(order.slice(2).sort(), [ids["Premium A"], ids["Premium B"]].sort());
+});
+
+test("like the ChatGPT pool, a low Standard seat is drained before a healthy or selected Premium seat", () => {
+  const candidates = [{ id: "premium-selected" }, { id: "premium" }, { id: "standard-low" }, { id: "standard-spent" }];
+  const usageById = new Map([
+    ["premium-selected", { id: "premium-selected", fiveHour: { remainingPercent: 95 } }],
+    ["premium", { id: "premium", fiveHour: { remainingPercent: 100 } }],
+    // Soft (<= 15%) is still real remaining capacity on the smaller seat.
+    ["standard-low", { id: "standard-low", fiveHour: { remainingPercent: 6 } }],
+    ["standard-spent", { id: "standard-spent", fiveHour: { remainingPercent: 0 } }],
+  ]);
+  const planById = new Map([
+    ["premium-selected", "premium"],
+    ["premium", "premium"],
+    ["standard-low", "standard"],
+    ["standard-spent", "standard"],
+  ]);
+  const ordered = orderClaudeAccountCandidates(candidates, {
+    usageById,
+    planById,
+    preferred: "premium-selected",
+  }).map((candidate) => candidate.id);
+  assert.equal(ordered[0], "standard-low", "the Standard seat keeps serving until it is spent");
+  assert.deepEqual(ordered.slice(1, 3), ["premium-selected", "premium"]);
+  assert.equal(ordered.at(-1), "standard-spent", "a drained Standard seat is last, not first");
 });

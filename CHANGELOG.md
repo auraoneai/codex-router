@@ -1,6 +1,15 @@
 # Changelog
 
 ## Unreleased
+- **Claude Team seats drain Standard before Premium, as ChatGPT drains Plus
+  before Pro.** The pool never read the seat a login holds, so every account
+  ranked as the same unknown plan. The tier now comes from the
+  `rateLimitTier` Claude Code stores beside the token (`default_claude_max_5x`
+  is a Premium seat, five times a Standard one). Among accounts with quota
+  left, a Standard seat is used until it is spent, ahead of a healthy or
+  selected Premium seat; only an in-flight conversation outranks that. The
+  order also holds before the first usage reading. The island tags each row
+  and the Control Center labels each account Standard or Premium.
 - **Claude account rotation keeps every account in play and brings spent ones
   back on its own.** The Claude subscription pool now behaves like the ChatGPT
   pool. An account whose access token had expired was dropped from rotation

@@ -182,9 +182,30 @@ export function windowReset(previous, current) {
   return current - previous >= RESET_JUMP_PERCENT;
 }
 
+// The seat an account's login holds, from what Claude Code stores beside the
+// token. A Team seat is Standard or Premium, and Premium carries the Max 5x
+// rate-limit tier -- five times a Standard seat's usage -- so `rateLimitTier`
+// is what separates them; `subscriptionType` only says "team" for both.
+export function claudeSeatTier({ subscriptionType, rateLimitTier } = {}) {
+  const subscription = String(subscriptionType || "").trim().toLowerCase();
+  const limitTier = String(rateLimitTier || "").trim().toLowerCase();
+  const multiplier = /max_20x/.test(limitTier) ? 20 : /max_5x/.test(limitTier) ? 5 : 1;
+  if (subscription === "team" || subscription === "enterprise") {
+    return multiplier > 1
+      ? { plan: "premium", label: "Premium" }
+      : { plan: "standard", label: "Standard" };
+  }
+  if (multiplier === 20) return { plan: "max20", label: "Max 20x" };
+  if (multiplier === 5) return { plan: "max5", label: "Max 5x" };
+  if (subscription === "pro") return { plan: "pro", label: "Pro" };
+  if (subscription === "max") return { plan: "max5", label: "Max" };
+  return undefined;
+}
+
 export function tierWeight(plan) {
   const p = String(plan || "").trim().toLowerCase();
-  if (p === "pro") return 1;
+  if (p === "pro" || p === "standard") return 1;
+  if (p === "premium") return 5;
   if (p === "max5") return 5;
   if (p === "max20") return 20;
   if (p === "team") return 50;
@@ -323,8 +344,8 @@ export function orderClaudeAccountCandidates(candidates, {
   };
 
   const planRank = (id) => {
-    const planFromUsage = usage.get(id)?.plan || usage.get(id)?.planType;
-    const plan = planFromUsage || plans.get(id);
+    // The login's own seat tier outranks whatever plan a usage row recorded.
+    const plan = plans.get(id) || usage.get(id)?.plan || usage.get(id)?.planType;
     return tierWeight(plan);
   };
 
@@ -349,8 +370,15 @@ export function orderClaudeAccountCandidates(candidates, {
     const leftRank = rank(left);
     const rightRank = rank(right);
 
-    if (leftRank !== 0 && rightRank !== 0 &&
-        leftRank >= 1 && leftRank <= 3 && rightRank >= 1 && rightRank <= 3) {
+    // Ranks fall into groups -- sticky, known usable (1-3), no reading yet
+    // (4-5), then the rest. Within the usable and the no-reading groups the
+    // smaller seat is spent first, so a pool with no usage data (right after a
+    // restart) still orders Standard seats ahead of Premium ones; across
+    // groups a known-usable account always wins.
+    const group = (value) => (value === 0 ? 0 : value <= 3 ? 1 : value <= 5 ? 2 : value);
+    const groupDelta = group(leftRank) - group(rightRank);
+    if (groupDelta !== 0) return groupDelta;
+    if (group(leftRank) === 1 || group(leftRank) === 2) {
       const tierDelta = planRank(left.id) - planRank(right.id);
       if (tierDelta !== 0) return tierDelta;
     }
@@ -423,7 +451,7 @@ export function claudeRotationCandidates({
     if (session.identityFingerprint) seenFingerprints.add(session.identityFingerprint);
 
     purposeById.set(entry.id, normalizePurpose(entry.purpose) || inferPurpose(entry.label, entry));
-    planById.set(entry.id, entry.subscription?.plan);
+    planById.set(entry.id, entry.subscription?.plan || claudeSeatTier(session)?.plan);
     tokenFingerprints.set(entry.id, session.tokenFingerprint);
 
     candidates.push({

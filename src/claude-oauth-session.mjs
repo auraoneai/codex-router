@@ -80,6 +80,10 @@ export function claudeOAuthSession(accountId, {
       accountId,
       accessToken,
       refreshToken,
+      // Claude Code stores the seat's plan beside the token. Neither is a
+      // credential; rotation uses them to tell a Premium seat from a Standard one.
+      ...(typeof blob.subscriptionType === "string" ? { subscriptionType: blob.subscriptionType } : {}),
+      ...(typeof blob.rateLimitTier === "string" ? { rateLimitTier: blob.rateLimitTier } : {}),
       expiresAtMs,
       expired,
       needsRefresh,
