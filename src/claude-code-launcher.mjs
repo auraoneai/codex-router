@@ -144,6 +144,12 @@ export function claudeRouterEnvironment({
     env.ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION = "Claude Opus 5.5 (Claude account pool)";
   }
 
+  const sonnet = catalog?.models?.find?.((m) => m.slug === "anthropic-api/claude-sonnet-5.5" || m.slug?.endsWith("claude-sonnet-5.5"));
+  if (sonnet && claudeRoutedSlug(env.ANTHROPIC_DEFAULT_SONNET_MODEL) === sonnet.slug && !env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME) {
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME = "Claude Sonnet 5.5";
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION = "Claude Sonnet 5.5 (Claude account pool)";
+  }
+
   return env;
 }
 
