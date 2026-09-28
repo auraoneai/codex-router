@@ -20,7 +20,7 @@
 // `remainingPercent`, so the rename is the whole difference.
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -113,27 +113,54 @@ export function normalizeRules(rules) {
 // Upstream names the two rate-limit windows `primary` and `secondary`; the
 // custom implementation called them `fiveHour` and `weekly`. Accept either so a
 // cache written by either generation reads correctly.
-export function usageWindows(row) {
+// Upstream reports `resetsAt` in epoch seconds; older snapshots used ms.
+function windowResetMs(window) {
+  const value = Number(window?.resetsAt ?? window?.resetsAtMs);
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+  return value < 100_000_000_000 ? value * 1000 : value;
+}
+
+// A window whose reset has passed no longer describes the account: its quota
+// rolled over. It reads as unknown until the next probe, so a spent account is
+// admitted again at its reset even when that probe fails and keeps the old
+// reading.
+export function windowIsLive(window, now = Date.now()) {
+  if (!window || !Number.isFinite(window.remainingPercent)) return false;
+  const resetMs = windowResetMs(window);
+  return !(resetMs !== undefined && resetMs <= now);
+}
+
+export function usageWindows(row, now = Date.now()) {
   return [row?.primary, row?.secondary, row?.fiveHour, row?.weekly].filter(
-    (window) => window && Number.isFinite(window.remainingPercent),
+    (window) => windowIsLive(window, now),
   );
 }
 
-export function leftoverHealth(row, softDrainPercent = SOFT_DRAIN_PERCENT, accountId = row?.id) {
+// The latest future reset among an account's spent windows: the moment it is
+// usable again. Undefined when nothing live is spent.
+export function drainedUntilMs(row, now = Date.now()) {
+  const resets = [row?.primary, row?.secondary, row?.fiveHour, row?.weekly]
+    .filter((window) => windowIsLive(window, now) && window.remainingPercent <= DRAINED_LEFTOVER_PERCENT)
+    .map(windowResetMs)
+    .filter((ms) => ms !== undefined && ms > now);
+  return resets.length ? Math.max(...resets) : undefined;
+}
+
+export function leftoverHealth(row, softDrainPercent = SOFT_DRAIN_PERCENT, accountId = row?.id, now = Date.now()) {
   if (accountId && isAccountAuthInvalid(accountId)) return "auth_invalid";
   if (row?.authInvalid === true) return "auth_invalid";
   if (row?.error && /401|token_revoked|invalidated oauth token|invalid_token|unauthorized/i.test(row.error)) {
     return "auth_invalid";
   }
-  const windows = usageWindows(row);
+  const windows = usageWindows(row, now);
   if (!windows.length) return "unknown";
   if (windows.some((window) => window.remainingPercent <= DRAINED_LEFTOVER_PERCENT)) return "drained";
   if (windows.some((window) => window.remainingPercent <= softDrainPercent)) return "soft";
   return "healthy";
 }
 
-export function accountIsDrained(row, softDrainPercent = SOFT_DRAIN_PERCENT, accountId = row?.id) {
-  return leftoverHealth(row, softDrainPercent, accountId) === "drained";
+export function accountIsDrained(row, softDrainPercent = SOFT_DRAIN_PERCENT, accountId = row?.id, now = Date.now()) {
+  return leftoverHealth(row, softDrainPercent, accountId, now) === "drained";
 }
 
 export function accountIsAuthInvalid(row, accountId = row?.id) {
@@ -161,7 +188,7 @@ export function orderAccountCandidates(candidates, {
   const orderIndex = new Map((order || []).map((id, index) => [id, index]));
   const pinIndex = new Map((pinOrder || DEFAULT_PIN_ORDER).map((purpose, index) => [purpose, index]));
   const quotaRank = (id) => {
-    const health = leftoverHealth(usage.get(id), softDrainPercent, id);
+    const health = leftoverHealth(usage.get(id), softDrainPercent, id, now);
     if (health === "healthy") return 1;
     if (health === "soft") return 2;
     if (health === "unknown") return 3;
@@ -244,6 +271,10 @@ export function accountSession(accountId, {
   const expiry = tokenExpiryMs(accessToken);
   const accountIdClaim = typeof tokens?.account_id === "string" ? tokens.account_id : undefined;
   const tokenFingerprint = createHash("sha256").update(accessToken).digest("hex");
+  let authChangedAtMs;
+  try {
+    authChangedAtMs = statSync(authPath).mtimeMs;
+  } catch {}
   const identityFingerprint = accountIdClaim
     ? createHash("sha256").update(accountIdClaim).digest("hex")
     : undefined;
@@ -255,6 +286,7 @@ export function accountSession(accountId, {
     tokenFingerprint,
     identityFingerprint,
     fingerprint: identityFingerprint,
+    authChangedAtMs,
     headers: {
       authorization: `Bearer ${accessToken}`,
       ...(accountIdClaim ? { "chatgpt-account-id": accountIdClaim } : {}),
@@ -265,6 +297,17 @@ export function accountSession(accountId, {
 const cooldowns = new Map();
 const affinities = new Map();
 const authInvalidAccounts = new Map();
+
+// A probe's auth verdict describes the login it read. A login stored after
+// that probe -- a new sign-in, a profile switch -- is not the one it refused,
+// so the cached verdict stops applying at once instead of holding a freshly
+// signed-in account out until the next probe.
+export function probeDescribesLogin(row, session) {
+  const probedAt = Date.parse(row?.fetchedAt || "");
+  const changedAt = Number(session?.authChangedAtMs);
+  if (!Number.isFinite(probedAt) || !Number.isFinite(changedAt)) return true;
+  return probedAt >= changedAt;
+}
 
 export function coolAccount(accountId, until) {
   if (!accountId) return;
@@ -394,7 +437,7 @@ export function rotationCandidates({
     if (entry.identity?.accountId && session.accountId !== entry.identity.accountId) continue;
     if (isAccountAuthInvalid(entry.id, { tokenFingerprint: session.tokenFingerprint })) continue;
     const cachedRow = usage.get(entry.id);
-    if (cachedRow && accountIsAuthInvalid(cachedRow, entry.id)) continue;
+    if (cachedRow && probeDescribesLogin(cachedRow, session) && accountIsAuthInvalid(cachedRow, entry.id)) continue;
     // Two registrations resolving to one ChatGPT identity are one quota, so
     // ranking both would just retry the same subscription.
     if (session.identityFingerprint && seenFingerprints.has(session.identityFingerprint)) continue;
@@ -417,13 +460,14 @@ export function rotationCandidates({
     purposeById,
     pinOrder: rules.pinOrder,
     softDrainPercent: rules.softDrainPercent,
+    now,
   });
   // Drain is derived availability rather than persisted state: a spent account
   // drops out now and is admitted again by the next healthy probe, with no
   // operator action. With no usage data at all, every session stays eligible --
   // rotating blindly is still better than refusing to rotate.
   const eligible = usage.size
-    ? ordered.filter((entry) => !accountIsDrained(usage.get(entry.id), rules.softDrainPercent, entry.id))
+    ? ordered.filter((entry) => !accountIsDrained(usage.get(entry.id), rules.softDrainPercent, entry.id, now))
     : ordered;
   const ready = eligible.filter((entry) => (cooldowns.get(entry.id) || 0) <= now);
   // Falling back to `eligible` keeps a fully cooled-down pool usable: a stale
@@ -462,6 +506,7 @@ export function poolExhaustionReport({
   let cooling = 0;
   let expired = 0;
   let totalActive = 0;
+  const recoveries = [];
 
   for (const entry of entries) {
     if (entry?.state !== "active" || entry?.paused) continue;
@@ -480,20 +525,23 @@ export function poolExhaustionReport({
       continue;
     }
     const cachedRow = usage.get(entry.id);
-    if (cachedRow && accountIsAuthInvalid(cachedRow, entry.id)) {
+    if (cachedRow && probeDescribesLogin(cachedRow, session) && accountIsAuthInvalid(cachedRow, entry.id)) {
       authInvalid++;
       continue;
     }
-    if (cachedRow && accountIsDrained(cachedRow, rules.softDrainPercent, entry.id)) {
+    if (cachedRow && accountIsDrained(cachedRow, rules.softDrainPercent, entry.id, now)) {
       drained++;
+      const back = drainedUntilMs(cachedRow, now);
+      if (back !== undefined) recoveries.push(back);
       continue;
     }
     const isCooling = (cooldowns.get(entry.id) || 0) > now;
     if (isCooling) {
       cooling++;
+      recoveries.push(cooldowns.get(entry.id));
       continue;
     }
-    const health = cachedRow ? leftoverHealth(cachedRow, rules.softDrainPercent, entry.id) : "unknown";
+    const health = cachedRow ? leftoverHealth(cachedRow, rules.softDrainPercent, entry.id, now) : "unknown";
     if (health === "soft") soft++;
     else healthy++;
   }
@@ -503,7 +551,11 @@ export function poolExhaustionReport({
     return null;
   }
 
-  const nextReset = nextKnownResetAt(usage, { now });
+  // When the first unavailable account is usable again: its spent windows'
+  // latest reset, or its cooldown's end. Any earlier reset -- a window that is
+  // not the spent one -- would name a time at which nothing comes back.
+  const futureRecoveries = recoveries.filter((ms) => Number.isFinite(ms) && ms > now);
+  const nextReset = futureRecoveries.length ? Math.min(...futureRecoveries) : nextKnownResetAt(usage, { now });
   const resetIso = nextReset ? new Date(nextReset).toISOString() : null;
 
   return {

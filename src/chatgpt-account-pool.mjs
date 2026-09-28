@@ -810,8 +810,12 @@ export async function refreshBoundedChatGPTSubscriptionAccounts(pool, {
 } = {}) {
   if (!pool?.accounts || typeof refresh !== "function") return pool;
   const selectedId = pool.policy?.selectedAccountId;
+  // An expired access token is exactly the case refresh exists for: its
+  // refresh token can still mint a new one. Filtering on `usable` alone kept an
+  // account that had expired out of the only loop that could bring it back.
   const candidates = Object.values(pool.accounts)
-    .filter((account) => account?.subscription?.usable === true)
+    .filter((account) => account?.subscription?.usable === true
+      || (account?.subscription?.authenticated === true && account?.subscription?.expired === true))
     .sort((left, right) => Number(right.id === selectedId) - Number(left.id === selectedId))
     .slice(0, Math.max(0, Math.floor(probeLimit)));
   let cursor = 0;

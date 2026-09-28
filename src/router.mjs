@@ -273,6 +273,7 @@ import {
   isAccountAuthInvalid,
   markAccountAuthInvalid,
   poolExhaustionReport,
+  windowIsLive,
   rememberAccount,
   rotationCandidates,
   COOLDOWN_MS,
@@ -1025,8 +1026,10 @@ function cachedAccountUsageById({ now = Date.now() } = {}) {
         if (fresh) {
           byId.set(account.id, account);
         } else if (
-          account.primary?.remainingPercent === 0 ||
-          account.secondary?.remainingPercent === 0 ||
+          // Only while the spent window has not reset: past its reset the
+          // old 0% no longer describes the account.
+          (account.primary?.remainingPercent === 0 && windowIsLive(account.primary, now)) ||
+          (account.secondary?.remainingPercent === 0 && windowIsLive(account.secondary, now)) ||
           account.authInvalid === true
         ) {
           // Retain drained/auth-invalid status even if cache is slightly stale
@@ -2247,18 +2250,43 @@ nativeCatalogDriftCheckTimer.unref?.();
 
 // Periodically probe ChatGPT account usage in the background so that spent
 // accounts drop out of rotation proactively before any turn hits a 429.
+//
+// Each round first refreshes saved logins that are about to expire (or have).
+// Nothing else refreshes an account that is not the selected one: the running
+// Codex owns only the login in its own home, the background probe refuses to
+// spend a refresh token, and the Control Center's refresh only ran while its
+// Settings view was open. Without this, a non-selected account quietly fell
+// out of rotation for good about ten days after its last refresh. The refresh
+// helper itself skips the selected login, claims each account under the pool
+// lock, and retries an account at most every five minutes.
+async function refreshAndProbeChatGPTAccounts() {
+  try {
+    const {
+      chatGPTSubscriptionAccountPoolSnapshot,
+      refreshBoundedChatGPTSubscriptionAccounts,
+    } = await import("./chatgpt-account-pool.mjs");
+    await refreshBoundedChatGPTSubscriptionAccounts(chatGPTSubscriptionAccountPoolSnapshot());
+  } catch {
+    // A refresh that cannot run (discovery off, no Codex binary, a lease held
+    // elsewhere) leaves the probe to report the account as it is.
+  }
+  try {
+    const { probeChatGPTAccountUsage } = await import("./chatgpt-usage-probe.mjs");
+    await probeChatGPTAccountUsage();
+  } catch {
+    // Usage probing is best-effort; failures must never affect router health.
+  }
+}
+
 const chatgptUsageProbeTimer = setInterval(
-  async () => {
-    try {
-      const { probeChatGPTAccountUsage } = await import("./chatgpt-usage-probe.mjs");
-      await probeChatGPTAccountUsage();
-    } catch {
-      // Usage probing is best-effort; failures must never affect router health.
-    }
-  },
+  refreshAndProbeChatGPTAccounts,
   2 * 60_000, // Every 2 minutes
 );
 chatgptUsageProbeTimer.unref?.();
+// One round shortly after start, so a restart does not leave rotation and the
+// island on a reading from before it for two minutes.
+const chatgptStartupProbe = setTimeout(refreshAndProbeChatGPTAccounts, 15_000);
+chatgptStartupProbe.unref?.();
 
 async function relayEncryptedAgentPayloadOnce(
   item,

@@ -672,3 +672,17 @@ test("an unreadable account-list path fails closed instead of becoming an empty 
   assert.throws(() => readChatGPTAccountPoolState(options.filePath), /not a regular file/i);
   assert.throws(() => createChatGPTSubscriptionAccount(options), /not a regular file/i);
 });
+
+test("the bounded refresh poll also retries accounts whose access token already expired", async () => {
+  const calls = [];
+  await refreshBoundedChatGPTSubscriptionAccounts({
+    policy: {},
+    accounts: {
+      acct_liveone: { id: "acct_liveone", subscription: { authenticated: true, usable: true, expired: false } },
+      acct_expired: { id: "acct_expired", subscription: { authenticated: true, usable: false, expired: true } },
+      acct_nologin: { id: "acct_nologin", subscription: { authenticated: false, usable: false, expired: false } },
+    },
+  }, { refresh: async (id) => { calls.push(id); } });
+  assert.deepEqual(calls.sort(), ["acct_expired", "acct_liveone"],
+    "an expired token is the case refresh exists for; an account with no login has nothing to refresh");
+});

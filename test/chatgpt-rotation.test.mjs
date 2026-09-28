@@ -697,3 +697,64 @@ test("multi-hop candidate failover: A (429) -> B (401) -> C (200) with single-at
     assert.equal(noCandidate, undefined); // loop terminates cleanly!
   } finally { b.cleanup(); resetRotationStateForTests(); }
 });
+
+test("a spent window whose reset has passed no longer keeps the account out", () => {
+  const now = Date.now();
+  const nowSec = Math.floor(now / 1000);
+  // Upstream reports resetsAt in epoch seconds.
+  const reset = { primary: { remainingPercent: 0, resetsAt: nowSec - 60 } };
+  const pending = { primary: { remainingPercent: 0, resetsAt: nowSec + 3600 } };
+  assert.equal(leftoverHealth(reset, undefined, undefined, now), "unknown",
+    "a failed probe that kept the old 0% must not strand the account past its reset");
+  assert.equal(accountIsDrained(pending, undefined, undefined, now), true);
+  // A weekly window still spent outranks a 5h window that already reset.
+  assert.equal(accountIsDrained({
+    primary: { remainingPercent: 0, resetsAt: nowSec - 60 },
+    secondary: { remainingPercent: 0, resetsAt: nowSec + 86_400 },
+  }, undefined, undefined, now), true);
+});
+
+test("pool exhaustion names when a spent account is back, not the earliest unrelated reset", () => {
+  const b = box();
+  try {
+    writeAccount(b.homes, "acct_spentone1");
+    writeAccount(b.homes, "acct_spenttwo2");
+    writePool(b.pool, ["acct_spentone1", "acct_spenttwo2"]);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const usageById = {
+      // 5h still has room and resets soon; the weekly window is the spent one.
+      acct_spentone1: {
+        primary: { remainingPercent: 60, resetsAt: nowSec + 600 },
+        secondary: { remainingPercent: 0, resetsAt: nowSec + 7200 },
+      },
+      acct_spenttwo2: { primary: { remainingPercent: 0, resetsAt: nowSec + 3600 } },
+    };
+    const report = poolExhaustionReport({ poolPath: b.pool, homesDir: b.homes, usageById });
+    assert.equal(report.exhausted, true);
+    assert.equal(report.nextResetAt, (nowSec + 3600) * 1000,
+      "the 5h reset at +10m frees nothing; the first account back is the other one at +1h");
+  } finally {
+    b.cleanup();
+  }
+});
+
+test("a revoked verdict from before the stored login changed does not hold a re-signed-in account out", () => {
+  const b = box();
+  try {
+    writeAccount(b.homes, "acct_relogged1");
+    writeAccount(b.homes, "acct_steadytwo");
+    writePool(b.pool, ["acct_relogged1", "acct_steadytwo"]);
+    const probedBefore = new Date(Date.now() - 60_000).toISOString();
+    const ids = (fetchedAt) => rotationCandidates({
+      poolPath: b.pool,
+      homesDir: b.homes,
+      usageById: { acct_relogged1: { authInvalid: true, fetchedAt } },
+    }).map((candidate) => candidate.id);
+    assert.ok(ids(probedBefore).includes("acct_relogged1"),
+      "the probe read the login this sign-in replaced");
+    assert.ok(!ids(new Date(Date.now() + 60_000).toISOString()).includes("acct_relogged1"),
+      "a verdict about the current login still applies");
+  } finally {
+    b.cleanup();
+  }
+});

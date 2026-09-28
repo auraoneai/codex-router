@@ -1,6 +1,23 @@
 # Changelog
 
 ## Unreleased
+- **Non-selected ChatGPT accounts keep their logins fresh on their own.** Only
+  the selected account's login has an owner that refreshes it (the running
+  Codex). The background probe deliberately refuses to spend a refresh token,
+  and the Control Center's refresh ran only while its Settings view was open
+  and skipped any account that had already expired. So a non-selected account
+  fell out of rotation for good about ten days after its last refresh. The
+  router now refreshes expiring saved logins before each two-minute probe,
+  including expired ones, and runs one round shortly after it starts.
+- **A spent ChatGPT window stops counting once it resets.** A probe that
+  failed kept the old 0% reading, and a 0% row outlived the cache's
+  freshness limit, so an account could stay out after its quota came back.
+  A window whose reset time has passed now reads as unknown, and the pool's
+  "earliest reset" names when a spent account is actually back rather than
+  the earliest reset of any window.
+- **A new ChatGPT sign-in is back in rotation immediately.** A revoked
+  verdict from before the stored login changed no longer holds the account
+  out until the next probe.
 - **A revoked ChatGPT login says so, and can be signed in again.** A token
   ChatGPT has revoked still looks valid locally, so the Control Center showed
   the account as "Ready · Usage unavailable" and disabled its Login button,
