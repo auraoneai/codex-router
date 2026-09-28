@@ -383,7 +383,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
     );
   }
   // The China route has never been through the native collaboration probe
-  // AGENTS.md requires, so it stays conservative v1 while the global one is v2.
+  // docs/agents/models-ship-to-every-installer.md requires, so it stays conservative v1 while the global one is v2.
   assert.equal(MODEL_BY_SLUG.get("kimi-api-cn/kimi-k3").multiAgentVersion, undefined);
   assert.equal(MODEL_BY_SLUG.get("kimi-api/kimi-k3").multiAgentVersion, "v2");
   assert.equal(MODEL_BY_SLUG.get("kimi-api-cn/kimi-k3").upstreamModel, "kimi-k3");
@@ -615,7 +615,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
     resolver: "google-application-default",
   });
   // Deliberate v1 holdouts. Both are unproven through the native collaboration
-  // probe AGENTS.md requires, and a v2 claim is not inherited from a sibling
+  // probe docs/agents/models-ship-to-every-installer.md requires, and a v2 claim is not inherited from a sibling
   // route: kimi-api-cn is the same model on a different platform, which is
   // exactly the kind of "surely it also works" assumption the probe exists for.
   const unprovenForV2 = new Set(["grok-oauth/grok-4.6", "kimi-api-cn/kimi-k3"]);
@@ -1949,7 +1949,7 @@ test("opencode's DeepSeek models never receive a forced tool_choice", () => {
   // Console Go serves DeepSeek V4 in thinking mode, which answers HTTP 400 to
   // tool_choice "required" ("Thinking mode does not support this tool_choice")
   // while calling tools correctly under "auto" — both halves observed live on
-  // 2026-08-15. Per AGENTS.md that is exactly the per-model auto-tool-choice
+  // 2026-08-15. Per docs/agents/models-add-for-current-user.md that is exactly the per-model auto-tool-choice
   // case: the restriction belongs to the upstream behind the reseller, so the
   // router downgrades the forced choice for these two slugs and no others.
   for (const slug of [

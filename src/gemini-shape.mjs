@@ -4,7 +4,8 @@
 // builds a `@google/genai` client and calls `{baseUrl}/v1beta/models/{model}:
 // {method}` directly (see `createContentGenerator` in @google/gemini-cli-core).
 // So a client integration for it needs a Gemini-shaped surface, which is the
-// one thing AGENTS.md tells the harness integration not to add for itself.
+// one thing docs/agents/install-deepseek-harness.md tells the harness
+// integration not to add for itself.
 //
 // The rule behind that instruction still holds, though, and this module is how:
 // nothing here talks to a provider. It converts a Gemini request into a

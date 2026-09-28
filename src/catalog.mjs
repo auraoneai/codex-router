@@ -882,7 +882,8 @@ function pickerSlugGroup(slug) {
 //
 //  - A certified v2 spawn route keeps the priority its registry entry
 //    authored. That field also feeds Codex's spawn_agent override window
-//    (AGENTS.md step 5), which shows only a small priority-ordered subset, so
+//    (docs/agents/models-ship-to-every-installer.md, "Ship a model to every
+//    installer" step 5), which shows only a small priority-ordered subset, so
 //    those routes must keep their intentionally low values or they are
 //    crowded out of the window.
 //  - Every other routed model is published in a band above the highest

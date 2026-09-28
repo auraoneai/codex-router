@@ -476,7 +476,8 @@ function recordedInstallManifest() {
         : undefined;
     // Only the proxy opt-in is read back, never the addresses: restoring an
     // address the environment does not name is `inheritedProxyEnvironment`'s
-    // decision to defer, and AGENTS.md says not to widen that trigger here.
+    // decision to defer, and docs/agents/service-and-gateway-lifecycle.md says not
+    // to widen that trigger here.
     const recordedProxy = manifest.current?.proxyEnvironment;
     const proxyOptIn = recordedProxy
       && typeof recordedProxy === "object"

@@ -23,8 +23,8 @@ import {
 // stops, subagents included. Every other model the operator can reach is
 // already known to this process; nothing ever tried one.
 //
-// The rules that make that safe are in AGENTS.md ("Failing a turn over to
-// another model is legal only before the first relayed byte"). This module owns
+// The rules that make that safe are in docs/agents/retries-and-failover.md
+// ("Moving a turn to another model is legal only before the first relayed byte"). This module owns
 // three of them: which failures qualify, which candidates are eligible, and how
 // long a provider that said it was empty is believed.
 

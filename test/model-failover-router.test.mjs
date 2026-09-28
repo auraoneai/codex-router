@@ -1317,7 +1317,7 @@ test("a fallback rebuild carries the full request, not a model swap", async () =
 
 // -- crossing the protocol line ----------------------------------------------
 //
-// The rebuild trap in AGENTS.md, exercised. A chat-completions provider needs
+// The rebuild trap in docs/agents/retries-and-failover.md, exercised. A chat-completions provider needs
 // every namespace flattened into ordinary functions; a responses-native one
 // needs the namespace shape kept. A failover that crosses that line has to
 // rebuild for the *destination*, not reship the first build's tools -- and a

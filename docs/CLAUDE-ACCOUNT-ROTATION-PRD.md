@@ -79,7 +79,7 @@ Key behavioral findings worth porting:
 4. Automatic token refresh (5-minute expiry margin) per account, persisted back to the account home; refresh-token rotation honored; permanent-vs-transient classification per §1.1(4).
 5. In-flight failover on quota rejection so the client never sees a 429 while any sibling has headroom (same nothing-relayed-yet contract as the native path).
 6. Control surface: control claude-account-pool status|add|remove|select|enable|disable|usage — JSON output, redacted (presence, ids, emails only; never token material).
-7. Tray parity: the anthropic-api card shows pooled accounts and per-account "% left" per the AGENTS.md ship-provider checklist.
+7. Tray parity: the anthropic-api card shows pooled accounts and per-account "% left" per the ship-provider checklist in docs/agents/models-ship-to-every-installer.md.
 
 ### Non-goals
 - No own OAuth login flow (Claude Code remains the login tool; we import).
@@ -285,7 +285,7 @@ Sizes are rough. Every task lists files touched and acceptance evidence. Order k
 - nextKnownResetAt equivalent + reset-aware / emergency / post-turn probes (§4.5). Off by default; control claude-account-pool usage without "cached" triggers a one-shot probe (read-only endpoint, but still network — documented).
 - Accept: test/claude-usage-probe.test.mjs with a stubbed endpoint; debounce assertions.
 
-### Phase 4 — Surfaces & ship-provider checklist (AGENTS.md "Ship a new provider to every installer")
+### Phase 4 — Surfaces & ship-provider checklist (docs/agents/models-ship-to-every-installer.md "Ship a new provider to every installer")
 
 **[x] T4.1 Tray & doctor** (~1 day) — `src/provider-onboarding.mjs` (pool status card for anthropic-api), `src/doctor.mjs` (pool readability check; warn-not-fail when empty), `src/support-bundle.mjs` (sanitized pool snapshot only).
 - Accept: doctor test extension; manual tray smoke per DEVELOPMENT.md.

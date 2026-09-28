@@ -147,7 +147,7 @@ export function setLmstudioModelEnabled(id, enabled) {
               description: `${value} served by LM Studio on this machine.`,
             },
           }),
-          // "experimental" is a promise AGENTS.md forbids dropping: driving a
+          // "experimental" is a promise docs/agents/providers-anonymous-custom-local.md forbids dropping: driving a
           // Codex turn locally is unproven per-model, and nothing here has
           // verified this one can dispatch tool calls at all.
           displayName: `${value} (LM Studio, experimental)`,

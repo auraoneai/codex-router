@@ -8497,7 +8497,7 @@ test("routed compaction records usage and logs on success and on failure", async
   }
 });
 
-// AGENTS.md requires the same collaboration handling on `/responses` and
+// docs/agents/subagents.md requires the same collaboration handling on `/responses` and
 // `/responses/compact` alike. Compaction replays the whole conversation, so a
 // `/goal` or subagent session compacting through a routed model would otherwise
 // summarize opaque payloads.

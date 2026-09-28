@@ -2566,8 +2566,8 @@ test("router children inherit the proxy opt-in this install recorded", async () 
   assert.match(runner, /childEnvironment\.NODE_USE_ENV_PROXY = "1"/);
   assert.match(runner, /recordedProxy\.NODE_USE_ENV_PROXY === "1"/);
   // Only the opt-in is restored. Supplying an address the environment does not
-  // name is inheritedProxyEnvironment's decision to defer, and AGENTS.md says
-  // not to widen that trigger.
+  // name is inheritedProxyEnvironment's decision to defer, and
+  // docs/agents/service-and-gateway-lifecycle.md says not to widen that trigger.
   assert.doesNotMatch(runner, /childEnvironment\.HTTPS?_PROXY = /);
   // It applies only to the install that recorded it.
   assert.match(runner, /recordedInstall\?\.sourceRoot === sourceRoot\s*&&\s*recordedInstall\.proxyOptIn/);

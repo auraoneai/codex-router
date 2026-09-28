@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Changed
+
+- **`AGENTS.md` is now a compact index, and the instructions it held live in
+  `docs/agents/`.** The file had grown to ~196 KB, so Codex, which stops reading
+  project docs at 32 KiB, never saw most of it, and Claude read all ~49K tokens
+  on every task. The root file keeps the cross-cutting rules (target selection,
+  credential and Codex safety boundaries, discovery-disabled, generated output)
+  and names, for each kind of task, the topic file that is mandatory reading
+  for it. Every other section moved verbatim into one of 26 topic files;
+  `CLAUDE.md` now points Claude at the index and the matching files only.
+  Source, test, and doc comments that cited a moved section point at its new
+  file.
+
 ### Fixed
 
 - Claude Code no longer auto-compacts on every turn with pooled Claude models.

@@ -58,7 +58,7 @@ Notes worth knowing:
 - **You can see what it spent.** Every read that is not served from the cache
   is written to `usage-events.jsonl` with the engine it was billed to, and the
   router logs one line per bridged turn. Plan quota for a ChatGPT-plan engine
-  is still not reflected in the tray's limits — see `AGENTS.md`.
+  is still not reflected in the tray's limits — see `docs/agents/vision-bridge.md`.
 
 The evidence contract is modelled on
 [ModLens](https://github.com/liustack/modlens), which solves the same problem

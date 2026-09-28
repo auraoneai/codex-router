@@ -1,6 +1,6 @@
 # Codex Router maintenance surfaces
 
-Use this map to begin impact analysis; the repository's `AGENTS.md` remains authoritative for exact invariants.
+Use this map to begin impact analysis; the repository's `AGENTS.md` and the `docs/agents/` topic files it indexes remain authoritative for exact invariants.
 
 ## Shared plane and clients
 
@@ -32,4 +32,4 @@ Never expose API keys, OAuth tokens, caller capabilities, managed URLs containin
 
 ## Verification baseline
 
-Use focused tests named by the relevant `AGENTS.md` section first. Consequential source changes normally also require `npm run check` and the appropriate portion of `npm test`; installer, lock, desktop, packaging, or live-provider behavior can require their dedicated workflows. Quota-consuming live probes require explicit consent.
+Use focused tests named by the relevant `AGENTS.md` or `docs/agents/` section first. Consequential source changes normally also require `npm run check` and the appropriate portion of `npm test`; installer, lock, desktop, packaging, or live-provider behavior can require their dedicated workflows. Quota-consuming live probes require explicit consent.
