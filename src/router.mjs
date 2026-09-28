@@ -1505,6 +1505,14 @@ function needsConsoleGoResponsesToolCompatibility(route) {
 // Console Go: the control becomes an ordinary function, discoveries become
 // ordinary tools, and calls are restored to Codex's native shape. Without it
 // Codex would have to ship every MCP schema on every turn to that route.
+function carriesToolSearch(payload) {
+  return (
+    (Array.isArray(payload?.tools) && payload.tools.some((tool) => tool?.type === "tool_search")) ||
+    (Array.isArray(payload?.input) &&
+      payload.input.some((item) => item?.type === "tool_search_call" || item?.type === "tool_search_output"))
+  );
+}
+
 function relaysToolSearchOverResponses(route) {
   return (
     providerForModel(route)?.protocol === "openai-responses" &&
@@ -3902,8 +3910,12 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   const chatCompletionsProvider = provider?.protocol !== "openai-responses";
   const deepSeekResponses = usesDeepSeekResponses(route);
   const consoleGoResponsesCompatibility = needsConsoleGoResponsesToolCompatibility(route);
+  // Only a request that actually carries Codex's search control or its history
+  // needs the relay; every other Responses-native request keeps the client's
+  // native namespace shape untouched.
   const responsesToolBoundaryRelay =
-    consoleGoResponsesCompatibility || relaysToolSearchOverResponses(route);
+    consoleGoResponsesCompatibility ||
+    (relaysToolSearchOverResponses(route) && carriesToolSearch(payload));
   // Restore declarations only where the existing adapter flattens tools again.
   // Native Responses routes retain the client's original declaration shape and
   // restore only their response lookup below.

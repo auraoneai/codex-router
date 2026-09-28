@@ -737,9 +737,14 @@ async function startRotationHarness(t, { accounts, onMessages, onToken }) {
   });
   child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
   t.after(async () => {
+    // Windows keeps the state directory locked until the child has exited.
+    const exited = child.exitCode !== null || child.signalCode !== null
+      ? Promise.resolve()
+      : new Promise((resolve) => child.once("exit", resolve));
     child.kill("SIGKILL");
+    await exited;
     await new Promise((resolve) => upstream.close(resolve));
-    rmSync(testRoot, { recursive: true, force: true });
+    rmSync(testRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
   await waitForHealth(`http://127.0.0.1:${forwarderPort}`, {
     Authorization: `Bearer ${internalKey}`,
