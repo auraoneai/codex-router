@@ -304,7 +304,13 @@ and keep every turn on the shared canonical Responses path.
 4. Model discovery publishes every routed slug as
    `codex_router/anthropic/ROUTER_SLUG`. The `anthropic` segment is required:
    Claude Code filters gateway-discovered ids that do not contain `claude` or
-   `anthropic`.
+   `anthropic`. A model whose `contextWindow` is at least 1M is published with
+   Claude Code's `[1m]` suffix (`codex_router/anthropic/ROUTER_SLUG[1m]`):
+   Claude Code caps every other gateway id at 200k no matter what discovery
+   declares, and a large tool surface then auto-compacts on every turn. The
+   suffix never reaches the wire. Discovery and `GET /v1/models/{id}` report
+   `max_input_tokens`/`max_tokens` so smaller models compact at their real
+   window.
 5. The Anthropic Messages surface translates and re-enters `/v1/responses`; it
    never reaches a provider directly. Tool use/results, images, token counting,
    SSE pings, and the model list are part of the compatibility boundary.

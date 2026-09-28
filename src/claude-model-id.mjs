@@ -1,5 +1,14 @@
 export const CLAUDE_MODEL_PREFIX = "codex_router/anthropic/";
 
+// Claude Code only believes a declared window above 200k for model names it
+// knows natively or for names carrying its `[1m]` marker; a gateway id that
+// declares 1M through discovery is still capped at 200k, which makes a large
+// tool surface auto-compact on every turn. Claude Code strips the marker
+// before the name reaches the wire, so the router still sees the plain id.
+export const CLAUDE_1M_MARKER = "[1m]";
+const ONE_MILLION_CONTEXT = 1_000_000;
+const MARKER_PATTERN = /\[1m\]$/i;
+
 // Claude Code's gateway discovery intentionally keeps only IDs containing
 // "claude" or "anthropic". The router supports many model families, so the
 // transport prefix carries "anthropic" while the suffix remains the exact
@@ -8,8 +17,20 @@ export function claudeModelId(slug) {
   return `${CLAUDE_MODEL_PREFIX}${String(slug || "")}`;
 }
 
+export function claudeContextWindow(model) {
+  const value = Number(model?.contextWindow ?? model?.context_window);
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+// The id published to Claude Code itself: the transport id, plus the `[1m]`
+// marker when the routed model genuinely holds a 1M-token window.
+export function claudeCodeModelId(model) {
+  const id = claudeModelId(model?.slug);
+  return (claudeContextWindow(model) ?? 0) >= ONE_MILLION_CONTEXT ? `${id}${CLAUDE_1M_MARKER}` : id;
+}
+
 export function claudeRoutedSlug(model) {
-  const value = String(model || "");
+  const value = String(model || "").replace(MARKER_PATTERN, "");
   return value.startsWith(CLAUDE_MODEL_PREFIX)
     ? value.slice(CLAUDE_MODEL_PREFIX.length)
     : value;

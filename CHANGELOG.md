@@ -1,6 +1,21 @@
 # Changelog
 
 ## Unreleased
+
+### Fixed
+
+- Claude Code no longer auto-compacts on every turn with pooled Claude models.
+  1M-window models are published with Claude Code's `[1m]` suffix, and model
+  discovery (list and retrieve) reports each model's `max_input_tokens` and
+  `max_tokens`; the launcher upgrades a previously saved routed id to the new
+  spelling.
+- Pooled Claude models no longer fail with "This model does not support
+  assistant message prefill": the forwarder drops trailing thinking-only
+  assistant turns and closes any other trailing assistant turn with a short
+  user turn before the request reaches Anthropic.
+- Requests to the Claude pool now carry prompt-cache breakpoints (tools,
+  system, previous and newest turn) when the translated request has none, so
+  repeated context is read from cache instead of billed as fresh input.
 - **Non-selected ChatGPT accounts keep their logins fresh on their own.** Only
   the selected account's login has an owner that refreshes it (the running
   Codex). The background probe deliberately refuses to spend a refresh token,

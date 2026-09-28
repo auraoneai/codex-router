@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { assertCallerSecret, claudeBaseUrl } from "./caller-auth.mjs";
-import { CLAUDE_MODEL_PREFIX } from "./claude-model-id.mjs";
+import { CLAUDE_MODEL_PREFIX, claudeRoutedSlug } from "./claude-model-id.mjs";
 import {
   CALLER_SECRET_PATH,
   CLAUDE_CATALOG_PATH,
@@ -37,6 +37,17 @@ function explicitModelValue(args) {
 function routedModel(value) {
   const model = String(value ?? "");
   return model.startsWith(CLAUDE_MODEL_PREFIX) ? model : "";
+}
+
+// A routed id saved before the catalog carried Claude Code's `[1m]` marker
+// still names the same model; hand Claude Code the catalog's current spelling
+// so it sizes the session at the model's real window.
+function catalogSpelling(value, catalog) {
+  const model = routedModel(value);
+  if (!model) return "";
+  const slug = claudeRoutedSlug(model);
+  const entry = catalog?.models?.find?.((candidate) => candidate?.slug === slug);
+  return typeof entry?.id === "string" && entry.id.startsWith(CLAUDE_MODEL_PREFIX) ? entry.id : model;
 }
 
 // Claude Code resolves agent and background models through these names rather
@@ -108,10 +119,14 @@ export function claudeRouterEnvironment({
   // Code resolves it: `--model`, then the saved routed model, then the catalog
   // default. A caller who already pinned a served id keeps it; every other
   // value is an unserved fallback this launcher has to replace.
-  const sessionModel = routedModel(explicitModelValue(args)) || routedModel(saved) || routedDefault;
+  const sessionModel = catalogSpelling(explicitModelValue(args), catalog) ||
+    catalogSpelling(saved, catalog) || routedDefault;
+  if (!explicitModel(args) && saved.startsWith(CLAUDE_MODEL_PREFIX) && sessionModel !== saved) {
+    env.ANTHROPIC_MODEL = sessionModel;
+  }
   if (sessionModel) {
     for (const name of AGENT_MODEL_VARIABLES) {
-      if (!routedModel(env[name])) env[name] = sessionModel;
+      env[name] = routedModel(env[name]) ? catalogSpelling(env[name], catalog) : sessionModel;
     }
   }
 
@@ -123,7 +138,7 @@ export function claudeRouterEnvironment({
   }
 
   const opus = catalog?.models?.find?.((m) => m.slug === "anthropic-api/claude-opus-5.5" || m.slug?.endsWith("claude-opus-5.5"));
-  if (opus && env.ANTHROPIC_DEFAULT_OPUS_MODEL === opus.id && !env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME) {
+  if (opus && claudeRoutedSlug(env.ANTHROPIC_DEFAULT_OPUS_MODEL) === opus.slug && !env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME) {
     env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME = "Claude Opus 5.5";
     env.ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION = "Claude Opus 5.5 (Claude account pool)";
   }

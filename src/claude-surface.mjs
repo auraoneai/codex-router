@@ -7,7 +7,7 @@ import {
   readRequestBody,
   writeJson,
 } from "./http-utils.mjs";
-import { claudeModelId, claudeRoutedSlug } from "./claude-model-id.mjs";
+import { claudeCodeModelId, claudeContextWindow, claudeRoutedSlug } from "./claude-model-id.mjs";
 import { claudePoolExhaustionReport } from "./claude-account-rotation.mjs";
 
 export const CLAUDE_ROUTE_PREFIX = "/anthropic";
@@ -28,6 +28,27 @@ function publishedModels(routedModels) {
     slug: String(model.slug),
     displayName: model.displayName || model.display_name || String(model.slug),
   }));
+}
+
+function positiveLimit(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number > 0 ? number : undefined;
+}
+
+// Discovery entries carry the model's real limits in the Models API shape so
+// Claude Code auto-compacts at the routed model's window rather than at its
+// unknown-model default.
+function discoveredModel(model) {
+  const maxInput = claudeContextWindow(model);
+  const maxOutput = positiveLimit(model.maxOutputTokens ?? model.max_output_tokens);
+  return {
+    id: claudeCodeModelId(model),
+    display_name: `${model.displayName} (Codex Router)`,
+    type: "model",
+    created_at: "1970-01-01T00:00:00Z",
+    ...(maxInput ? { max_input_tokens: maxInput } : {}),
+    ...(maxOutput ? { max_tokens: maxOutput } : {}),
+  };
 }
 
 function assertPublishedModel(requested, routedModels) {
@@ -491,16 +512,23 @@ export async function handleClaudeRequest(request, response, route, { responsesU
     `${CLAUDE_ROUTE_PREFIX}/v1/models`,
   ].includes(route)) {
     writeJson(response, 200, {
-      data: publishedModels(routedModels).map((model) => ({
-        id: claudeModelId(model.slug),
-        display_name: `${model.displayName} (Codex Router)`,
-        type: "model",
-        created_at: "1970-01-01T00:00:00Z",
-      })),
+      data: publishedModels(routedModels).map(discoveredModel),
       has_more: false,
       first_id: null,
       last_id: null,
     });
+    return true;
+  }
+  // Claude Code sizes its context window from `models.retrieve`, so the
+  // per-model lookup must answer with the same limits the list reports.
+  const retrievePrefix = `${CLAUDE_ROUTE_PREFIX}/v1/models/`;
+  if (request.method === "GET" && route.startsWith(retrievePrefix)) {
+    let requested;
+    try { requested = decodeURIComponent(route.slice(retrievePrefix.length)); } catch { requested = ""; }
+    const slug = claudeRoutedSlug(requested);
+    const model = publishedModels(routedModels).find((candidate) => candidate.slug === slug);
+    if (!model) writeClaudeError(response, 404, "not_found_error", `${requested || "The requested model"} is not published to Claude Code.`);
+    else writeJson(response, 200, discoveredModel(model));
     return true;
   }
   const countTokens = request.method === "POST" && route === `${CLAUDE_ROUTE_PREFIX}/v1/messages/count_tokens`;

@@ -9,7 +9,7 @@ import {
   isManagedClaudeBaseUrl,
   redactCallerUrl,
 } from "./caller-auth.mjs";
-import { claudeModelId } from "./claude-model-id.mjs";
+import { claudeCodeModelId } from "./claude-model-id.mjs";
 import {
   CALLER_SECRET_PATH,
   CLAUDE_CATALOG_PATH,
@@ -81,10 +81,10 @@ export function publishClaudeIntegration({ routedModels = routedClientModels, pr
   const baseUrl = claudeBaseUrl(PORTS.router, secret());
   const published = models.map((model) => ({
     slug: String(model.slug),
-    id: claudeModelId(model.slug),
+    id: claudeCodeModelId(model),
     displayName: model.displayName || model.display_name || String(model.slug),
   }));
-  const defaultModel = claudeModelId(claudeDefaultModel(models).slug);
+  const defaultModel = claudeCodeModelId(claudeDefaultModel(models));
   writePrivateJson(CLAUDE_CATALOG_PATH, {
     updatedAt: new Date().toISOString(),
     baseUrl,
