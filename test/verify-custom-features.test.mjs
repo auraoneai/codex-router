@@ -37,3 +37,10 @@ test("probe verifier rejects cache reader disconnected from rotation", () => {
   assert.notEqual(mutated, router);
   assert.equal(nativeUsageProbeWiring(mutated).ok, false);
 });
+
+test("probe verifier rejects the pool refresher being awaited on a request path", () => {
+  const mutated = router.replace("function nativeHeaders(request) {", `async function nativeHeaders(request) {
+    await refreshAndProbeChatGPTAccounts();`);
+  assert.notEqual(mutated, router);
+  assert.equal(nativeUsageProbeWiring(mutated).ok, false);
+});

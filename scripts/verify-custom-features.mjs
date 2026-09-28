@@ -52,7 +52,17 @@ export function nativeUsageProbeWiring(router) {
   // The emergency refresh is detached, debounced, and returns no promise for a
   // request to await. An added return/await or synchronous probe fails closed.
   const emergencyProbe = /export function triggerEmergencyDepletionProbe\(\) \{\s*const now = Date\.now\(\);\s*if \(now - lastEmergencyProbeAt < 30_000\) return;(?:\s|\/\/[^\n]*)*lastEmergencyProbeAt = now;\s*import\("\.\/chatgpt-usage-probe\.mjs"\)\.then\(\(\{ probeChatGPTAccountUsage \}\) => \{\s*probeChatGPTAccountUsage\(\)\.catch\(\(\) => \{\}\);\s*\}\);\s*\}/g;
+  // The pool refresher runs the probe after refreshing expiring saved logins.
+  // It is acceptable only while timers are its sole callers, so a request path
+  // can never await it.
+  const refresherProbe = /async function refreshAndProbeChatGPTAccounts\(\) \{[\s\S]*?const \{ probeChatGPTAccountUsage \} = await import\("\.\/chatgpt-usage-probe\.mjs"\);\s*await probeChatGPTAccountUsage\(\);\s*\} catch \{(?:\s|\/\/[^\n]*)*\}\s*\}/g;
+  const refresherCallers = router.match(/refreshAndProbeChatGPTAccounts/g)?.length ?? 0;
+  const refresherTimers = router.match(/set(?:Timeout|Interval)\(\s*refreshAndProbeChatGPTAccounts,/g)?.length ?? 0;
+  if (refresherCallers > 0 && refresherCallers !== refresherTimers + 1) {
+    return { ok: false, detail: "the pool refresher is called outside its background timers" };
+  }
   const foreground = router.replace(timerProbe, "BACKGROUND_TIMER(")
+    .replace(refresherProbe, "BACKGROUND_REFRESHER")
     .replace(emergencyProbe, "BACKGROUND_EMERGENCY")
     .replace('import { nextKnownResetAt } from "./chatgpt-usage-probe.mjs";', "");
   if (/probeChatGPTAccountUsage|chatgpt-usage-probe\.mjs/.test(foreground)) {
