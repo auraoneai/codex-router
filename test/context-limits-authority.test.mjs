@@ -53,6 +53,13 @@ const AUTHORITY = [
     maxOutputTokens: 128_000,
     maxAutoCompact: 650_000,
   },
+  {
+    // https://models.dev/api.json -> opencode-go.models["mimo-v2.6-flash"].limit
+    name: "MiMo-V2.6-Flash (opencode Go)",
+    matches: (m) => m.provider === "opencode-go" && m.upstreamModel === "mimo-v2.6-flash",
+    contextWindow: 1_048_576,
+    maxOutputTokens: 131_072,
+  },
 ];
 
 test("no registry model declares more context or output than its documented limit", () => {

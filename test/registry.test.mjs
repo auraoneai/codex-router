@@ -186,6 +186,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "opencode-go/longcat-2.0",
       "opencode-go/mimo-v2.5-pro",
       "opencode-go/mimo-v2.5",
+      "opencode-go/mimo-v2.6-flash",
       "opencode-go/qwen3.5-plus",
       "opencode-go-messages/minimax-m2.5",
       "opencode-go-messages/minimax-m2.7",
@@ -952,6 +953,7 @@ test("Union Alpha ships on OpenRouter with sourced stealth metadata", () => {
 test("OpenCode Go routes retain upstream windows instead of the generic fallback", () => {
   const expected = new Map([
     ["opencode-go/mimo-v2.5", [1_000_000, 850_000, "opencode-go-mimo-v2-5-v2"]],
+    ["opencode-go/mimo-v2.6-flash", [1_048_576, 900_000, "opencode-go-mimo-v2-6-flash-v1"]],
     ["opencode-go/mimo-v2.5-pro", [1_000_000, 850_000, "opencode-go-mimo-v2-5-pro-v2"]],
     ["opencode-go/hy3", [262_144, 223_000, "opencode-go-hy3-v2"]],
     ["opencode-go-messages/minimax-m2.5", [204_800, 174_000, "opencode-go-messages-minimax-m2-5-v2"]],

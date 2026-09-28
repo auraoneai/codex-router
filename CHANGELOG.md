@@ -55,6 +55,10 @@
 - A registry test now checks every Claude, Kiro Prism, Cloudflare GLM and
   Gemini route against documented limits, so an upstream `/v1/models` figure
   that overstates a window can no longer slip into the catalog.
+- Added `opencode-go/mimo-v2.6-flash` (1,048,576-token context, 131,072-token
+  output, image input) through the opencode Go subscription. OpenCode's Zen
+  free tier now refuses callers outside OpenCode itself, so the free
+  `mimo-v2.6-flash-free` route cannot be served through the router.
 - Requests to the Claude pool now carry prompt-cache breakpoints (tools,
   system, previous and newest turn) when the translated request has none, so
   repeated context is read from cache instead of billed as fresh input.
