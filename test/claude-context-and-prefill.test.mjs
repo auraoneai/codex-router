@@ -162,3 +162,10 @@ test("Codex defers MCP tools on every route the router can relay tool_search for
   assert.equal(routedModelToolSearchAvailable({ slug: "a/b", supportsToolSearch: true }, { provider: { protocol: "openai-responses" } }), true);
   assert.equal(routedModelToolSearchAvailable({ slug: "a/b", supportsToolSearch: false }, { provider: { protocol: "anthropic" } }), false);
 });
+
+test("the tools cache marker skips deferred tools", () => {
+  const payload = { tools: [{ name: "a" }, { name: "b", defer_loading: true }], messages: [{ role: "user", content: "x" }] };
+  applyPromptCacheBreakpoints(payload);
+  assert.deepEqual(payload.tools[0].cache_control, { type: "ephemeral" });
+  assert.equal(payload.tools[1].cache_control, undefined);
+});

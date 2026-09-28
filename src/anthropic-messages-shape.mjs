@@ -43,10 +43,15 @@ export function applyPromptCacheBreakpoints(payload) {
   const messages = Array.isArray(payload.messages) ? payload.messages : [];
   if (hasCacheControl(payload.tools) || hasCacheControl(payload.system) || hasCacheControl(messages)) return 0;
   let placed = 0;
-  if (Array.isArray(payload.tools) && payload.tools.length > 0) {
-    const last = payload.tools.length - 1;
-    payload.tools[last] = { ...payload.tools[last], cache_control: EPHEMERAL_CACHE };
-    placed += 1;
+  // Anthropic refuses cache_control on a deferred tool, so the tools marker
+  // goes on the last tool that is loaded up front.
+  if (Array.isArray(payload.tools)) {
+    for (let index = payload.tools.length - 1; index >= 0; index -= 1) {
+      if (payload.tools[index]?.defer_loading === true) continue;
+      payload.tools[index] = { ...payload.tools[index], cache_control: EPHEMERAL_CACHE };
+      placed += 1;
+      break;
+    }
   }
   if (typeof payload.system === "string" && payload.system) {
     payload.system = [{ type: "text", text: payload.system, cache_control: EPHEMERAL_CACHE }];

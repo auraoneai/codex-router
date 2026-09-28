@@ -1453,6 +1453,16 @@ function validToolSearchHistoryArguments(value) {
   return limit === undefined || (Number.isInteger(limit) && limit > 0);
 }
 
+// A tool that a search returned is loaded: Codex keeps OpenAI's
+// `defer_loading` flag on it, but a relayed provider must see it as an
+// ordinary callable tool. Anthropic hides a deferred tool the conversation
+// never referenced natively, and rejects cache_control beside the flag.
+function loadedTool(tool) {
+  if (!tool || typeof tool !== "object" || !("defer_loading" in tool)) return tool;
+  const { defer_loading: _deferLoading, ...rest } = tool;
+  return rest;
+}
+
 function discoveredProviderTools(toolSpecs, namespaces) {
   if (!Array.isArray(toolSpecs)) return [];
   const discovered = [];
@@ -1461,11 +1471,11 @@ function discoveredProviderTools(toolSpecs, namespaces) {
       for (const fn of tool.tools) {
         if (fn?.type !== "function" || !fn.name) continue;
         discovered.push({
-          tool: flattenNamespaceChild(
+          tool: loadedTool(flattenNamespaceChild(
             tool.name,
             fn,
             providerNameForNative(namespaces, tool.name, fn.name),
-          ),
+          )),
           native: { namespace: tool.name, name: fn.name },
           nativeName: fn.name,
           identity: nativeToolKey(tool.name, fn.name),
@@ -1481,7 +1491,7 @@ function discoveredProviderTools(toolSpecs, namespaces) {
       providerTool = withProviderFunctionName(providerTool, providerName);
     }
     discovered.push({
-      tool: providerTool,
+      tool: loadedTool(providerTool),
       nativeName,
       identity: nativeToolKey(undefined, nativeName),
     });
