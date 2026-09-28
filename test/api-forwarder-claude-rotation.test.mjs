@@ -15,6 +15,18 @@ import {
   CLAUDE_CODE_ATTRIBUTION_HEADER_TEXT,
 } from "../src/claude-attribution.mjs";
 
+// Windows keeps the state directory locked until the forwarder child has
+// exited, so wait for it and retry the removal rather than racing the kill.
+async function stopForwarder(child, upstream, testRoot) {
+  const exited = child.exitCode !== null || child.signalCode !== null
+    ? Promise.resolve()
+    : new Promise((resolve) => child.once("exit", resolve));
+  child.kill("SIGKILL");
+  await exited;
+  await new Promise((resolve) => upstream.close(resolve));
+  rmSync(testRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}
+
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const internalKey = "test-claude-pool-forwarder-internal-key-12345678";
 
@@ -157,9 +169,7 @@ test("Header shape per auth kind: OAuth pool vs legacy API key", async () => {
     assert.equal(poolHdr["anthropic-version"], "2023-06-01");
     assert.equal(poolHdr["x-api-key"], undefined, "x-api-key must be ABSENT on pool OAuth requests");
   } finally {
-    child.kill("SIGKILL");
-    await new Promise((resolve) => upstream.close(resolve));
-    rmSync(testRoot, { recursive: true, force: true });
+    await stopForwarder(child, upstream, testRoot);
   }
 });
 
@@ -232,9 +242,7 @@ test("Header shape for legacy API key when no pool is configured", async () => {
     assert.equal(legacyHdr.authorization, undefined, "Authorization header must be ABSENT on API key requests");
     assert.equal(legacyHdr["anthropic-beta"], undefined, "anthropic-beta must be ABSENT on API key requests");
   } finally {
-    child.kill("SIGKILL");
-    await new Promise((resolve) => upstream.close(resolve));
-    rmSync(testRoot, { recursive: true, force: true });
+    await stopForwarder(child, upstream, testRoot);
   }
 });
 
@@ -354,9 +362,7 @@ test("Rotation on quota-429 rotates to sibling and persists quota telemetry", as
     assert.ok(accountUsage, "Successful account quota must be stored");
     assert.equal(accountUsage.fiveHour.usedPercent, 15);
   } finally {
-    child.kill("SIGKILL");
-    await new Promise((resolve) => upstream.close(resolve));
-    rmSync(testRoot, { recursive: true, force: true });
+    await stopForwarder(child, upstream, testRoot);
   }
 });
 
@@ -450,9 +456,7 @@ test("No rotation on per-minute 429: absorbs inline and retries same account", a
       "Bearer token_account_1",
     ]);
   } finally {
-    child.kill("SIGKILL");
-    await new Promise((resolve) => upstream.close(resolve));
-    rmSync(testRoot, { recursive: true, force: true });
+    await stopForwarder(child, upstream, testRoot);
   }
 });
 
@@ -573,9 +577,7 @@ test("401 invalidation marks account auth-invalid and rotates to next candidate"
       "Account 1 must be skipped as auth-invalid on subsequent requests",
     );
   } finally {
-    child.kill("SIGKILL");
-    await new Promise((resolve) => upstream.close(resolve));
-    rmSync(testRoot, { recursive: true, force: true });
+    await stopForwarder(child, upstream, testRoot);
   }
 });
 
@@ -647,9 +649,7 @@ test("Fail-closed: pool configured + all credentials unreadable fails with 503 a
     assert.equal(body.error.type, "claude_account_pool_unavailable");
     assert.equal(upstreamCalled, false, "Upstream must never be called with the legacy key");
   } finally {
-    child.kill("SIGKILL");
-    await new Promise((resolve) => upstream.close(resolve));
-    rmSync(testRoot, { recursive: true, force: true });
+    await stopForwarder(child, upstream, testRoot);
   }
 });
 
@@ -737,14 +737,7 @@ async function startRotationHarness(t, { accounts, onMessages, onToken }) {
   });
   child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
   t.after(async () => {
-    // Windows keeps the state directory locked until the child has exited.
-    const exited = child.exitCode !== null || child.signalCode !== null
-      ? Promise.resolve()
-      : new Promise((resolve) => child.once("exit", resolve));
-    child.kill("SIGKILL");
-    await exited;
-    await new Promise((resolve) => upstream.close(resolve));
-    rmSync(testRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    await stopForwarder(child, upstream, testRoot);
   });
   await waitForHealth(`http://127.0.0.1:${forwarderPort}`, {
     Authorization: `Bearer ${internalKey}`,
