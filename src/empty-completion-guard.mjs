@@ -246,7 +246,9 @@ function partHasContent(part) {
 
 function itemHasContent(item) {
   if (!item || typeof item !== "object") return false;
-  if (item.type === "function_call" || item.type === "custom_tool_call") return true;
+  // A relayed tool search is a real action: Codex executes it client-side and
+  // the model continues from the tools it loads.
+  if (["function_call", "custom_tool_call", "tool_search_call"].includes(item.type)) return true;
   if (item.type && item.type !== "message") return false;
   if (Array.isArray(item.content)) return item.content.some(partHasContent);
   return partHasContent(item);

@@ -918,3 +918,11 @@ test("a terminal event whose data fails to parse is indeterminate, not empty", a
   assert.equal(guard.hasContent(), false);
   assert.equal(Buffer.concat(chunks).toString("utf8"), input);
 });
+
+test("a turn whose only action is a relayed tool search is not empty", async () => {
+  const body =
+    'event: response.output_item.done\ndata: {"type":"response.output_item.done","output_index":0,"item":{"type":"tool_search_call","id":"ts_1","call_id":"call_1","execution":"client","arguments":{"query":"azure"}}}\n\n' +
+    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[{"type":"tool_search_call","id":"ts_1","call_id":"call_1","execution":"client"}]}}\n\n';
+  const { empty } = await runGuard(body);
+  assert.equal(empty, false);
+});
