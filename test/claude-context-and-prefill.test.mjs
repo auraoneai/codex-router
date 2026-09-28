@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import test from "node:test";
 
-import { applyPromptCacheBreakpoints, endMessagesOnUserTurn } from "../src/anthropic-messages-shape.mjs";
+import { applyPromptCacheBreakpoints, endMessagesOnUserTurn, settleToolUseTurns } from "../src/anthropic-messages-shape.mjs";
 import { claudeRouterEnvironment } from "../src/claude-code-launcher.mjs";
 import { claudeCodeModelId, claudeRoutedSlug } from "../src/claude-model-id.mjs";
 import { claudeMessagesToResponses, handleClaudeRequest } from "../src/claude-surface.mjs";
@@ -168,4 +168,20 @@ test("the tools cache marker skips deferred tools", () => {
   applyPromptCacheBreakpoints(payload);
   assert.deepEqual(payload.tools[0].cache_control, { type: "ephemeral" });
   assert.equal(payload.tools[1].cache_control, undefined);
+});
+
+test("assistant turns end on their tool calls", () => {
+  const call = (id) => ({ type: "tool_use", id, name: "t", input: {} });
+  const payload = {
+    messages: [
+      { role: "user", content: "go" },
+      { role: "assistant", content: [{ type: "thinking", thinking: "", signature: "s" }, { type: "text", text: "Searching." }, call("a"), call("b"), { type: "text", text: "Searching." }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "a", content: "1" }, { type: "tool_result", tool_use_id: "b", content: "2" }] },
+      { role: "assistant", content: [call("c"), { type: "text", text: "Note after." }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "c", content: "3" }] },
+    ],
+  };
+  assert.equal(settleToolUseTurns(payload), 2);
+  assert.deepEqual(payload.messages[1].content.map((b) => b.type), ["thinking", "text", "tool_use", "tool_use"]);
+  assert.deepEqual(payload.messages[3].content.map((b) => b.text ?? b.type), ["Note after.", "tool_use"]);
 });

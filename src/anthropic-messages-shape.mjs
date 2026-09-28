@@ -112,3 +112,36 @@ export function endMessagesOnUserTurn(payload) {
   }
   return changed;
 }
+
+// An assistant turn must end with its tool calls: Anthropic reads text placed
+// after the last tool_use as a prefilled continuation and rejects the request
+// ("does not support assistant message prefill") even though a tool_result
+// turn follows. Translation produces that shape when a commentary message is
+// replayed around its calls -- often as an exact copy of the turn's opening
+// text. Trailing text that repeats earlier text is dropped; any other text is
+// moved in front of the first tool call so nothing the model said is lost.
+export function settleToolUseTurns(payload) {
+  const messages = payload?.messages;
+  if (!Array.isArray(messages)) return 0;
+  let settled = 0;
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
+    const blocks = message.content;
+    let lastToolUse = -1;
+    for (let at = blocks.length - 1; at >= 0; at -= 1) {
+      if (blocks[at]?.type === "tool_use") { lastToolUse = at; break; }
+    }
+    if (lastToolUse < 0 || lastToolUse === blocks.length - 1) continue;
+    const trailing = blocks.slice(lastToolUse + 1);
+    if (!trailing.every((block) => block?.type === "text")) continue;
+    const head = blocks.slice(0, lastToolUse + 1);
+    const seen = new Set(head.filter((block) => block?.type === "text").map((block) => block.text));
+    const moved = trailing.filter((block) => block.text && !seen.has(block.text));
+    const firstToolUse = head.findIndex((block) => block?.type === "tool_use");
+    messages[index] = { ...message, content: [...head.slice(0, firstToolUse), ...moved, ...head.slice(firstToolUse)] };
+    settled += 1;
+  }
+  return settled;
+}
+

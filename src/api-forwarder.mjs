@@ -1,4 +1,4 @@
-import { applyPromptCacheBreakpoints, endMessagesOnUserTurn } from "./anthropic-messages-shape.mjs";
+import { applyPromptCacheBreakpoints, endMessagesOnUserTurn, settleToolUseTurns } from "./anthropic-messages-shape.mjs";
 import http from "node:http";
 import { usesNativeChatReasoning } from "./chat-reasoning.mjs";
 import {
@@ -1505,6 +1505,7 @@ function normalizeBody(buffer, contentType, route) {
     : undefined;
   if (provider.protocol === "anthropic" || provider.id === "anthropic-api") {
     injectClaudeAttributionSystemPrompt(payload);
+    settleToolUseTurns(payload);
     endMessagesOnUserTurn(payload);
     applyPromptCacheBreakpoints(payload);
   }

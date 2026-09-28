@@ -27,6 +27,13 @@
   instead of 1,048,576; Claude, Kiro Prism GPT-5.6 and Gemini 3.8 Flash
   entries declare their output caps; Kiro Prism Opus/Sonnet compact at
   650,000 and GPT-5.6 at 220,000, matching Prism's own budgets.
+- The Claude pool no longer rejects a tool round with "does not support
+  assistant message prefill" when an assistant turn carried text after its
+  tool calls (often a replayed copy of its opening line): duplicate trailing
+  text is dropped and other trailing text moves ahead of the calls.
+- A turn whose only action is a relayed tool search is no longer treated as
+  an empty completion, and tools a search returned reach the provider as
+  loaded rather than still marked `defer_loading`.
 - Requests to the Claude pool now carry prompt-cache breakpoints (tools,
   system, previous and newest turn) when the translated request has none, so
   repeated context is read from cache instead of billed as fresh input.
