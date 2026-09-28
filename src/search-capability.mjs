@@ -129,3 +129,19 @@ export function stripUnsupportedHostedSearch(payload, { model } = {}) {
   }
   return next;
 }
+
+// Codex reads the catalog's `supports_search_tool` as the switch for its
+// `tool_search` control: when set, MCP tools stay deferred until the model
+// searches for them; when clear, every connected server's full schema rides
+// every turn. It is not the web-search gate (that is `web_search_tool_type`
+// plus the provider's capabilities). Any route on the Chat Completions wire
+// gets `tool_search` through the router's function relay, so it can defer. A
+// Responses-native upstream receives the native control untouched and
+// qualifies only when its entry declares `supportsToolSearch`, or when its
+// search contract already advertised the flag.
+export function routedModelToolSearchAvailable(model, { provider, ...options } = {}) {
+  if (model?.supportsToolSearch === false) return false;
+  if (model?.supportsToolSearch === true) return true;
+  if (provider && provider.protocol !== "openai-responses") return true;
+  return routedModelSearchAvailable(model, options);
+}

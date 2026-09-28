@@ -87,10 +87,11 @@ export function claudeRouterEnvironment({
     // that translates protocols must opt out so provider prompt caching and
     // the router's request transforms see stable instructions.
     CLAUDE_CODE_ATTRIBUTION_HEADER: "0",
-    // Deferred tool loading emits Anthropic-only tool_reference blocks. Keep
-    // the ordinary concrete schemas until the canonical Responses path has a
-    // proven representation for that beta feature.
-    ENABLE_TOOL_SEARCH: "false",
+    // Load MCP tools on demand. A gateway base URL turns Claude Code's tool
+    // search off by default, which ships every connected server's schema on
+    // every turn (hundreds of thousands of tokens with a few large servers).
+    // The Messages surface resolves the deferred tools itself.
+    ENABLE_TOOL_SEARCH: "true",
   };
   delete env.CLAUDE_CODE_USE_BEDROCK;
   delete env.CLAUDE_CODE_USE_VERTEX;

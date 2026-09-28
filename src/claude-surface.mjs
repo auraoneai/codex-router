@@ -115,6 +115,12 @@ function messageContent(blocks) {
   return content;
 }
 
+function referencedToolName(part) {
+  if (part?.type !== "tool_reference") return undefined;
+  const name = part.tool_name ?? part.name;
+  return typeof name === "string" && name ? name : undefined;
+}
+
 function toolResultOutput(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return JSON.stringify(content ?? "");
@@ -122,8 +128,32 @@ function toolResultOutput(content) {
     if (typeof part === "string") return part;
     if (part?.type === "text") return String(part.text || "");
     if (part?.type === "image") return "[Image returned by tool]";
+    const loaded = referencedToolName(part);
+    if (loaded) return `Tool ${loaded} is now loaded and can be called.`;
     return JSON.stringify(part);
   }).join("\n");
+}
+
+// Claude Code's tool search sends MCP tools with `defer_loading: true` and
+// loads one by answering its ToolSearch call with `tool_reference` blocks.
+// Anthropic's API performs that expansion server-side; the canonical Responses
+// path has no such concept, so the surface does it here: a deferred tool is
+// offered to the model only once some tool_result in the conversation has
+// referenced it. Every routed model, Claude or not, then carries just the
+// tools the session actually uses instead of every connected server's schema.
+function loadedToolNames(messages) {
+  const loaded = new Set();
+  for (const message of Array.isArray(messages) ? messages : []) {
+    if (!Array.isArray(message?.content)) continue;
+    for (const block of message.content) {
+      if (block?.type !== "tool_result" || !Array.isArray(block.content)) continue;
+      for (const part of block.content) {
+        const name = referencedToolName(part);
+        if (name) loaded.add(name);
+      }
+    }
+  }
+  return loaded;
 }
 
 function appendMessageInput(input, role, content) {
@@ -171,10 +201,11 @@ function anthropicMessagesInput(messages) {
   return input;
 }
 
-function responsesTools(tools) {
+function responsesTools(tools, loaded = new Set()) {
   if (!Array.isArray(tools)) return undefined;
   const converted = tools.flatMap((tool) => {
     if (!tool?.name) return [];
+    if (tool.defer_loading === true && !loaded.has(String(tool.name))) return [];
     return [{
       type: "function",
       name: String(tool.name),
@@ -226,7 +257,7 @@ export function claudeMessagesToResponses(payload) {
       type: "invalid_request_error",
     });
   }
-  const tools = responsesTools(payload.tools);
+  const tools = responsesTools(payload.tools, loadedToolNames(payload.messages));
   const reasoning = requestedReasoning(payload);
   const instructions = textBlocks(payload.system);
   return {

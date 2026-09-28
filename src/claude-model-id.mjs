@@ -22,11 +22,22 @@ export function claudeContextWindow(model) {
   return Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
+const CLAUDE_FAMILY = /(^|[/._-])(claude|opus|sonnet|fable|haiku|mythos)([/._-]|$)/i;
+
+function isClaudeFamily(model) {
+  return [model?.slug, model?.upstreamModel].some((value) => CLAUDE_FAMILY.test(String(value || "")));
+}
+
 // The id published to Claude Code itself: the transport id, plus the `[1m]`
-// marker when the routed model genuinely holds a 1M-token window.
+// marker for Claude-family models whose route holds a 1M-token window. Other
+// families keep Claude Code's default sizing: a 1M figure a reseller declares
+// for them is not Anthropic's guarantee, and overstating it would trade an
+// early compaction for a hard "prompt too long" failure.
 export function claudeCodeModelId(model) {
   const id = claudeModelId(model?.slug);
-  return (claudeContextWindow(model) ?? 0) >= ONE_MILLION_CONTEXT ? `${id}${CLAUDE_1M_MARKER}` : id;
+  return isClaudeFamily(model) && (claudeContextWindow(model) ?? 0) >= ONE_MILLION_CONTEXT
+    ? `${id}${CLAUDE_1M_MARKER}`
+    : id;
 }
 
 export function claudeRoutedSlug(model) {

@@ -5,17 +5,25 @@ import test from "node:test";
 import { applyPromptCacheBreakpoints, endMessagesOnUserTurn } from "../src/anthropic-messages-shape.mjs";
 import { claudeRouterEnvironment } from "../src/claude-code-launcher.mjs";
 import { claudeCodeModelId, claudeRoutedSlug } from "../src/claude-model-id.mjs";
-import { handleClaudeRequest } from "../src/claude-surface.mjs";
+import { claudeMessagesToResponses, handleClaudeRequest } from "../src/claude-surface.mjs";
 
 const OPUS = "codex_router/anthropic/anthropic-api/claude-opus-5.5";
 
-test("1M-window models carry Claude Code's [1m] marker and smaller ones do not", () => {
+test("only 1M-window Claude-family models carry Claude Code's [1m] marker", () => {
   assert.equal(
     claudeCodeModelId({ slug: "anthropic-api/claude-opus-5.5", contextWindow: 1_048_576 }),
     `${OPUS}[1m]`,
   );
   assert.equal(
-    claudeCodeModelId({ slug: "cloudflare-workers-ai/glm-5.3", contextWindow: 131_072 }),
+    claudeCodeModelId({ slug: "kiro-prism/claude-sonnet-5", contextWindow: 1_000_000 }),
+    "codex_router/anthropic/kiro-prism/claude-sonnet-5[1m]",
+  );
+  assert.equal(
+    claudeCodeModelId({ slug: "anthropic-api/claude-haiku-4.5", contextWindow: 200_000 }),
+    "codex_router/anthropic/anthropic-api/claude-haiku-4.5",
+  );
+  assert.equal(
+    claudeCodeModelId({ slug: "cloudflare-workers-ai/glm-5.3", contextWindow: 1_310_720 }),
     "codex_router/anthropic/cloudflare-workers-ai/glm-5.3",
   );
   assert.equal(claudeCodeModelId({ slug: "x/y" }), "codex_router/anthropic/x/y");
@@ -113,4 +121,44 @@ test("prompt cache breakpoints cover tools, system, and the newest turns", () =>
   const own = { system: [{ type: "text", text: "s", cache_control: { type: "ephemeral" } }], messages: [{ role: "user", content: "x" }] };
   assert.equal(applyPromptCacheBreakpoints(own), 0);
   assert.equal(own.messages[0].content, "x");
+});
+
+test("deferred MCP tools reach the model only after tool search loads them", () => {
+  const tools = [
+    { name: "Read", input_schema: { type: "object" } },
+    { name: "ToolSearch", input_schema: { type: "object" } },
+    { name: "mcp__azure__storage", defer_loading: true, input_schema: { type: "object" } },
+    { name: "mcp__aws__run", defer_loading: true, input_schema: { type: "object" } },
+  ];
+  const first = claudeMessagesToResponses({ model: OPUS, tools, messages: [{ role: "user", content: "hi" }] });
+  assert.deepEqual(first.tools.map((tool) => tool.name), ["Read", "ToolSearch"]);
+
+  const loaded = claudeMessagesToResponses({
+    model: OPUS,
+    tools,
+    messages: [
+      { role: "user", content: "use storage" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "ToolSearch", input: { query: "storage" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "tool_reference", tool_name: "mcp__azure__storage" }] }] },
+    ],
+  });
+  assert.deepEqual(loaded.tools.map((tool) => tool.name), ["Read", "ToolSearch", "mcp__azure__storage"]);
+  assert.equal(loaded.tools[2].defer_loading, undefined);
+  const output = loaded.input.find((item) => item.type === "function_call_output").output;
+  assert.match(output, /mcp__azure__storage is now loaded/);
+});
+
+test("the launcher turns Claude Code's on-demand tool loading on", () => {
+  const env = claudeRouterEnvironment({ environment: { ENABLE_TOOL_SEARCH: "false" }, secret: "s".repeat(64), args: [], catalog: {}, settings: {} });
+  assert.equal(env.ENABLE_TOOL_SEARCH, "true");
+});
+
+test("Codex defers MCP tools on every route the router can relay tool_search for", async () => {
+  const { routedModelToolSearchAvailable } = await import("../src/search-capability.mjs");
+  const none = { bindingForModel: () => undefined };
+  assert.equal(routedModelToolSearchAvailable({ slug: "a/b" }, { provider: { protocol: "anthropic" }, ...none }), true);
+  assert.equal(routedModelToolSearchAvailable({ slug: "a/b" }, { provider: { protocol: "openai-chat" }, ...none }), true);
+  assert.equal(routedModelToolSearchAvailable({ slug: "a/b" }, { provider: { protocol: "openai-responses" }, ...none }), false);
+  assert.equal(routedModelToolSearchAvailable({ slug: "a/b", supportsToolSearch: true }, { provider: { protocol: "openai-responses" } }), true);
+  assert.equal(routedModelToolSearchAvailable({ slug: "a/b", supportsToolSearch: false }, { provider: { protocol: "anthropic" } }), false);
 });

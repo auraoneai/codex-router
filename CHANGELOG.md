@@ -13,6 +13,20 @@
   assistant message prefill": the forwarder drops trailing thinking-only
   assistant turns and closes any other trailing assistant turn with a short
   user turn before the request reaches Anthropic.
+- **MCP tools load on demand instead of riding every turn.** Claude Code
+  launched through the router now runs with tool search on; the Messages
+  surface resolves Claude Code's deferred tools itself, so a connected MCP
+  server's schemas reach the model only after a ToolSearch loads them. Codex
+  catalog entries set `supports_search_tool` -- Codex's deferred-MCP switch,
+  not its web-search gate -- on every route the router relays `tool_search`
+  for (all Chat Completions-wire routes), so Codex defers MCP tools there too.
+- Claude Code's `[1m]` marker is limited to Claude-family models, so another
+  family's declared window never raises Claude Code's sizing.
+- Context limits corrected: the Claude pool models (Opus 5.5, Fable 5.1,
+  Opus 4.8) and Nous Fable entries declare Anthropic's 1,000,000-token window
+  instead of 1,048,576; Claude, Kiro Prism GPT-5.6 and Gemini 3.8 Flash
+  entries declare their output caps; Kiro Prism Opus/Sonnet compact at
+  650,000 and GPT-5.6 at 220,000, matching Prism's own budgets.
 - Requests to the Claude pool now carry prompt-cache breakpoints (tools,
   system, previous and newest turn) when the translated request has none, so
   repeated context is read from cache instead of billed as fresh input.

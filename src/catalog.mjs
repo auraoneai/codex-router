@@ -36,6 +36,7 @@ import { syncRoutedCodexAgents } from "./codex-agent-catalog.mjs";
 import {
   MODEL_BY_SLUG,
   MODEL_SLUG_ALIASES,
+  providerForModel,
 } from "./model-registry.mjs";
 import {
   applyMultiAgentCapabilities,
@@ -67,7 +68,7 @@ import {
 } from "./native-catalog-source.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { withCatalogPublicationLock } from "./catalog-publication-lock.mjs";
-import { routedModelSearchAvailable } from "./search-capability.mjs";
+import { routedModelToolSearchAvailable } from "./search-capability.mjs";
 import {
   readModelsCache,
 } from "./native-account-catalog.mjs";
@@ -714,11 +715,8 @@ export function routedModel(template, model, behaviorTemplate = template) {
     // Capability toggles come from the registry entry, never from the native
     // template: an absent flag keeps the conservative default so a routed
     // model only advertises what its slug's gateway path actually verified.
-    // Both search paths are explicit registry capabilities. Hosted search is
-    // executed by the provider backend; standalone search is executed by
-    // Codex and its result is replayed through the routed conversation. An
-    // absent declaration remains the conservative default.
-    supports_search_tool: routedModelSearchAvailable(model),
+    // Codex's deferred MCP tool loading: see routedModelToolSearchAvailable.
+    supports_search_tool: routedModelToolSearchAvailable(model, { provider: providerForModel(model) }),
     supports_image_detail_original: model.supportsImageDetailOriginal === true,
     // A routed model must never inherit a native template's capability. Codex
     // now requires the key, and `false` is both schema-valid and conservative

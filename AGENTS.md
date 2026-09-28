@@ -310,7 +310,11 @@ and keep every turn on the shared canonical Responses path.
    declares, and a large tool surface then auto-compacts on every turn. The
    suffix never reaches the wire. Discovery and `GET /v1/models/{id}` report
    `max_input_tokens`/`max_tokens` so smaller models compact at their real
-   window.
+   window. Only Claude-family models get the marker.
+5a. The launcher runs Claude Code with `ENABLE_TOOL_SEARCH=true`, and the
+   Messages surface emulates Anthropic's deferred loading: a tool marked
+   `defer_loading: true` is offered to the model only after a `tool_result`
+   in the conversation references it with a `tool_reference` block.
 5. The Anthropic Messages surface translates and re-enters `/v1/responses`; it
    never reaches a provider directly. Tool use/results, images, token counting,
    SSE pings, and the model list are part of the compatibility boundary.
