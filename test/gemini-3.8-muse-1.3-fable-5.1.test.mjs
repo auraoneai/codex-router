@@ -46,7 +46,9 @@ const MUSE_13_ROUTES = [
 const FABLE_51_ROUTES = [
   ["openrouter/claude-fable-5.1", "anthropic/claude-fable-5.1", 1_000_000, 900_000],
   ["commandcode-messages/claude-fable-5.1", "claude-fable-5-1", 1_000_000, 900_000],
-  ["nousresearch/claude-fable-5.1", "anthropic/claude-fable-5.1", 1_048_576, 943_000],
+  // Nous's catalog advertises 1,048,576, but the model underneath is
+  // Anthropic's, whose window is exactly 1,000,000.
+  ["nousresearch/claude-fable-5.1", "anthropic/claude-fable-5.1", 1_000_000, 900_000],
   ["venice/claude-fable-5.1", "claude-fable-5-1", 1_000_000, 900_000],
 ];
 

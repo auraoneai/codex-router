@@ -1498,6 +1498,23 @@ function needsConsoleGoResponsesToolCompatibility(route) {
   return providerForModel(route)?.id === "opencode-go-responses";
 }
 
+// Codex defers MCP tools behind its client-executed `tool_search` control and
+// replays discoveries as `tool_search_call`/`tool_search_output` items. Only
+// OpenAI's own endpoint executes those natively, so a Responses-native route
+// that has not declared native support gets the same tool-boundary relay as
+// Console Go: the control becomes an ordinary function, discoveries become
+// ordinary tools, and calls are restored to Codex's native shape. Without it
+// Codex would have to ship every MCP schema on every turn to that route.
+function relaysToolSearchOverResponses(route) {
+  return (
+    providerForModel(route)?.protocol === "openai-responses" &&
+    route?.supportsToolSearch !== true &&
+    !usesDeepSeekResponses(route) &&
+    // Zen Free's strict custom-tool bridge owns that route's tool boundary.
+    !needsZenFreeToolCompatibility(route)
+  );
+}
+
 function rejectsWebSearchOptions(route) {
   return ["fireworks", "opencode-go"].includes(providerForModel(route)?.id);
 }
@@ -3885,10 +3902,12 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   const chatCompletionsProvider = provider?.protocol !== "openai-responses";
   const deepSeekResponses = usesDeepSeekResponses(route);
   const consoleGoResponsesCompatibility = needsConsoleGoResponsesToolCompatibility(route);
+  const responsesToolBoundaryRelay =
+    consoleGoResponsesCompatibility || relaysToolSearchOverResponses(route);
   // Restore declarations only where the existing adapter flattens tools again.
   // Native Responses routes retain the client's original declaration shape and
   // restore only their response lookup below.
-  const clientTools = chatCompletionsProvider || deepSeekResponses || consoleGoResponsesCompatibility
+  const clientTools = chatCompletionsProvider || deepSeekResponses || responsesToolBoundaryRelay
     ? restorePreflattenedToolNamespaces(payload.tools, payload.client_metadata)
     : payload.tools;
   const compatibleInput = zenFreeCompatibleInput(
@@ -4000,7 +4019,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
     if (namespacesFlattened) {
       tools = flattened.tools;
     }
-  } else if (consoleGoResponsesCompatibility) {
+  } else if (responsesToolBoundaryRelay) {
     // Console Go exposes a Responses endpoint but rejects the native tool
     // discriminators Codex sends. Translate only its tool boundary; unlike the
     // chat-completions branch, do not inject the deferred codex_app snapshot.
@@ -4081,7 +4100,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
       facadeNameCollision = GROK_FACADE_TOOL_NAMES.some((name) => incomingFacadeNames.has(name));
     }
   }
-  if (chatCompletionsProvider || consoleGoResponsesCompatibility || deepSeekResponses) {
+  if (chatCompletionsProvider || responsesToolBoundaryRelay || deepSeekResponses) {
     let searchHistory;
     try {
       searchHistory = flattenToolSearchHistory(
@@ -4136,7 +4155,7 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
       );
     }
   }
-  if (consoleGoResponsesCompatibility || deepSeekResponses) {
+  if (responsesToolBoundaryRelay || deepSeekResponses) {
     routedToolChoice = flattenToolChoice(routedToolChoice, flattenedNamespaces);
   }
   if (provider?.protocol === "anthropic") {

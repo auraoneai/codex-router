@@ -134,14 +134,14 @@ export function stripUnsupportedHostedSearch(payload, { model } = {}) {
 // `tool_search` control: when set, MCP tools stay deferred until the model
 // searches for them; when clear, every connected server's full schema rides
 // every turn. It is not the web-search gate (that is `web_search_tool_type`
-// plus the provider's capabilities). Any route on the Chat Completions wire
-// gets `tool_search` through the router's function relay, so it can defer. A
-// Responses-native upstream receives the native control untouched and
-// qualifies only when its entry declares `supportsToolSearch`, or when its
-// search contract already advertised the flag.
+// plus the provider's capabilities). Every routed wire carries it: Chat
+// Completions routes and Responses-native routes without native support get
+// the router's function relay, and a route declaring `supportsToolSearch`
+// receives the native control. Only an explicit `supportsToolSearch: false`
+// opts a route out.
 export function routedModelToolSearchAvailable(model, { provider, ...options } = {}) {
   if (model?.supportsToolSearch === false) return false;
   if (model?.supportsToolSearch === true) return true;
-  if (provider && provider.protocol !== "openai-responses") return true;
+  if (provider) return true;
   return routedModelSearchAvailable(model, options);
 }

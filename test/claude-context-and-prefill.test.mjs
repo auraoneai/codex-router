@@ -153,12 +153,12 @@ test("the launcher turns Claude Code's on-demand tool loading on", () => {
   assert.equal(env.ENABLE_TOOL_SEARCH, "true");
 });
 
-test("Codex defers MCP tools on every route the router can relay tool_search for", async () => {
+test("Codex defers MCP tools on every routed wire", async () => {
   const { routedModelToolSearchAvailable } = await import("../src/search-capability.mjs");
   const none = { bindingForModel: () => undefined };
   assert.equal(routedModelToolSearchAvailable({ slug: "a/b" }, { provider: { protocol: "anthropic" }, ...none }), true);
   assert.equal(routedModelToolSearchAvailable({ slug: "a/b" }, { provider: { protocol: "openai-chat" }, ...none }), true);
-  assert.equal(routedModelToolSearchAvailable({ slug: "a/b" }, { provider: { protocol: "openai-responses" }, ...none }), false);
+  assert.equal(routedModelToolSearchAvailable({ slug: "a/b" }, { provider: { protocol: "openai-responses" }, ...none }), true);
   assert.equal(routedModelToolSearchAvailable({ slug: "a/b", supportsToolSearch: true }, { provider: { protocol: "openai-responses" } }), true);
   assert.equal(routedModelToolSearchAvailable({ slug: "a/b", supportsToolSearch: false }, { provider: { protocol: "anthropic" } }), false);
 });

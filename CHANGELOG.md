@@ -47,6 +47,14 @@
 - A turn whose only action is a relayed tool search is no longer treated as
   an empty completion, and tools a search returned reach the provider as
   loaded rather than still marked `defer_loading`.
+- **Codex defers MCP tools on Responses-native routes too.** Kiro Prism and
+  every other Responses-native route without native `tool_search` now get the
+  same tool-boundary relay as Console Go, and their catalog entries advertise
+  `supports_search_tool`. Only a route with its own strict tool bridge (Zen
+  Free Muse) opts out, via the new `supportsToolSearch: false` registry field.
+- A registry test now checks every Claude, Kiro Prism, Cloudflare GLM and
+  Gemini route against documented limits, so an upstream `/v1/models` figure
+  that overstates a window can no longer slip into the catalog.
 - Requests to the Claude pool now carry prompt-cache breakpoints (tools,
   system, previous and newest turn) when the translated request has none, so
   repeated context is read from cache instead of billed as fresh input.

@@ -37,6 +37,7 @@
       "defaultReasoningSummary": "auto",
       "contextWindow": 1048576,
       "autoCompact": 900000,
+      "maxOutputTokens": 131072,
       "inputModalities": [
         "text",
         "image"

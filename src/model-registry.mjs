@@ -796,6 +796,10 @@ function modelProblem(model, providers, slugs, gatewayModels) {
   ) {
     return `model ${model.slug} has an invalid supportsImageDetailOriginal`;
   }
+  // Codex's deferred-MCP control. Absent means "the router relays it".
+  if (model.supportsToolSearch !== undefined && typeof model.supportsToolSearch !== "boolean") {
+    return `model ${model.slug} has an invalid supportsToolSearch`;
+  }
   // The router's vision bridge covers every text-only model once the operator
   // enables it, so this field exists only to opt one out -- a model whose
   // upstream mangles long injected transcripts, for example. Setting it true

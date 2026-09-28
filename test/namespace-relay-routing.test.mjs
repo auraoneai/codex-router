@@ -1853,22 +1853,33 @@ test("Responses-native routed providers inherit the model on fresh local thread 
   };
   const streamed = await scenario(true, options);
   assert.equal(streamed.gatewayBodies[0].model, "meta-muse-spark-1-2");
-  assert.ok(
-    streamed.gatewayBodies[0].tools.some((tool) => tool?.type === "namespace"),
-    "Responses-native tools stay namespaced",
+  // A Responses-native route without declared native tool_search gets the
+  // tool-boundary relay, so Codex can keep MCP tools deferred on it.
+  const outgoingTools = streamed.gatewayBodies[0].tools;
+  assert.equal(
+    outgoingTools.some((tool) => tool?.type === "tool_search"),
+    false,
+    "the native tool_search control becomes an ordinary function",
   );
   assert.ok(
-    streamed.gatewayBodies[0].tools.some((tool) => tool?.type === "tool_search"),
-    "Responses-native tool_search stays native",
-  );
-  assert.ok(
-    streamed.gatewayBodies[0].input.some((item) => item?.type === "tool_search_call"),
-    "Responses-native search history is not translated",
+    outgoingTools.some((tool) => tool?.type === "function" && tool.name === "tool_search"),
+    "the relayed search control is offered as a function",
   );
   assert.equal(
-    streamed.gatewayBodies[0].tools.some((tool) => tool?.name === "list_messages"),
+    streamed.gatewayBodies[0].input.some(
+      (item) => item?.type === "tool_search_call" || item?.type === "tool_search_output",
+    ),
     false,
-    "native tool_search_output history remains authoritative without top-level injection",
+    "search history is translated to ordinary function history",
+  );
+  assert.ok(
+    outgoingTools.some((tool) => tool?.name === "list_messages"),
+    "tools a stored search discovered are declared as loaded tools",
+  );
+  assert.equal(
+    outgoingTools.some((tool) => "defer_loading" in (tool || {})),
+    false,
+    "no provider-facing tool stays marked deferred",
   );
   const streamedCall = functionCallsFromSse(streamed.clientBody).get("call_native_thread");
   assert.deepEqual(JSON.parse(streamedCall.arguments), {
