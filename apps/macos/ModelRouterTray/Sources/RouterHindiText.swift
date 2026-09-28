@@ -40,6 +40,8 @@ enum RouterHindiText {
     "Tray language. Reopen the panel to apply everywhere.": "ट्रे भाषा। हर जगह लागू करने के लिए पैनल फिर से खोलें।",
     "Usage and activity over the notch on every display": "हर डिस्प्ले पर नॉच के ऊपर उपयोग और गतिविधि",
     "Off by default. The menu-bar panel stays available either way.": "डिफ़ॉल्ट रूप से बंद। मेनू-बार पैनल किसी भी स्थिति में उपलब्ध रहता है।",
+    "No ChatGPT accounts in pool": "पूल में कोई ChatGPT खाता नहीं है",
+    "No Claude accounts in pool": "पूल में कोई Claude खाता नहीं है",
     "Idle": "निष्क्रिय",
     "LOCAL FALLBACK": "लोकल फ़ॉलबैक",
     "local fallback": "लोकल फ़ॉलबैक",

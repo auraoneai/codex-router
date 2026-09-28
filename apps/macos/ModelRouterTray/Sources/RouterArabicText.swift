@@ -40,6 +40,8 @@ enum RouterArabicText {
     "Tray language. Reopen the panel to apply everywhere.": "لغة شريط القوائم. أعد فتح اللوحة لتطبيقها في كل مكان.",
     "Usage and activity over the notch on every display": "الاستخدام والنشاط فوق النوتش على كل شاشة",
     "Off by default. The menu-bar panel stays available either way.": "معطّل افتراضيًا. تبقى لوحة شريط القوائم متاحة في كل الأحوال.",
+    "No ChatGPT accounts in pool": "لا توجد حسابات ChatGPT في المجموعة",
+    "No Claude accounts in pool": "لا توجد حسابات Claude في المجموعة",
     "Idle": "خامل",
     "LOCAL FALLBACK": "احتياطي محلي",
     "local fallback": "احتياطي محلي",

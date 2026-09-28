@@ -40,6 +40,8 @@ enum RouterJapaneseText {
     "Tray language. Reopen the panel to apply everywhere.": "トレイの言語。パネルを開き直すとすべてに適用されます。",
     "Usage and activity over the notch on every display": "すべてのディスプレイのノッチ上に使用量とアクティビティを表示",
     "Off by default. The menu-bar panel stays available either way.": "デフォルトでオフ。いずれの場合もメニューバーパネルは利用できます。",
+    "No ChatGPT accounts in pool": "プールに ChatGPT アカウントがありません",
+    "No Claude accounts in pool": "プールに Claude アカウントがありません",
     "Idle": "待機中",
     "LOCAL FALLBACK": "ローカルフォールバック",
     "local fallback": "ローカルフォールバック",

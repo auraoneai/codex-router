@@ -40,6 +40,8 @@ enum RouterKoreanText {
     "Tray language. Reopen the panel to apply everywhere.": "트레이 언어입니다. 패널을 다시 열면 전체에 적용됩니다.",
     "Usage and activity over the notch on every display": "모든 디스플레이의 노치 위에 사용량과 활동 표시",
     "Off by default. The menu-bar panel stays available either way.": "기본적으로 꺼짐. 메뉴 막대 패널은 어느 경우든 계속 사용할 수 있습니다.",
+    "No ChatGPT accounts in pool": "풀에 ChatGPT 계정이 없습니다",
+    "No Claude accounts in pool": "풀에 Claude 계정이 없습니다",
     "Idle": "대기",
     "LOCAL FALLBACK": "로컬 폴백",
     "local fallback": "로컬 폴백",
