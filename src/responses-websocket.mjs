@@ -599,6 +599,11 @@ function errorShape(body, fallback) {
     : parsed && typeof parsed === "object"
       ? parsed
       : {};
+  // Native endpoints also return {detail: "..."} and {error: "..."}.
+  // Preserve those messages without exposing an arbitrary response body (which
+  // may be an HTML proxy page or a validation object echoing request input).
+  const message = [source.message, source.detail, parsed?.detail, parsed?.error]
+    .find((value) => typeof value === "string" && value.trim());
   const planType = typeof source.plan_type === "string" &&
       Buffer.byteLength(source.plan_type, "utf8") <= MAX_ERROR_PLAN_TYPE_BYTES
     ? source.plan_type
@@ -611,7 +616,7 @@ function errorShape(body, fallback) {
   return {
     type: typeof source.type === "string" ? source.type : fallback.type,
     ...(typeof source.code === "string" ? { code: source.code } : {}),
-    message: typeof source.message === "string" ? source.message : fallback.message,
+    message: message ?? fallback.message,
     ...(planType !== undefined ? { plan_type: planType } : {}),
     ...(resetsAt !== undefined ? { resets_at: resetsAt } : {}),
   };

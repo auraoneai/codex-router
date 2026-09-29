@@ -897,6 +897,39 @@ test("relays a local unrouted_model refusal with its status and code", async (t)
   peer.close();
 });
 
+test("preserves alternate structured upstream error messages without echoing arbitrary bodies", async (t) => {
+  const fallback = "The local router rejected the Responses request.";
+  const cases = [
+    [{ detail: "This model is unavailable for this request." }, "This model is unavailable for this request."],
+    [{ error: "Unsupported request parameter." }, "Unsupported request parameter."],
+    [{ error: { type: "invalid_request_error", detail: "Invalid reasoning context." } }, "Invalid reasoning context."],
+    [{ error: { message: "Canonical message." }, detail: "Secondary message." }, "Canonical message."],
+    [{ detail: [{ msg: "validation error", input: "private request input" }] }, fallback],
+    [{ detail: "  " }, fallback],
+    ["<html>private proxy diagnostics</html>", fallback],
+  ];
+  let calls = 0;
+  const { server, port } = await startServer(async (request, response) => {
+    for await (const _chunk of request) {}
+    const [body] = cases[calls++];
+    response.writeHead(400, { "content-type": "application/json" });
+    response.end(typeof body === "string" ? body : JSON.stringify(body));
+  });
+  t.after(() => server.close());
+  const { peer } = await connect(port);
+  t.after(() => peer.socket.destroy());
+  for (const [body, expected] of cases) {
+    peer.sendJson(createRequest({ model: "gpt-6.1-sol" }));
+    const event = await peer.nextJson();
+    assert.equal(event.type, "error");
+    assert.equal(event.status, 400);
+    assert.equal(event.error.message, expected);
+    assert.equal(event.error.type, body?.error?.type ?? "local_router_error");
+  }
+  assert.equal(calls, cases.length);
+  peer.close();
+});
+
 test("projects an active limit only when it names a validated projected family", async (t) => {
   const cases = [
     {
