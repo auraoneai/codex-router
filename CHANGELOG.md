@@ -478,6 +478,14 @@
   Homebrew user who then installed from the script could stay on
   `refs/codex-router/rollback` and keep serving the tree that predates
   `x-opencode-session` (#761). A retry now restores `main` the same way.
+- **Tray-polled status commands no longer recompute from scratch every few
+  seconds.** `provider-usage` re-parsed the whole usage ledger plus a live
+  quota fetch per provider (~7s, ~1GB peak), and `--probe` re-ran the full
+  vision/local-model inventory per target (~7s each) — at forty-plus tray
+  spawns a minute that burned a core continuously. `provider-usage`,
+  `account`, `providers`, and `--probe` now serve a file-backed snapshot
+  (90/30/20/60s TTLs; `--refresh` forces a recompute). Served bytes are
+  identical to a fresh computation; only the recompute cadence changes.
 
 ## 0.6.0
 

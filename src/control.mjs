@@ -6,6 +6,11 @@ import { fileURLToPath } from "node:url";
 import { pickerCommandArgs } from "./control-args.mjs";
 import { readControlHealth } from "./control-health.mjs";
 import { readControlActivity } from "./control-activity.mjs";
+import {
+  CONTROL_SNAPSHOT_TTLS_MS,
+  readControlSnapshot,
+  writeControlSnapshot,
+} from "./control-snapshot-cache.mjs";
 import { nativeSubagentCertification, promoteNativeMultiAgent } from "./catalog.mjs";
 import {
   applyModelOverlayPublication,
@@ -289,7 +294,7 @@ function subagentCertification(model) {
 
 // --- per-target probes (run with MODEL_ROUTER_TARGET set) -------------------
 
-async function emitProbe() {
+async function buildProbeSnapshot() {
   const { CONFIG_PATH, NATIVE_CATALOG_PATH, TARGET, PROVIDER_SELECTION_PATH } =
     await import("./paths.mjs");
   const { canonicalProviderId, readProviderSelection } = await import("./provider-selection.mjs");
@@ -395,110 +400,122 @@ async function emitProbe() {
       ]
     : routedModels;
 
-  process.stdout.write(
-    JSON.stringify({
-      target: TARGET,
-      configured: existsSync(PROVIDER_SELECTION_PATH),
-      active: targetIsActive(TARGET),
-      enabledProviders,
-      providers: [...PROVIDERS.values()]
-        .filter((provider) => !provider.variantOf)
-        .map((provider) => ({
-          id: provider.id,
-          displayName: provider.displayName,
-          kind: provider.kind,
-          // The vendor, so a UI can group the rows a `variantOf` cannot merge.
-          // Z.ai, Kimi, and xAI each publish several providers that are one
-          // brand but genuinely separate accounts -- different endpoints, and
-          // keys that are not interchangeable -- so they must stay separately
-          // connectable while still reading as one vendor.
-          ownedBy: provider.ownedBy,
-          // An anonymous gateway is not an account, so the tray needs this to
-          // keep one out of a vendor's "N accounts" group (opencode-free would
-          // otherwise be drawn as a second opencode account).
-          authMode: provider.authMode,
-        })),
-      models,
-      ...(selectedModel ? { selectedModel } : {}),
-      ...(codexConfig
-        ? {
-            loginFree: Boolean(codexConfig.login_free),
-            loginFreeManaged: Boolean(codexConfig.login_free_managed),
-            signedRouting: Boolean(codexConfig.signed_routing),
-            signedRoutingManaged: Boolean(codexConfig.signed_routing_managed),
-            routerDefaultModel: codexConfig.router_default_model || undefined,
-            routerDefaultManaged: Boolean(codexConfig.router_default_managed),
-          }
-        : {}),
-      ...(TARGET === "codex"
-        ? {
-            usageEvents,
-            usageEventHours,
-            nativeAliases: readNativeAliases(),
-            modelSettings: {
-              subagents: subagentSettings,
-              picker: modelPickerSnapshot(),
-              toolResultAging: toolResultAgingSnapshot(),
-              localModels: {
-                ...localModelsSnapshot({
-                  inventory: localInventory,
-                  running: localRunning,
-                  runtime: localRuntime,
+  return {
+    target: TARGET,
+    configured: existsSync(PROVIDER_SELECTION_PATH),
+    active: targetIsActive(TARGET),
+    enabledProviders,
+    providers: [...PROVIDERS.values()]
+      .filter((provider) => !provider.variantOf)
+      .map((provider) => ({
+        id: provider.id,
+        displayName: provider.displayName,
+        kind: provider.kind,
+        // The vendor, so a UI can group the rows a `variantOf` cannot merge.
+        // Z.ai, Kimi, and xAI each publish several providers that are one
+        // brand but genuinely separate accounts -- different endpoints, and
+        // keys that are not interchangeable -- so they must stay separately
+        // connectable while still reading as one vendor.
+        ownedBy: provider.ownedBy,
+        // An anonymous gateway is not an account, so the tray needs this to
+        // keep one out of a vendor's "N accounts" group (opencode-free would
+        // otherwise be drawn as a second opencode account).
+        authMode: provider.authMode,
+      })),
+    models,
+    ...(selectedModel ? { selectedModel } : {}),
+    ...(codexConfig
+      ? {
+          loginFree: Boolean(codexConfig.login_free),
+          loginFreeManaged: Boolean(codexConfig.login_free_managed),
+          signedRouting: Boolean(codexConfig.signed_routing),
+          signedRoutingManaged: Boolean(codexConfig.signed_routing_managed),
+          routerDefaultModel: codexConfig.router_default_model || undefined,
+          routerDefaultManaged: Boolean(codexConfig.router_default_managed),
+        }
+      : {}),
+    ...(TARGET === "codex"
+      ? {
+          usageEvents,
+          usageEventHours,
+          nativeAliases: readNativeAliases(),
+          modelSettings: {
+            subagents: subagentSettings,
+            picker: modelPickerSnapshot(),
+            toolResultAging: toolResultAgingSnapshot(),
+            localModels: {
+              ...localModelsSnapshot({
+                inventory: localInventory,
+                running: localRunning,
+                runtime: localRuntime,
+                benchmarks: localAndVisionBenchmarks,
+              }),
+              // The panel's periodic refresh reads this snapshot, not
+              // `local-models list`, so the LM Studio section must ride
+              // here too or it paints once and vanishes on the next poll.
+              lmstudio: await (await import("./lmstudio-models.mjs")).lmstudioSnapshot(),
+            },
+            visionBridge: (() => {
+              const candidates = selectedConfiguredListedModels();
+              // Only the native models that actually shipped into the picker.
+              // A signed-out or login-free install has none, and offering one
+              // there would pin an engine the router cannot reach. Same rule
+              // the catalog build and the request path apply, from the same
+              // helper, so the tray can never advertise an engine the setter
+              // or the router would then refuse.
+              const natives = installedNativeVisionEngines({ hidden: hiddenModels });
+              const resolved = resolveVisionEngine(
+                () => [...candidates, ...natives],
+                readVisionBridgeSettings(),
+              );
+              return {
+                ...visionBridgeSnapshot(),
+                resolvedEngine: resolved?.slug || null,
+                resolvedEngineName: resolved?.displayName || null,
+                hostMemGib: localProfile.memGib,
+                // Cloud vision models the operator already pays for -- the
+                // default engines. Auto picks the cheapest of these.
+                paidEngines: rankVisionEngines(candidates).map((model) => ({
+                  slug: model.slug,
+                  displayName: model.displayName,
+                  efforts: visionEngineEfforts(model),
+                })),
+                // Vision models from the signed-in ChatGPT session. No extra
+                // key, nothing to download: the plan is already being paid
+                // for. Kept apart from the paid list so the operator can see
+                // which bill a choice lands on.
+                nativeEngines: rankVisionEngines(natives).map((model) => ({
+                  slug: model.slug,
+                  displayName: model.displayName,
+                  efforts: visionEngineEfforts(model),
+                })),
+                // The downloadable local picker, each with size + fit + state.
+                localModels: annotateLocalModels({
+                  profile: localProfile,
+                  installed: localInstalled,
                   benchmarks: localAndVisionBenchmarks,
                 }),
-                // The panel's periodic refresh reads this snapshot, not
-                // `local-models list`, so the LM Studio section must ride
-                // here too or it paints once and vanishes on the next poll.
-                lmstudio: await (await import("./lmstudio-models.mjs")).lmstudioSnapshot(),
-              },
-              visionBridge: (() => {
-                const candidates = selectedConfiguredListedModels();
-                // Only the native models that actually shipped into the picker.
-                // A signed-out or login-free install has none, and offering one
-                // there would pin an engine the router cannot reach. Same rule
-                // the catalog build and the request path apply, from the same
-                // helper, so the tray can never advertise an engine the setter
-                // or the router would then refuse.
-                const natives = installedNativeVisionEngines({ hidden: hiddenModels });
-                const resolved = resolveVisionEngine(
-                  () => [...candidates, ...natives],
-                  readVisionBridgeSettings(),
-                );
-                return {
-                  ...visionBridgeSnapshot(),
-                  resolvedEngine: resolved?.slug || null,
-                  resolvedEngineName: resolved?.displayName || null,
-                  hostMemGib: localProfile.memGib,
-                  // Cloud vision models the operator already pays for -- the
-                  // default engines. Auto picks the cheapest of these.
-                  paidEngines: rankVisionEngines(candidates).map((model) => ({
-                    slug: model.slug,
-                    displayName: model.displayName,
-                    efforts: visionEngineEfforts(model),
-                  })),
-                  // Vision models from the signed-in ChatGPT session. No extra
-                  // key, nothing to download: the plan is already being paid
-                  // for. Kept apart from the paid list so the operator can see
-                  // which bill a choice lands on.
-                  nativeEngines: rankVisionEngines(natives).map((model) => ({
-                    slug: model.slug,
-                    displayName: model.displayName,
-                    efforts: visionEngineEfforts(model),
-                  })),
-                  // The downloadable local picker, each with size + fit + state.
-                  localModels: annotateLocalModels({
-                    profile: localProfile,
-                    installed: localInstalled,
-                    benchmarks: localAndVisionBenchmarks,
-                  }),
-                  download: readVisionDownload(),
-                };
-              })(),
-            },
-          }
-        : {}),
-    }),
-  );
+                download: readVisionDownload(),
+              };
+            })(),
+          },
+        }
+      : {}),
+    };
+}
+
+async function emitProbe() {
+  const { TARGET } = await import("./paths.mjs");
+  if (!args.includes("--refresh")) {
+    const snapshot = readControlSnapshot(`probe-${TARGET}`, CONTROL_SNAPSHOT_TTLS_MS.probe);
+    if (snapshot !== undefined) {
+      process.stdout.write(JSON.stringify(snapshot));
+      return;
+    }
+  }
+  const snapshot = await buildProbeSnapshot();
+  writeControlSnapshot(`probe-${TARGET}`, snapshot);
+  process.stdout.write(JSON.stringify(snapshot));
 }
 
 async function emitProbeSet(provider, desired) {
@@ -1088,6 +1105,13 @@ async function printAccountUsage() {
       "ChatGPT account profiles are unavailable while credential discovery is disabled.",
     );
   }
+  if (!args.includes("--refresh")) {
+    const snapshot = readControlSnapshot("account", CONTROL_SNAPSHOT_TTLS_MS.account);
+    if (snapshot !== undefined) {
+      process.stdout.write(`${JSON.stringify(snapshot, null, 2)}\n`);
+      return;
+    }
+  }
   const { readCodexAccountUsage } = await import("./codex-account-usage.mjs");
   const {
     ensureChatGPTProfileAccounts,
@@ -1098,22 +1122,42 @@ async function printAccountUsage() {
   const usage = profile.home
     ? await readCodexAccountUsage({ codexHome: profile.home })
     : await readCodexAccountUsage();
-  process.stdout.write(`${JSON.stringify({
+  const output = {
     ...usage,
     accountSelection: profile.selection,
     accountEmail: profile.email || null,
     profilePending: profile.pending === true,
-  }, null, 2)}\n`);
+  };
+  writeControlSnapshot("account", output);
+  process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
 }
 
 async function printProviderUsage() {
+  if (!args.includes("--refresh")) {
+    const snapshot = readControlSnapshot("provider-usage", CONTROL_SNAPSHOT_TTLS_MS["provider-usage"]);
+    if (snapshot !== undefined) {
+      process.stdout.write(`${JSON.stringify(snapshot, null, 2)}\n`);
+      return;
+    }
+  }
   const { providerUsageSnapshot } = await import("./provider-usage.mjs");
-  process.stdout.write(`${JSON.stringify(await providerUsageSnapshot(), null, 2)}\n`);
+  const snapshot = await providerUsageSnapshot();
+  writeControlSnapshot("provider-usage", snapshot);
+  process.stdout.write(`${JSON.stringify(snapshot, null, 2)}\n`);
 }
 
 async function printProviderOnboarding() {
+  if (!args.includes("--refresh")) {
+    const snapshot = readControlSnapshot("providers", CONTROL_SNAPSHOT_TTLS_MS.providers);
+    if (snapshot !== undefined) {
+      process.stdout.write(`${JSON.stringify(snapshot, null, 2)}\n`);
+      return;
+    }
+  }
   const { providerOnboardingSnapshot } = await import("./provider-onboarding.mjs");
-  process.stdout.write(`${JSON.stringify(providerOnboardingSnapshot(), null, 2)}\n`);
+  const snapshot = providerOnboardingSnapshot();
+  writeControlSnapshot("providers", snapshot);
+  process.stdout.write(`${JSON.stringify(snapshot, null, 2)}\n`);
 }
 
 async function handleGenericProviders(...commandArgs) {
