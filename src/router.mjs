@@ -899,7 +899,10 @@ async function compressedNativeBody(body, headers) {
   }
 }
 
-function nativeHeaders(request) {
+// `model` is the slug the turn will send upstream. When given, rotation picks
+// only among accounts whose own catalog lists it; callers that cannot name the
+// upstream model leave it out and rotation stays model-blind for them.
+function nativeHeaders(request, { model } = {}) {
   const headers = {
     "Content-Type": "application/json",
     "Accept-Encoding": "identity",
@@ -942,7 +945,7 @@ function nativeHeaders(request) {
   // rotation only moves off it when its quota is spent or it is cooling down
   // after a 429.
   if (hasNativeSession(headers)) {
-    const rotated = rotatedNativeHeaders(headers, conversationKey(request));
+    const rotated = rotatedNativeHeaders(headers, conversationKey(request), model);
     if (rotated) {
       Object.assign(headers, rotated);
       if (!rotated["chatgpt-account-id"]) {
@@ -1098,10 +1101,11 @@ export function coolNativeAccountAfterRateLimit(headers, options) {
 // the ones already resolved. A failure here must never fail a turn: rotation is
 // an optimization over a working single-account path, so every error falls back
 // to the credential the router had without it.
-function rotatedNativeHeaders(headers, conversationId) {
+function rotatedNativeHeaders(headers, conversationId, model) {
   try {
     const candidates = rotationCandidates({
       conversationId,
+      model,
       usageById: cachedAccountUsageById(),
     });
     if (!candidates.length) return undefined;
@@ -2166,7 +2170,9 @@ function parseRelayedAgentPayloadSse(bytes) {
 }
 
 function nativeRelayContext(request) {
-  const headers = nativeHeaders(request);
+  // The relay sends `nativeAgentRelayModel()`, so it rotates among the
+  // accounts that offer that model like an ordinary native turn does.
+  const headers = nativeHeaders(request, { model: nativeAgentRelayModel() });
   const authorization =
     typeof headers.authorization === "string" ? headers.authorization : "";
   const account = nativeAccountKey(headers);
@@ -4858,6 +4864,10 @@ async function handleResponses(request, response, requestUrl) {
     let target;
     let headers;
     let routedBody;
+    // The native slug this turn leaves with, after variant translation. Set only
+    // on the native path; rotation and failover use it to skip accounts whose
+    // plan does not offer the model.
+    let nativeModel;
     let builtSearchMode;
     let namespacesFlattened = false;
     let flattenedNamespaces = new Map();
@@ -5045,7 +5055,8 @@ async function handleResponses(request, response, requestUrl) {
         normalizeNativeForSubstitutedCaller(native, { compact: compactV1 });
       }
       target = nativeTarget(requestUrl.pathname);
-      headers = nativeHeaders(request);
+      nativeModel = typeof native.model === "string" ? native.model : undefined;
+      headers = nativeHeaders(request, { model: nativeModel });
       routedBody = await compressedNativeBody(
         Buffer.from(JSON.stringify(native), "utf8"),
         headers,
@@ -5054,6 +5065,7 @@ async function handleResponses(request, response, requestUrl) {
 
     if (!route) {
       const exhaustion = poolExhaustionReport({
+        model: nativeModel,
         usageById: cachedAccountUsageById(),
       });
       if (exhaustion?.exhausted) {
@@ -5132,6 +5144,7 @@ async function handleResponses(request, response, requestUrl) {
         ) {
           const candidates = rotationCandidates({
             conversationId: convKey,
+            model: nativeModel,
             usageById: cachedAccountUsageById(),
           });
           const nextCandidate = candidates.find((c) => !attemptedCandidateIds.has(c.id));

@@ -804,3 +804,45 @@ test("an account opted into credit fallback keeps serving on credits after every
     assert.throws(() => setChatGPTSubscriptionAccountCreditFallback("nobody@example.com", true, { filePath: b.pool }), /No registered/);
   } finally { b.cleanup(); resetRotationStateForTests(); }
 });
+
+function writeCatalog(homes, id, slugs, { fetchedAt = new Date().toISOString() } = {}) {
+  writeFileSync(
+    path.join(homes, id, "models_cache.json"),
+    JSON.stringify({ fetched_at: fetchedAt, models: slugs.map((slug) => ({ slug, visibility: "list" })) }),
+  );
+}
+
+test("rotation skips an account whose own catalog does not offer the requested model", () => {
+  const b = box();
+  resetRotationStateForTests();
+  try {
+    writeAccount(b.homes, "acct_freefree1", { accountId: "ident-free" });
+    writeAccount(b.homes, "acct_propro111", { accountId: "ident-pro" });
+    writeAccount(b.homes, "acct_nocatalog", { accountId: "ident-none" });
+    writePool(b.pool, ["acct_freefree1", "acct_propro111", "acct_nocatalog"]);
+    writeCatalog(b.homes, "acct_freefree1", ["gpt-6-luna", "gpt-5.6-luna"]);
+    writeCatalog(b.homes, "acct_propro111", ["gpt-6-sol", "gpt-6-luna"]);
+    const usage = {
+      acct_freefree1: { planType: "free", primary: { remainingPercent: 100 } },
+      acct_propro111: { planType: "pro", primary: { remainingPercent: 0 } },
+      acct_nocatalog: { planType: "plus", primary: { remainingPercent: 50 } },
+    };
+    const ids = (model, rows = usage) => rotationCandidates({ poolPath: b.pool, homesDir: b.homes, usageById: rows, model })
+      .map((entry) => entry.id);
+
+    assert.ok(ids("gpt-6-luna").includes("acct_freefree1"), "Free serves the models it lists");
+    assert.ok(!ids("gpt-6-sol").includes("acct_freefree1"), "Free never receives Sol");
+    assert.ok(ids("gpt-6-sol").includes("acct_nocatalog"), "a missing catalog is unknown, not unsupported");
+    assert.ok(ids(undefined).includes("acct_freefree1"), "no model keeps rotation model-blind");
+    assert.ok(ids("gpt-image-2").includes("acct_freefree1"), "a slug no catalog lists filters nothing");
+
+    // A Free account with quota left is no capacity for a Sol turn.
+    const soloPro = { ...usage, acct_nocatalog: { primary: { remainingPercent: 0 } } };
+    assert.equal(poolExhaustionReport({ poolPath: b.pool, homesDir: b.homes, usageById: soloPro, model: "gpt-6-sol" })?.exhausted, true);
+    assert.equal(poolExhaustionReport({ poolPath: b.pool, homesDir: b.homes, usageById: soloPro, model: "gpt-6-luna" }), null);
+
+    // A catalog that stopped being refreshed no longer vouches for a gap.
+    writeCatalog(b.homes, "acct_freefree1", ["gpt-6-luna"], { fetchedAt: new Date(Date.now() - 2 * 24 * 3600_000).toISOString() });
+    assert.ok(ids("gpt-6-sol").includes("acct_freefree1"));
+  } finally { b.cleanup(); resetRotationStateForTests(); }
+});

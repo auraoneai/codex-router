@@ -34,6 +34,9 @@ Every account in the pool exists in one of the following states:
 
 This spends Plus capacity before Pro for new turns while retaining health and conversation safeguards. Plan type comes from the usage probe; it is never guessed from an account label.
 
+### Model availability per account
+Plans offer different models: a Free account lists `gpt-6-luna` but not `gpt-6-sol` or `gpt-6-astra`. The usage probe's app-server writes each account's own catalog to `models_cache.json` in that account's home (the selected account uses the live `~/.codex` copy). Native turns, failover retries, and the agent payload relay pass the upstream model slug to rotation, which skips any account whose catalog does not list it, and `pool_exhausted` counts only accounts that can run the model. A missing catalog, one older than 24 hours, or a slug no account lists (image and search endpoint models) filters nothing, so this only ever narrows rotation.
+
 The selector does not use round robin. Continuing conversations keep their assigned account while it is eligible. The historical soft-quota switch was removed because it could leave the last 1–15% of a subscription unused before its window reset.
 
 ---

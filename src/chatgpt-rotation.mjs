@@ -316,6 +316,59 @@ export function accountSession(accountId, {
 const cooldowns = new Map();
 const affinities = new Map();
 const authInvalidAccounts = new Map();
+const accountCatalogs = new Map();
+
+// An account catalog older than this no longer vouches for what the account
+// lacks: the background probe rewrites it every few minutes, so a file this old
+// means probing stopped, and a plan upgrade since then would go unnoticed.
+export const ACCOUNT_CATALOG_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+// The model slugs one account's own Codex catalog lists, hidden ones included.
+// The usage probe's app-server writes `models_cache.json` into the home it
+// runs in, so every pool home carries its own account's catalog. Plans differ
+// (Free lists no Sol or Astra), and rotation is model-blind otherwise.
+// Undefined means unknown, never "supports nothing". Cached by mtime and size:
+// this runs on every native turn and the file is a few hundred kilobytes.
+export function accountModelSlugs(home, { now = Date.now() } = {}) {
+  if (!home) return undefined;
+  const file = path.join(home, "models_cache.json");
+  let stat;
+  try {
+    stat = statSync(file);
+  } catch {
+    return undefined;
+  }
+  let entry = accountCatalogs.get(file);
+  if (!entry || entry.mtimeMs !== stat.mtimeMs || entry.size !== stat.size) {
+    entry = { mtimeMs: stat.mtimeMs, size: stat.size, slugs: undefined, fetchedAtMs: undefined };
+    try {
+      const document = JSON.parse(readFileSync(file, "utf8"));
+      const slugs = (Array.isArray(document?.models) ? document.models : [])
+        .map((model) => (typeof model?.slug === "string" ? model.slug : ""))
+        .filter(Boolean);
+      if (slugs.length) entry.slugs = new Set(slugs);
+      const fetchedAtMs = Date.parse(document?.fetched_at || "");
+      entry.fetchedAtMs = Number.isFinite(fetchedAtMs) ? fetchedAtMs : stat.mtimeMs;
+    } catch {}
+    accountCatalogs.set(file, entry);
+  }
+  if (!entry.slugs || now - entry.fetchedAtMs > ACCOUNT_CATALOG_MAX_AGE_MS) return undefined;
+  return entry.slugs;
+}
+
+// Drops the accounts whose catalog confirms they cannot serve `model`. A slug
+// no catalog lists at all (an image or search endpoint model, a brand-new
+// release) filters nothing, so this can only narrow rotation to accounts that
+// can run the turn, never strand a model the catalogs do not describe.
+function filterByModel(entries, model, slugsById) {
+  if (!model) return entries;
+  const known = [...slugsById.values()].filter(Boolean);
+  if (!known.some((slugs) => slugs.has(model))) return entries;
+  return entries.filter((entry) => {
+    const slugs = slugsById.get(entry.id);
+    return !slugs || slugs.has(model);
+  });
+}
 
 // A probe's auth verdict describes the login it read. A login stored after
 // that probe -- a new sign-in, a profile switch -- is not the one it refused,
@@ -415,10 +468,12 @@ export function resetRotationStateForTests() {
   cooldowns.clear();
   affinities.clear();
   authInvalidAccounts.clear();
+  accountCatalogs.clear();
 }
 
 export function rotationCandidates({
   conversationId,
+  model,
   poolPath = CHATGPT_ACCOUNT_POOL_PATH,
   homesDir = CHATGPT_ACCOUNT_HOMES_DIR,
   usageById,
@@ -441,10 +496,17 @@ export function rotationCandidates({
   const rules = normalizeRules(pool?.policy?.rules);
   const usage = usageById instanceof Map ? usageById : new Map(Object.entries(usageById || {}));
   const purposeById = new Map();
+  const slugsById = new Map();
   const candidates = [];
   const seenFingerprints = new Set();
   for (const entry of entries) {
     if (entry?.state !== "active" || entry?.paused) continue;
+    const home = entry.id === liveProfile.selection && liveProfile.home
+      ? liveProfile.home
+      : path.join(homesDir, entry.id);
+    // Read for every active account, not only the eligible ones: a model only
+    // a drained account lists is still a model the others confirm they lack.
+    if (model) slugsById.set(entry.id, accountModelSlugs(home, { now }));
     const session = accountSession(entry.id, {
       homesDir,
       now,
@@ -472,7 +534,9 @@ export function rotationCandidates({
     });
   }
   if (!candidates.length) return [];
-  const ordered = orderAccountCandidates(candidates, {
+  const servable = filterByModel(candidates, model, slugsById);
+  if (!servable.length) return [];
+  const ordered = orderAccountCandidates(servable, {
     sticky: rememberedAccount(conversationId, { now, usageById: usage }),
     preferred: pool?.policy?.selectedAccountId,
     usageById: usage,
@@ -500,6 +564,7 @@ export function rotationCandidates({
 }
 
 export function poolExhaustionReport({
+  model,
   poolPath = CHATGPT_ACCOUNT_POOL_PATH,
   homesDir = CHATGPT_ACCOUNT_HOMES_DIR,
   usageById,
@@ -532,8 +597,20 @@ export function poolExhaustionReport({
   let totalActive = 0;
   const recoveries = [];
 
+  // An account whose catalog confirms it cannot run the requested model is no
+  // capacity for this turn, however much quota it has left.
+  const active = entries.filter((entry) => entry?.state === "active" && !entry?.paused);
+  const slugsById = new Map(model
+    ? active.map((entry) => [entry.id, accountModelSlugs(
+      entry.id === liveProfile.selection && liveProfile.home ? liveProfile.home : path.join(homesDir, entry.id),
+      { now },
+    )])
+    : []);
+  const servableIds = new Set(filterByModel(active, model, slugsById).map((entry) => entry.id));
+
   for (const entry of entries) {
     if (entry?.state !== "active" || entry?.paused) continue;
+    if (!servableIds.has(entry.id)) continue;
     totalActive++;
     const session = accountSession(entry.id, {
       homesDir,

@@ -19,7 +19,7 @@ for (const headers of ["headers", "nextHeaders"]) {
 }
 
 test("probe verifier rejects a probe awaited in native header selection", () => {
-  const mutated = router.replace("function nativeHeaders(request) {", `async function nativeHeaders(request) {
+  const mutated = router.replace("function nativeHeaders(request, { model } = {}) {", `async function nativeHeaders(request, { model } = {}) {
     const { probeChatGPTAccountUsage: refreshUsage } = await import("./chatgpt-usage-probe.mjs");
     await refreshUsage();`);
   assert.notEqual(mutated, router);
@@ -39,7 +39,7 @@ test("probe verifier rejects cache reader disconnected from rotation", () => {
 });
 
 test("probe verifier rejects the pool refresher being awaited on a request path", () => {
-  const mutated = router.replace("function nativeHeaders(request) {", `async function nativeHeaders(request) {
+  const mutated = router.replace("function nativeHeaders(request, { model } = {}) {", `async function nativeHeaders(request, { model } = {}) {
     await refreshAndProbeChatGPTAccounts();`);
   assert.notEqual(mutated, router);
   assert.equal(nativeUsageProbeWiring(mutated).ok, false);
