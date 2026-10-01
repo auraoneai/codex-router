@@ -151,6 +151,7 @@ async function executeProbeChatGPTAccountUsage({
         primary: usage.primary ?? null,
         secondary: usage.secondary ?? null,
         resetCredits: usage.resetCredits ?? null,
+        credits: usage.credits ?? (!isAuthInvalid ? prev?.credits ?? null : null),
         fetchedAt: usage.fetchedAt,
         ...(isAuthInvalid ? { authInvalid: true, authErrorCode: usage.authErrorCode || "token_revoked" } : {}),
         ...(usage?.rateLimitError ? { error: usage.rateLimitError } : {}),
@@ -167,6 +168,9 @@ async function executeProbeChatGPTAccountUsage({
         primary: !isAuthInvalid && prev?.primary ? prev.primary : null,
         secondary: !isAuthInvalid && prev?.secondary ? prev.secondary : null,
         resetCredits: null,
+        // Credit fallback eligibility survives a transient outage the same way
+        // the windows do; a refused login no longer vouches for any balance.
+        credits: !isAuthInvalid && prev?.credits ? prev.credits : null,
         error: msg,
         ...(isAuthInvalid ? { authInvalid: true, authErrorCode: "token_revoked" } : {}),
       };

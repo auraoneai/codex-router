@@ -90,6 +90,19 @@ The Island shows each account's server-reported banked reset count. A reset beco
 
 The equivalent explicit command is `./bin/control chatgpt-account-pool reset-credit <acct_id>`. It verifies the account's login and account identity before using Codex's account reset method. The selected account uses its live desktop login when the identity matches; inactive accounts use their isolated logins. An uncertain response retains the same private idempotency key for a retry. A confirmed result is replayed for ten minutes to protect against rapid duplicate clicks while quota readings catch up. The router refreshes account quota after a confirmed redemption.
 
+### Purchased-credit fallback
+
+Some accounts carry purchased Codex credits, which ChatGPT spends once the plan's five-hour or weekly window is used up. The usage probe records each account's `credits` (`hasCredits`, `unlimited`, `balance`) from `account/rateLimits/read`. By default a drained account still leaves rotation, so credits are never spent implicitly.
+
+Opt an account in by id or registered email:
+
+```bash
+./bin/control chatgpt-account-pool credits gurbaksh@chahal.com on
+./bin/control chatgpt-account-pool credits gurbaksh@chahal.com off
+```
+
+An opted-in account stays eligible while drained, but it still ranks as drained: it is chosen only after every account with plan quota (or no reading yet) is drained or cooling, and traffic moves back as soon as any plan window reopens. A probe that confirms an empty balance removes it; with no credit reading, upstream decides, and a refused turn cools the account like any other 429. A pool whose only remaining capacity is credits is not reported as `pool_exhausted`. `usage` output shows `credits`, `creditFallback`, and `spendingCredits` per account, and the router logs `routing on purchased credits` when a turn moves onto one.
+
 Example `usage cached` output:
 ```json
 {

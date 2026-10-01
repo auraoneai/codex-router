@@ -75,6 +75,19 @@ function normalizeResetCredits(response) {
   return { availableCount: count };
 }
 
+// Purchased Codex credits, which ChatGPT spends once the plan's own windows are
+// used up. Distinct from banked rate-limit resets above. `balance` is the
+// backend's display string and is kept only as text.
+function normalizeUsageCredits(limits) {
+  const raw = limits?.credits;
+  if (!raw || typeof raw !== "object" || typeof raw.hasCredits !== "boolean") return null;
+  return {
+    hasCredits: raw.hasCredits,
+    unlimited: raw.unlimited === true,
+    ...(typeof raw.balance === "string" && raw.balance.length <= 32 ? { balance: raw.balance } : {}),
+  };
+}
+
 export function normalizeCodexAccountUsage(rateLimitResponse, usageResponse, now = new Date()) {
   const buckets = Array.isArray(usageResponse?.dailyUsageBuckets)
     ? usageResponse.dailyUsageBuckets
@@ -116,6 +129,7 @@ export function normalizeCodexAccountUsage(rateLimitResponse, usageResponse, now
     primary: normalizeWindow(limits.primary),
     secondary: normalizeWindow(limits.secondary),
     resetCredits: normalizeResetCredits(rateLimitResponse),
+    credits: normalizeUsageCredits(limits),
     dailyUsageBuckets: buckets,
     summary: {
       lifetimeTokens: Number.isFinite(summary.lifetimeTokens) ? summary.lifetimeTokens : null,

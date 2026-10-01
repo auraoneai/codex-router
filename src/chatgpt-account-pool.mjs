@@ -141,6 +141,9 @@ function normalizeAccount(raw, id) {
     id,
     state,
     paused: raw.paused === true,
+    // Opt-in: keep routing to this account on purchased credits after its
+    // plan windows are spent. Off unless the operator turns it on.
+    ...(raw.creditFallback === true ? { creditFallback: true } : {}),
     priority: integer(raw.priority, 50, { min: 0, max: 100_000 }),
     ...(text(raw.label) ? { label: text(raw.label).slice(0, 120) } : {}),
     ...(iso(raw.createdAt) ? { createdAt: iso(raw.createdAt) } : {}),
@@ -183,6 +186,9 @@ function validatePersistedState(raw) {
       invalidPoolState(`account ${id} has an invalid state`);
     }
     if (typeof account.paused !== "boolean" || !Number.isFinite(account.priority)) {
+      invalidPoolState(`account ${id} has invalid routing metadata`);
+    }
+    if (account.creditFallback !== undefined && typeof account.creditFallback !== "boolean") {
       invalidPoolState(`account ${id} has invalid routing metadata`);
     }
     if (!plainObject(account.health) || !["healthy", "cooldown", "reauth-required", "failed"].includes(account.health.state)) {
@@ -299,6 +305,25 @@ export function createChatGPTSubscriptionAccount({ label = "", filePath = CHATGP
   return sanitizeChatGPTAccount(account);
 }
 export function chatGPTSubscriptionAccountHome(accountValue, { homesDir = CHATGPT_ACCOUNT_HOMES_DIR } = {}) { return path.join(homesDir, accountId(accountValue)); }
+// Accepts an account id, or the registered email/label so the operator can name
+// an account the way the Island shows it. Callers hold the pool lock.
+export function setChatGPTSubscriptionAccountCreditFallback(accountValue, enabled, { filePath = CHATGPT_ACCOUNT_POOL_PATH } = {}) {
+  if (typeof enabled !== "boolean") throw new Error("Credit fallback must be turned on or off.");
+  const state = readChatGPTAccountPoolState(filePath);
+  const key = text(accountValue).toLowerCase();
+  const matches = Object.values(state.accounts).filter((account) => account.state !== "revoked" && (
+    account.id.toLowerCase() === key
+    || account.identity?.email?.toLowerCase() === key
+    || account.label?.toLowerCase() === key
+  ));
+  if (!key || matches.length === 0) throw new Error("No registered ChatGPT account matches that id or email.");
+  if (matches.length > 1) throw new Error("More than one ChatGPT account matches; use its acct_ id.");
+  const [account] = matches;
+  if (enabled) account.creditFallback = true;
+  else delete account.creditFallback;
+  writeChatGPTAccountPoolState(state, filePath);
+  return sanitizeChatGPTAccount(state.accounts[account.id]);
+}
 export function chatGPTSubscriptionAccountAuthPath(accountValue, options = {}) { return path.join(chatGPTSubscriptionAccountHome(accountValue, options), "auth.json"); }
 export function chatGPTSubscriptionAccountCatalogDir(accountValue, options = {}) { return path.join(chatGPTSubscriptionAccountHome(accountValue, options), "router-catalog"); }
 
@@ -867,6 +892,7 @@ export function sanitizeChatGPTAccount(account) {
   if (!account) return null;
   return {
     id: account.id, state: account.state, paused: account.paused === true, priority: account.priority,
+    ...(account.creditFallback === true ? { creditFallback: true } : {}),
     ...(account.label ? { label: account.label } : {}), ...(account.createdAt ? { createdAt: account.createdAt } : {}),
     ...(account.subscription ? { subscription: { ...account.subscription } } : {}),
     health: { ...account.health, ...(account.health?.lastError ? { lastError: "[redacted]" } : {}) }, turns: account.turns, requests: account.requests,

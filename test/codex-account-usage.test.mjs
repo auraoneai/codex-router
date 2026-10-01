@@ -164,6 +164,7 @@ test("normalizes Codex limits and daily usage without account credentials", () =
       resetsAt: 1_700_000_000,
     },
     resetCredits: null,
+    credits: null,
     dailyUsageBuckets: [
       { startDate: "2026-07-19", tokens: 100 },
       { startDate: "2026-07-20", tokens: 200 },
@@ -183,6 +184,15 @@ test("banked reset count is normalized without exposing backend credit details",
   });
   assert.deepEqual(usage.resetCredits, { availableCount: 2 });
   assert.equal(JSON.stringify(usage).includes("credit-secret"), false);
+});
+
+test("purchased credits are read from the rate-limit snapshot", () => {
+  const usage = normalizeCodexAccountUsage({
+    rateLimits: { credits: { hasCredits: true, unlimited: false, balance: "42.50" } },
+  });
+  assert.deepEqual(usage.credits, { hasCredits: true, unlimited: false, balance: "42.50" });
+  assert.equal(normalizeCodexAccountUsage({ rateLimits: { credits: null } }).credits, null);
+  assert.equal(normalizeCodexAccountUsage({ rateLimits: { credits: { unlimited: true } } }).credits, null);
 });
 
 function resetServer({ email = "owner@example.com", accountId = "backend-account", usedPercent = 95, availableCount = 1, onConsume } = {}) {

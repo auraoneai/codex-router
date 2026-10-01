@@ -167,6 +167,25 @@ export function accountIsAuthInvalid(row, accountId = row?.id) {
   return leftoverHealth(row, undefined, accountId) === "auth_invalid";
 }
 
+// Whether an account the operator opted into credit fallback can still be
+// spent once its plan windows are gone. Only a probe that confirmed an empty
+// balance rules it out; with no reading, upstream decides and a refusal cools
+// the account like any other 429.
+export function creditFallbackAvailable(row) {
+  const credits = row?.credits;
+  if (!credits || typeof credits !== "object") return true;
+  return credits.unlimited === true || credits.hasCredits === true;
+}
+
+// A drained account that will keep serving on purchased credits. It still
+// ranks as drained, so it is chosen only after every account with plan quota
+// left (or no reading at all) is drained or cooling.
+export function accountSpendsCredits(entry, row, now = Date.now()) {
+  return entry?.creditFallback === true
+    && accountIsDrained(row, undefined, entry.id, now)
+    && creditFallbackAvailable(row);
+}
+
 // A window that jumped up by a wide margin rolled over rather than drifted.
 export function windowReset(previous, current) {
   if (!Number.isFinite(previous) || !Number.isFinite(current)) return false;
@@ -445,6 +464,7 @@ export function rotationCandidates({
     purposeById.set(entry.id, normalizePurpose(entry.purpose) || inferPurpose(entry.label, entry));
     candidates.push({
       id: entry.id,
+      ...(accountSpendsCredits(entry, cachedRow, now) ? { spendsCredits: true } : {}),
       headers: {
         authorization: `Bearer ${session.accessToken}`,
         ...(session.accountId ? { "chatgpt-account-id": session.accountId } : {}),
@@ -465,9 +485,12 @@ export function rotationCandidates({
   // Drain is derived availability rather than persisted state: a spent account
   // drops out now and is admitted again by the next healthy probe, with no
   // operator action. With no usage data at all, every session stays eligible --
-  // rotating blindly is still better than refusing to rotate.
+  // rotating blindly is still better than refusing to rotate. An account opted
+  // into credit fallback stays eligible while drained; it already sorts behind
+  // every account with plan quota, so credits are spent only when needed.
   const eligible = usage.size
-    ? ordered.filter((entry) => !accountIsDrained(usage.get(entry.id), rules.softDrainPercent, entry.id, now))
+    ? ordered.filter((entry) => entry.spendsCredits
+      || !accountIsDrained(usage.get(entry.id), rules.softDrainPercent, entry.id, now))
     : ordered;
   const ready = eligible.filter((entry) => (cooldowns.get(entry.id) || 0) <= now);
   // Falling back to `eligible` keeps a fully cooled-down pool usable: a stale
@@ -502,6 +525,7 @@ export function poolExhaustionReport({
   let healthy = 0;
   let soft = 0;
   let drained = 0;
+  let onCredits = 0;
   let authInvalid = 0;
   let cooling = 0;
   let expired = 0;
@@ -530,6 +554,10 @@ export function poolExhaustionReport({
       continue;
     }
     if (cachedRow && accountIsDrained(cachedRow, rules.softDrainPercent, entry.id, now)) {
+      if (accountSpendsCredits(entry, cachedRow, now) && (cooldowns.get(entry.id) || 0) <= now) {
+        onCredits++;
+        continue;
+      }
       drained++;
       const back = drainedUntilMs(cachedRow, now);
       if (back !== undefined) recoveries.push(back);
@@ -546,8 +574,9 @@ export function poolExhaustionReport({
     else healthy++;
   }
 
-  // If there are accounts that are healthy, soft, or unknown (not drained, cooling, or invalid)
-  if (healthy > 0 || soft > 0 || totalActive === 0) {
+  // If there are accounts that are healthy, soft, or unknown (not drained, cooling, or invalid),
+  // or a drained account that can still spend purchased credits
+  if (healthy > 0 || soft > 0 || onCredits > 0 || totalActive === 0) {
     return null;
   }
 

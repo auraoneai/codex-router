@@ -3750,6 +3750,7 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
     readChatGPTAccountPoolState,
     redeemChatGPTSubscriptionAccountResetCredit,
     refreshBoundedChatGPTSubscriptionAccounts,
+    setChatGPTSubscriptionAccountCreditFallback,
     withChatGPTAccountPoolLock,
   } = await import("./chatgpt-account-pool.mjs");
   const {
@@ -3916,6 +3917,20 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return;
   }
+  if (action === "credits") {
+    // Opt an account into (or out of) spending purchased Codex credits after
+    // its plan windows are used up. Rotation reads the pool on every turn, so
+    // the change applies to the next request without a restart.
+    const toggle = String(completionLease || "").trim().toLowerCase();
+    if (!value || !["on", "off"].includes(toggle)) {
+      throw new Error("Usage: control chatgpt-account-pool credits <acct_id|email> on|off");
+    }
+    const account = await withChatGPTAccountPoolLock(
+      () => setChatGPTSubscriptionAccountCreditFallback(value, toggle === "on"),
+    );
+    process.stdout.write(`${JSON.stringify({ account, creditFallback: account.creditFallback === true })}\n`);
+    return;
+  }
   if (action === "usage") {
     // Refreshes the per-account quota snapshot rotation ranks on, and reports
     // the resulting order. This is the only place that probe is driven: the
@@ -3941,6 +3956,7 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
     const now = Date.now();
     let poolState;
     try { poolState = readChatGPTAccountPoolState(); } catch { poolState = { accounts: {} }; }
+    const { accountSpendsCredits } = await import("./chatgpt-rotation.mjs");
     process.stdout.write(`${JSON.stringify({
       fetchedAt: snapshot?.fetchedAt,
       rotation: order,
@@ -3955,6 +3971,9 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
         primaryRemainingPercent: entry.primary?.remainingPercent ?? null,
         secondaryRemainingPercent: entry.secondary?.remainingPercent ?? null,
         resetCredits: entry.resetCredits ?? null,
+        credits: entry.credits ?? null,
+        creditFallback: poolState.accounts?.[entry.id]?.creditFallback === true,
+        spendingCredits: accountSpendsCredits(poolState.accounts?.[entry.id], entry, now),
         resetAttemptPending: chatGPTSubscriptionAccountResetAttemptPending(entry.id, { state: poolState }),
         resetsAt: entry.secondary?.resetsAt ?? entry.primary?.resetsAt ?? null,
         ...(entry.authInvalid ? { authInvalid: true, authErrorCode: entry.authErrorCode || "token_revoked" } : {}),
@@ -3973,7 +3992,7 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
       return;
     }
   }
-  throw new Error("Usage: control chatgpt-account-pool status|add [label]|home <acct_id>|login-finalize <acct_id> <lease>|remove <acct_id>|select <acct_id>|reset-credit <acct_id>|usage [cached]|profile status|profile reconcile");
+  throw new Error("Usage: control chatgpt-account-pool status|add [label]|home <acct_id>|login-finalize <acct_id> <lease>|remove <acct_id>|select <acct_id>|reset-credit <acct_id>|credits <acct_id|email> on|off|usage [cached]|profile status|profile reconcile");
 }
 
 async function handleClaudeAccountControl(action, value) {

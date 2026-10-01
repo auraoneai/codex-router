@@ -1119,6 +1119,9 @@ function rotatedNativeHeaders(headers, conversationId) {
       return undefined;
     }
     rememberAccount(conversationId, chosen.id);
+    if (chosen.spendsCredits) {
+      console.error(`[codex-router] native account ${chosen.id} plan quota spent; routing on purchased credits`);
+    }
     return chosen.headers;
   } catch {
     return undefined;
@@ -5098,7 +5101,7 @@ async function handleResponses(request, response, requestUrl) {
 
           const nextAcctId = nextCandidate.headers["chatgpt-account-id"];
           console.error(
-            `[codex-router] native account failover to ${nextCandidate.id} (${nextAcctId || "personal"}) previous_status=${upstream.status}`,
+            `[codex-router] native account failover to ${nextCandidate.id} (${nextAcctId || "personal"}) previous_status=${upstream.status}${nextCandidate.spendsCredits ? " on_credits=true" : ""}`,
           );
 
           const nextHeaders = {

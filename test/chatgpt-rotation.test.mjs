@@ -758,3 +758,49 @@ test("a revoked verdict from before the stored login changed does not hold a re-
     b.cleanup();
   }
 });
+
+test("an account opted into credit fallback keeps serving on credits after every plan window is spent", async () => {
+  const { setChatGPTSubscriptionAccountCreditFallback, readChatGPTAccountPoolState } = await import("../src/chatgpt-account-pool.mjs");
+  const b = box();
+  resetRotationStateForTests();
+  try {
+    writeAccount(b.homes, "acct_creditone", { accountId: "ident-credit" });
+    writeAccount(b.homes, "acct_planplan1", { accountId: "ident-plan" });
+    writePool(b.pool, ["acct_creditone", "acct_planplan1"], {
+      perAccount: { acct_creditone: { identity: { accountId: "ident-credit", email: "Owner@Example.com" } } },
+    });
+    const usage = {
+      acct_creditone: { secondary: { remainingPercent: 0 }, credits: { hasCredits: true, unlimited: false, balance: "40" } },
+      acct_planplan1: { secondary: { remainingPercent: 30 } },
+    };
+    const ids = () => rotationCandidates({ poolPath: b.pool, homesDir: b.homes, usageById: usage }).map((entry) => entry.id);
+    assert.deepEqual(ids(), ["acct_planplan1"], "credits stay untouched until the operator opts in");
+
+    const account = setChatGPTSubscriptionAccountCreditFallback("owner@example.com", true, { filePath: b.pool });
+    assert.equal(account.creditFallback, true);
+    assert.equal(readChatGPTAccountPoolState(b.pool).accounts.acct_creditone.creditFallback, true);
+    assert.deepEqual(ids(), ["acct_planplan1", "acct_creditone"], "plan quota is spent before credits");
+
+    usage.acct_planplan1.secondary.remainingPercent = 0;
+    const candidates = rotationCandidates({ poolPath: b.pool, homesDir: b.homes, usageById: usage });
+    assert.deepEqual(candidates.map((entry) => entry.id), ["acct_creditone"]);
+    assert.equal(candidates[0].spendsCredits, true);
+    assert.equal(poolExhaustionReport({ poolPath: b.pool, homesDir: b.homes, usageById: usage }), null,
+      "a pool with spendable credits is not exhausted");
+
+    usage.acct_creditone.credits = { hasCredits: false, unlimited: false, balance: "0" };
+    assert.deepEqual(ids(), [], "a confirmed empty balance drops the account");
+    assert.equal(poolExhaustionReport({ poolPath: b.pool, homesDir: b.homes, usageById: usage })?.exhausted, true);
+
+    usage.acct_creditone.credits = { hasCredits: true, unlimited: false };
+    coolAccount("acct_creditone", Date.now() + 60_000);
+    assert.equal(poolExhaustionReport({ poolPath: b.pool, homesDir: b.homes, usageById: usage })?.exhausted, true,
+      "a credit account that just answered 429 is cooling, not available");
+    resetRotationStateForTests();
+
+    setChatGPTSubscriptionAccountCreditFallback("acct_creditone", false, { filePath: b.pool });
+    assert.equal(readChatGPTAccountPoolState(b.pool).accounts.acct_creditone.creditFallback, undefined);
+    assert.deepEqual(ids(), []);
+    assert.throws(() => setChatGPTSubscriptionAccountCreditFallback("nobody@example.com", true, { filePath: b.pool }), /No registered/);
+  } finally { b.cleanup(); resetRotationStateForTests(); }
+});
