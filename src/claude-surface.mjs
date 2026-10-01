@@ -532,7 +532,77 @@ export function claudeCodeSessionId(headers = {}, body = {}) {
   return userId.match(/session_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)?.[1];
 }
 
-export async function handleClaudeRequest(request, response, route, { responsesUrl, routedModels }) {
+// Anthropic Messages passthrough for routes whose provider serves Messages
+// natively (today: Kiro Prism's `/v1/messages`). The canonical path above
+// converts to Responses and drops `thinking`/`redacted_thinking` blocks, which
+// for Prism means the signed thinking Claude Code replays never arrives and
+// every turn re-thinks from nothing. Here the caller's body is forwarded with
+// only `model` rewritten, so thinking blocks and their signatures round-trip
+// unchanged, and the upstream Messages response -- JSON or SSE -- is relayed
+// byte-for-byte. `passthrough` supplies the target URL, the upstream model id
+// and the hop's headers; the credential is injected further down the hop, never
+// here.
+const PASSTHROUGH_REQUEST_HEADERS = ["anthropic-version", "anthropic-beta"];
+const PASSTHROUGH_RESPONSE_HEADERS = [
+  "content-type",
+  "request-id",
+  "retry-after",
+  "anthropic-ratelimit-requests-limit",
+  "anthropic-ratelimit-requests-remaining",
+  "anthropic-ratelimit-requests-reset",
+  "anthropic-ratelimit-tokens-limit",
+  "anthropic-ratelimit-tokens-remaining",
+  "anthropic-ratelimit-tokens-reset",
+];
+
+async function relayMessagesPassthrough(request, response, body, passthrough) {
+  const controller = new AbortController();
+  request.once("aborted", () => controller.abort());
+  response.once("close", () => {
+    if (!response.writableEnded) controller.abort();
+  });
+  const headers = {
+    ...(passthrough.headers || {}),
+    "content-type": "application/json",
+    accept: body.stream === true ? "text/event-stream" : "application/json",
+  };
+  for (const name of PASSTHROUGH_REQUEST_HEADERS) {
+    const value = request.headers[name];
+    if (value !== undefined) headers[name] = Array.isArray(value) ? value.join(",") : value;
+  }
+  headers["anthropic-version"] ||= "2023-06-01";
+  const upstream = await directLoopbackFetch(passthrough.url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ ...body, model: passthrough.model }),
+    signal: controller.signal,
+  });
+  if (!upstream.ok) {
+    const error = await upstreamError(upstream);
+    writeClaudeError(response, upstream.status, error.type, error.message);
+    return;
+  }
+  const responseHeaders = {};
+  for (const name of PASSTHROUGH_RESPONSE_HEADERS) {
+    const value = upstream.headers.get(name);
+    if (value) responseHeaders[name] = value;
+  }
+  responseHeaders["content-type"] ||= body.stream === true ? "text/event-stream; charset=utf-8" : "application/json";
+  if (body.stream === true) {
+    responseHeaders["cache-control"] = "no-cache";
+    responseHeaders["x-accel-buffering"] = "no";
+  }
+  response.writeHead(upstream.status, responseHeaders);
+  if (upstream.body) {
+    for await (const chunk of upstream.body) {
+      if (response.destroyed) break;
+      response.write(chunk);
+    }
+  }
+  response.end();
+}
+
+export async function handleClaudeRequest(request, response, route, { responsesUrl, routedModels, messagesPassthrough }) {
   if (request.method === "HEAD" && route === `${CLAUDE_ROUTE_PREFIX}/api/hello`) {
     response.writeHead(200);
     response.end();
@@ -568,9 +638,16 @@ export async function handleClaudeRequest(request, response, route, { responsesU
   if (transportRejected(request, response)) return true;
   try {
     const body = jsonBody(await readRequestBody(request, { maxBytes: MAX_BODY_BYTES }));
-    assertPublishedModel(body.model, routedModels);
+    const publishedSlug = assertPublishedModel(body.model, routedModels);
     if (countTokens) {
       writeJson(response, 200, { input_tokens: Math.max(1, Math.ceil(Buffer.byteLength(JSON.stringify(body), "utf8") / 4)) });
+      return true;
+    }
+    const passthrough = messagesPassthrough?.(publishedSlug, {
+      sessionId: claudeCodeSessionId(request.headers, body),
+    });
+    if (passthrough) {
+      await relayMessagesPassthrough(request, response, body, passthrough);
       return true;
     }
     const requestedModel = String(body.model);

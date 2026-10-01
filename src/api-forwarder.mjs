@@ -1025,6 +1025,21 @@ function normalizeBody(buffer, contentType, route) {
     error.status = 400;
     throw error;
   }
+  // Kiro Prism serves Anthropic Messages natively at `/v1/messages` beside its
+  // Responses endpoint. The router's Claude Code surface sends Prism-routed
+  // turns here unconverted so signed thinking survives (CLI-6). Forward the
+  // body as-is apart from the model id: no Anthropic shaping, because Prism
+  // applies its own and any rewrite risks touching a signed block.
+  if (route === "/messages" && canonicalProviderId(provider.id) === "kiro-prism") {
+    payload.model = model.upstreamModel;
+    return {
+      body: Buffer.from(JSON.stringify(payload), "utf8"),
+      model,
+      provider,
+      endpoint: endpointForModel(model),
+      payload,
+    };
+  }
   const expectedRoute =
     adapter?.route ||
     (provider.protocol === "anthropic"

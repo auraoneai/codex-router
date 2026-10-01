@@ -1390,6 +1390,27 @@ function routedHeaders(request, { jobType } = {}) {
   };
 }
 
+// Claude Code -> Kiro Prism goes straight to Prism's native `/v1/messages`
+// through the API forwarder (which owns the Prism key and adds Prism affinity),
+// skipping the Responses conversion that would drop signed thinking (CLI-6).
+// LiteLLM is bypassed for the same reason DeepSeek's Responses route bypasses
+// it. The trade is that this one surface/provider pair does not take part in
+// the router's cross-model failover: a Prism refusal is returned to Claude
+// Code as Prism's own error. `CODEX_ROUTER_CLAUDE_PRISM_PASSTHROUGH=0` restores
+// the converted path.
+function claudeMessagesPassthrough(slug, { sessionId } = {}) {
+  if (process.env.CODEX_ROUTER_CLAUDE_PRISM_PASSTHROUGH === "0") return undefined;
+  const route = MODEL_BY_SLUG.get(slug);
+  if (!route?.gatewayModel || canonicalProviderId(providerForModel(route)?.id) !== "kiro-prism") {
+    return undefined;
+  }
+  return {
+    url: `${API_BASE}/messages`,
+    model: route.gatewayModel,
+    headers: routedHeaders(sessionId ? { headers: { "session-id": sessionId } } : undefined),
+  };
+}
+
 // DeepSeek's current model already speaks Codex's wire protocol. The shared
 // API forwarder still owns credentials and upstream transport; bypass only
 // LiteLLM, whose unknown-model fallback simulates native Responses streaming.
@@ -1508,6 +1529,14 @@ function needsConsoleGoResponsesToolCompatibility(route) {
 // Console Go: the control becomes an ordinary function, discoveries become
 // ordinary tools, and calls are restored to Codex's native shape. Without it
 // Codex would have to ship every MCP schema on every turn to that route.
+//
+// Kiro Prism declares `supportsToolSearch: true` on every model
+// (config/kiro-prism/models.json) and so bypasses this relay: Prism's own
+// Responses converter translates `tool_search`, `tool_search_call`/
+// `tool_search_output` and namespace tools for every lane it serves, and
+// restores native `tool_search_call` items on the way back. Relaying here too
+// would hand Prism a plain function and an already-flattened history, so the
+// discovered-tool state Prism keeps across `previous_response_id` never forms.
 function carriesToolSearch(payload) {
   return (
     (Array.isArray(payload?.tools) && payload.tools.some((tool) => tool?.type === "tool_search")) ||
@@ -3979,7 +4008,17 @@ async function buildRoutedRequest({ request, payload, route, agedInput }) {
   // Legacy Chat routes retain their existing reasoning carry. The native
   // DeepSeek route already has exactly one plaintext reasoning item and must
   // not copy it into an assistant message for Chat translation.
-  if (!deepSeekResponses) {
+  //
+  // Responses-native providers skip the carry entirely. The carry exists to
+  // compensate for LiteLLM's Responses -> Chat translation dropping `reasoning`
+  // items; an `openai/responses/...` gateway entry forwards the items intact,
+  // so there is nothing to compensate for. Running it there replaced the
+  // reasoning item before every function_call with assistant prose -- losing
+  // its `encrypted_content` (Kiro Prism's `prism-kiro-sig:` signature) and
+  // surfacing private thinking as visible text -- and copied the text of a
+  // reasoning item that precedes an assistant message into that message, so
+  // the thinking was sent twice (RSN-1).
+  if (!deepSeekResponses && chatCompletionsProvider) {
     // Three replay channels, not two. A Chat route inside the native-reasoning
     // contract carries its thinking as `thinking` parts for the forwarder to
     // restore as reasoning_content; a Chat route outside it drops the thinking
@@ -6548,10 +6587,12 @@ async function handleRequest(request, response) {
   // Claude Code speaks Anthropic Messages. This leaf translates that protocol
   // and re-enters the canonical Responses path, so routing, failover, usage,
   // and provider credentials stay on the same shared plane as every client.
+  // Kiro Prism routes are the exception: see `claudeMessagesPassthrough`.
   if (isClaudeRoute(route)) {
     await handleClaudeRequest(request, response, route, {
       responsesUrl: `${callerBaseUrl(LISTEN_PORT, CALLER_KEY)}/responses`,
       routedModels: routedClientModels,
+      messagesPassthrough: claudeMessagesPassthrough,
     });
     return;
   }
