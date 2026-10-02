@@ -46,15 +46,15 @@
       "compHash": "kiro-prism-claude-opus-5-5-v1"
     },
     {
-      "slug": "kiro-prism/claude-sonnet-5",
-      "gatewayModel": "kiro-prism-claude-sonnet-5",
-      "upstreamModel": "claude-sonnet-5",
+      "slug": "kiro-prism/claude-sonnet-5.5",
+      "gatewayModel": "kiro-prism-claude-sonnet-5-5",
+      "upstreamModel": "claude-sonnet-5.5",
       "provider": "kiro-prism",
       "listed": true,
-      "displayName": "claude-sonnet-5 (Kiro Prism)",
-      "description": "Kiro Prism model claude-sonnet-5",
+      "displayName": "Claude Sonnet 5.5 Preview (Kiro Prism)",
+      "description": "Experimental preview of Claude Sonnet 5.5 through Kiro Prism · 1M context · 1.3x credits",
       "priority": 99,
-      "defaultEffort": "medium",
+      "defaultEffort": "high",
       "reasoningLevels": [
         {
           "effort": "low",
@@ -79,7 +79,7 @@
       ],
       "contextWindow": 1000000,
       "autoCompact": 650000,
-      "maxOutputTokens": 64000,
+      "maxOutputTokens": 128000,
       "inputModalities": [
         "text",
         "image"
@@ -87,7 +87,7 @@
       "supportsReasoningSummaries": true,
       "supportsToolSearch": true,
       "supportsImageDetailOriginal": true,
-      "compHash": "kiro-prism-claude-sonnet-5-v1"
+      "compHash": "kiro-prism-claude-sonnet-5-5-v1"
     },
     {
       "slug": "kiro-prism/gpt-5.6-sol",

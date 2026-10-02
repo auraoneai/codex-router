@@ -959,6 +959,8 @@ function modelProblem(model, providers, slugs, gatewayModels) {
 }
 
 const STATIC_MODEL_SLUG_ALIASES = new Map([
+  // Sonnet 5 has been superseded in Prism; preserve saved callers and picker state.
+  ["kiro-prism/claude-sonnet-5", "kiro-prism/claude-sonnet-5.5"],
   // Z.ai revealed the OpenCode Go Ox Alpha preview as GLM-5.3-Flash. The
   // provider withdrew ox-alpha-free when it published the named model, so
   // preserve existing picker and caller state on the new live route.

@@ -28,6 +28,21 @@ const {
   resolveProviderBaseUrl,
 } = await import("../src/model-registry.mjs");
 
+test("Prism Sonnet 5 migrates to the listed 5.5 preview without a duplicate picker entry", () => {
+  const model = MODEL_BY_SLUG.get("kiro-prism/claude-sonnet-5.5");
+  assert.ok(model);
+  assert.equal(model.upstreamModel, "claude-sonnet-5.5");
+  assert.equal(model.contextWindow, 1_000_000);
+  assert.equal(model.autoCompact, 650_000);
+  assert.equal(model.maxOutputTokens, 128_000);
+  assert.equal(model.defaultEffort, "high");
+  assert.match(model.description, /[Ee]xperimental preview/);
+  assert.match(model.description, /1\.3x credits/);
+  assert.equal(MODEL_BY_SLUG.get("kiro-prism/claude-sonnet-5"), model);
+  assert.equal(MODEL_SLUG_ALIASES.get("kiro-prism/claude-sonnet-5"), model.slug);
+  assert.equal(LISTED_MODELS.some((entry) => entry.slug === "kiro-prism/claude-sonnet-5"), false);
+});
+
 test("provider registry exposes configured API and OAuth model families", () => {
   // Order follows the deterministic sorted walk of the config/ vendor tree;
   // picker placement comes from each model's priority field, not this list.
