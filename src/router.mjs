@@ -103,6 +103,7 @@ import {
 } from "./model-registry.mjs";
 import { isProviderPrefixedSlug, unroutedModelError } from "./unrouted-model.mjs";
 import { createHealthCache } from "./health-cache.mjs";
+import { handleStatusSnapshotRequest } from "./router-status-snapshot.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { readNativeAliases } from "./native-alias.mjs";
 import { nativeContextVariantBase } from "./native-context-variants.mjs";
@@ -6625,6 +6626,19 @@ async function handleRequest(request, response) {
       return;
     }
     writeJson(response, 200, requestProgress.snapshot({ threadId }));
+    return;
+  }
+  // Behind the caller capability with the other local status leaves: serves
+  // the tray-polled sections from this long-lived process so a burst of polls
+  // costs file reads instead of a node spawn each. Same bytes `control`
+  // prints; `control` falls back to computing locally whenever the router
+  // cannot serve a section.
+  if (
+    request.method === "GET" &&
+    ["/status/snapshot", "/v1/status/snapshot"].includes(requestUrl.pathname)
+  ) {
+    const { status, body } = await handleStatusSnapshotRequest(requestUrl);
+    writeJson(response, status, body);
     return;
   }
   if (request.method === "GET" && ["/models", "/v1/models"].includes(requestUrl.pathname)) {

@@ -63,7 +63,7 @@ test("invalid names fail closed without throwing", () => {
 });
 
 test("ships a TTL for every cached command", () => {
-  for (const name of ["provider-usage", "account", "providers", "probe"]) {
+  for (const name of ["provider-usage", "account", "providers", "probe", "overview"]) {
     assert.ok(
       Number.isFinite(CONTROL_SNAPSHOT_TTLS_MS[name]) && CONTROL_SNAPSHOT_TTLS_MS[name] > 0,
       name,

@@ -25,6 +25,10 @@ export const CONTROL_SNAPSHOT_TTLS_MS = Object.freeze({
   account: 30_000,
   providers: 20_000,
   probe: 60_000,
+  // The overview fans out to one probe child per target, so it is the most
+  // expensive status read; a minute collapses the tray and turn-completion
+  // polls the same way the probe TTL collapses the per-target ones.
+  overview: 60_000,
 });
 
 const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024;
@@ -37,21 +41,30 @@ export function controlSnapshotPath(name) {
   return path.join(STATE_DIR, `control-snapshot-${name}.json`);
 }
 
-export function readControlSnapshot(name, ttlMs) {
-  if (!Number.isFinite(ttlMs) || ttlMs <= 0) return undefined;
+// Same validation as readControlSnapshot without the freshness verdict, so a
+// server can report staleness to the caller instead of collapsing it into a
+// miss. The caller decides whether stale bytes are acceptable.
+export function readControlSnapshotWithMeta(name) {
   try {
     const target = controlSnapshotPath(name);
     if (!existsSync(target)) return undefined;
     if (lstatSync(target).isSymbolicLink()) return undefined;
     const stat = statSync(target);
     if (stat.size > MAX_SNAPSHOT_BYTES) return undefined;
-    if (Date.now() - stat.mtimeMs > ttlMs) return undefined;
     const parsed = JSON.parse(readFileSync(target, "utf8"));
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-    return parsed;
+    return { value: parsed, mtimeMs: stat.mtimeMs };
   } catch {
     return undefined;
   }
+}
+
+export function readControlSnapshot(name, ttlMs) {
+  if (!Number.isFinite(ttlMs) || ttlMs <= 0) return undefined;
+  const entry = readControlSnapshotWithMeta(name);
+  if (!entry) return undefined;
+  if (Date.now() - entry.mtimeMs > ttlMs) return undefined;
+  return entry.value;
 }
 
 export function writeControlSnapshot(name, value) {

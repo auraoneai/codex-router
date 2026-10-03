@@ -924,6 +924,26 @@ async function probeTargets() {
 }
 
 async function printOverview(asJson) {
+  if (asJson) {
+    // Served from the router when it is up: one HTTP read instead of a probe
+    // child per target. Any miss falls through to the local computation,
+    // which rewarm the shared file the next poll reads.
+    const { fetchSectionData } = await import("./router-status-client.mjs");
+    const served = await fetchSectionData("overview", {
+      refresh: args.includes("--refresh"),
+    });
+    if (served !== undefined) {
+      process.stdout.write(`${JSON.stringify(served, null, 2)}\n`);
+      return;
+    }
+    if (!args.includes("--refresh")) {
+      const snapshot = readControlSnapshot("overview", CONTROL_SNAPSHOT_TTLS_MS.overview);
+      if (snapshot !== undefined) {
+        process.stdout.write(`${JSON.stringify(snapshot, null, 2)}\n`);
+        return;
+      }
+    }
+  }
   const targets = await probeTargets();
   if (asJson) {
     // The tray polls this. Presence rides along so the rule that decides
@@ -933,25 +953,21 @@ async function printOverview(asJson) {
     // the variant that probes the web port, or the tray reads every running
     // harness as stopped and offers to start one that is already up.
     const catalog = await routerCatalogSnapshot();
-    process.stdout.write(
-      `${JSON.stringify(
-        {
-          targets,
-          // Keep this separate from `targets.codex`: native Codex entries and
-          // login-free aliases are client concerns, while this catalog is the
-          // durable router policy shared by Codex, DSH, and Gemini.
-          catalog,
-          // Explicit sharing consent and login usability are separate facts.
-          // This projection contains no token, account id, credential path, or
-          // filesystem age even though the underlying doctor status does.
-          chatgptSession: await chatGptSessionStatus(),
-          presence: presenceSnapshot(),
-          harness: await harnessSnapshotWithWeb(),
-        },
-        null,
-        2,
-      )}\n`,
-    );
+    const overview = {
+      targets,
+      // Keep this separate from `targets.codex`: native Codex entries and
+      // login-free aliases are client concerns, while this catalog is the
+      // durable router policy shared by Codex, DSH, and Gemini.
+      catalog,
+      // Explicit sharing consent and login usability are separate facts.
+      // This projection contains no token, account id, credential path, or
+      // filesystem age even though the underlying doctor status does.
+      chatgptSession: await chatGptSessionStatus(),
+      presence: presenceSnapshot(),
+      harness: await harnessSnapshotWithWeb(),
+    };
+    writeControlSnapshot("overview", overview);
+    process.stdout.write(`${JSON.stringify(overview, null, 2)}\n`);
     return;
   }
   for (const target of TARGETS) {
@@ -1105,6 +1121,12 @@ async function printAccountUsage() {
       "ChatGPT account profiles are unavailable while credential discovery is disabled.",
     );
   }
+  const { fetchSectionData } = await import("./router-status-client.mjs");
+  const served = await fetchSectionData("account", { refresh: args.includes("--refresh") });
+  if (served !== undefined) {
+    process.stdout.write(`${JSON.stringify(served, null, 2)}\n`);
+    return;
+  }
   if (!args.includes("--refresh")) {
     const snapshot = readControlSnapshot("account", CONTROL_SNAPSHOT_TTLS_MS.account);
     if (snapshot !== undefined) {
@@ -1112,27 +1134,21 @@ async function printAccountUsage() {
       return;
     }
   }
-  const { readCodexAccountUsage } = await import("./codex-account-usage.mjs");
-  const {
-    ensureChatGPTProfileAccounts,
-    selectedChatGPTUsageProfile,
-  } = await import("./chatgpt-profile-switch.mjs");
-  await ensureChatGPTProfileAccounts();
-  const profile = selectedChatGPTUsageProfile();
-  const usage = profile.home
-    ? await readCodexAccountUsage({ codexHome: profile.home })
-    : await readCodexAccountUsage();
-  const output = {
-    ...usage,
-    accountSelection: profile.selection,
-    accountEmail: profile.email || null,
-    profilePending: profile.pending === true,
-  };
+  const { buildAccountUsageReport } = await import("./pool-usage-report.mjs");
+  const output = await buildAccountUsageReport();
   writeControlSnapshot("account", output);
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
 }
 
 async function printProviderUsage() {
+  const { fetchSectionData } = await import("./router-status-client.mjs");
+  const served = await fetchSectionData("provider-usage", {
+    refresh: args.includes("--refresh"),
+  });
+  if (served !== undefined) {
+    process.stdout.write(`${JSON.stringify(served, null, 2)}\n`);
+    return;
+  }
   if (!args.includes("--refresh")) {
     const snapshot = readControlSnapshot("provider-usage", CONTROL_SNAPSHOT_TTLS_MS["provider-usage"]);
     if (snapshot !== undefined) {
@@ -1147,6 +1163,12 @@ async function printProviderUsage() {
 }
 
 async function printProviderOnboarding() {
+  const { fetchSectionData } = await import("./router-status-client.mjs");
+  const served = await fetchSectionData("providers", { refresh: args.includes("--refresh") });
+  if (served !== undefined) {
+    process.stdout.write(`${JSON.stringify(served, null, 2)}\n`);
+    return;
+  }
   if (!args.includes("--refresh")) {
     const snapshot = readControlSnapshot("providers", CONTROL_SNAPSHOT_TTLS_MS.providers);
     if (snapshot !== undefined) {
@@ -3936,12 +3958,17 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
     // the resulting order. This is the only place that probe is driven: the
     // request path reads the snapshot and never spawns an app-server itself.
     const { probeChatGPTAccountUsage } = await import("./chatgpt-usage-probe.mjs");
-    const { rotationCandidates, leftoverHealth, accountCooldownUntil } = await import("./chatgpt-rotation.mjs");
     // `cached` reports what rotation is deciding on right now without spending
     // a probe; the default refreshes first. Reading the file in both cases is
     // what makes the two agree about the ranking.
     let snapshot;
     if (value === "cached") {
+      const { fetchSectionData } = await import("./router-status-client.mjs");
+      const served = await fetchSectionData("chatgpt-usage");
+      if (served !== undefined) {
+        process.stdout.write(`${JSON.stringify(served)}\n`);
+        return;
+      }
       const { CHATGPT_ACCOUNT_USAGE_CACHE_PATH } = await import("./paths.mjs");
       try {
         snapshot = JSON.parse(readFileSync(CHATGPT_ACCOUNT_USAGE_CACHE_PATH, "utf8"));
@@ -3951,35 +3978,8 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
     } else {
       snapshot = await probeChatGPTAccountUsage();
     }
-    const usageById = new Map((snapshot?.accounts || []).map((entry) => [entry.id, entry]));
-    const order = rotationCandidates({ usageById }).map((entry) => entry.id);
-    const now = Date.now();
-    let poolState;
-    try { poolState = readChatGPTAccountPoolState(); } catch { poolState = { accounts: {} }; }
-    const { accountSpendsCredits } = await import("./chatgpt-rotation.mjs");
-    process.stdout.write(`${JSON.stringify({
-      fetchedAt: snapshot?.fetchedAt,
-      rotation: order,
-      accounts: (snapshot?.accounts || []).map((entry) => ({
-        id: entry.id,
-        label: entry.label,
-        preferred: entry.preferred,
-        planType: entry.planType,
-        health: leftoverHealth(entry),
-        cooling: (accountCooldownUntil(entry.id) || 0) > now,
-        cooldownUntil: accountCooldownUntil(entry.id) || null,
-        primaryRemainingPercent: entry.primary?.remainingPercent ?? null,
-        secondaryRemainingPercent: entry.secondary?.remainingPercent ?? null,
-        resetCredits: entry.resetCredits ?? null,
-        credits: entry.credits ?? null,
-        creditFallback: poolState.accounts?.[entry.id]?.creditFallback === true,
-        spendingCredits: accountSpendsCredits(poolState.accounts?.[entry.id], entry, now),
-        resetAttemptPending: chatGPTSubscriptionAccountResetAttemptPending(entry.id, { state: poolState }),
-        resetsAt: entry.secondary?.resetsAt ?? entry.primary?.resetsAt ?? null,
-        ...(entry.authInvalid ? { authInvalid: true, authErrorCode: entry.authErrorCode || "token_revoked" } : {}),
-        ...(entry.error ? { error: entry.error } : {}),
-      })),
-    })}\n`);
+    const { buildChatGPTUsageReport } = await import("./pool-usage-report.mjs");
+    process.stdout.write(`${JSON.stringify(await buildChatGPTUsageReport(snapshot, {}))}\n`);
     return;
   }
   if (action === "profile") {

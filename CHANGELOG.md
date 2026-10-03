@@ -486,6 +486,17 @@
   `account`, `providers`, and `--probe` now serve a file-backed snapshot
   (90/30/20/60s TTLs; `--refresh` forces a recompute). Served bytes are
   identical to a fresh computation; only the recompute cadence changes.
+- **Tray-polled status reads no longer each boot a node process.** The router
+  serves `overview`, `account`, `provider-usage`, `providers`, and both pool
+  usage rankings from a new caller-authenticated `GET /v1/status/snapshot`
+  endpoint (file-backed per-section TTLs, single-flight background refresh,
+  stale-while-revalidate), and `control` reads it first, falling back to local
+  computation whenever a section is missing, stale past what the caller
+  accepts, or the router is down (`MODEL_ROUTER_STATUS_HTTP=0` or `--local`
+  forces local). The overview joins the snapshot file cache (60s TTL) so a
+  poll stops fanning out to one probe child per target, and pool cooling
+  fields now reflect the router's live cooldowns instead of a spawned
+  process's empty ones. Served bytes are otherwise identical.
 
 ## 0.6.0
 
