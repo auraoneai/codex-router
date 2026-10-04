@@ -31,6 +31,7 @@ import {
   promoteNativeMultiAgent,
   routedCatalogConfigured,
   routedModel,
+  withKiroCodexUltra,
 } from "../src/catalog.mjs";
 import { sidecarSearchAvailable } from "../src/search-capability.mjs";
 
@@ -831,6 +832,38 @@ test("login-free catalog assigns slots to models of credentialed providers", () 
     assert.equal(bySlug.get("gpt-5.5").visibility, "list");
     assert.equal(bySlug.get("kimi-oauth/k3").visibility, "hide");
   });
+});
+
+test("Kiro Ultra is a verified Codex-only choice without mutating upstream metadata", () => {
+  const registry = JSON.parse(readFileSync(new URL("../config/kiro-prism/models.json", import.meta.url), "utf8"));
+  const before = JSON.stringify(registry);
+  const models = withKiroCodexUltra(registry.models, "codex-cli 0.160.0");
+  for (const model of models) {
+    const nativeMax = model.reasoningLevels.some((level) => level.effort === "max");
+    assert.equal(model.reasoningLevels.some((level) => level.effort === "ultra"), nativeMax, model.slug);
+    assert.equal(model.defaultEffort, registry.models.find((entry) => entry.slug === model.slug).defaultEffort);
+    const published = routedModel(template, model);
+    assert.equal(published.supported_reasoning_levels.some((level) => level.effort === "ultra"), nativeMax);
+  }
+  assert.equal(JSON.stringify(registry), before);
+  assert.deepEqual(withKiroCodexUltra(models, "codex-cli 0.160.0"), models);
+});
+
+test("Kiro Ultra stays off for unverified clients and unrelated routes", () => {
+  const kiro = {
+    ...grok, provider: "kiro-prism", upstreamModel: "gpt-5.6-sol", slug: "kiro-prism/gpt-5.6-sol",
+    reasoningLevels: [{ effort: "max", description: "Maximum reasoning" }],
+  };
+  for (const version of [undefined, "unknown", "codex-cli 0.159.3", "codex-cli 0.160.0-alpha.1", "codex-cli 0.161.0-alpha.1"]) {
+    assert.deepEqual(withKiroCodexUltra([kiro], version), [kiro]);
+  }
+  for (const model of [
+    { ...kiro, provider: "other" },
+    { ...kiro, upstreamModel: "future-model", slug: "kiro-prism/future-model" },
+    { ...kiro, slug: "kiro-prism/alias" },
+    { ...kiro, reasoningLevels: [{ effort: "high" }] },
+  ]) assert.deepEqual(withKiroCodexUltra([model], "codex-cli 0.160.0"), [model]);
+  assert.equal(withKiroCodexUltra([kiro], "codex-cli 0.160.1")[0].reasoningLevels.at(-1).effort, "ultra");
 });
 
 test("effort vocabulary follows the installed codex build's enum history", () => {

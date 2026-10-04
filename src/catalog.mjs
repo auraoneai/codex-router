@@ -450,6 +450,40 @@ const BASELINE_EFFORTS = ["minimal", "low", "medium", "high", "xhigh"];
 const EFFORT_LADDER = [...BASELINE_EFFORTS, "max", "ultra"];
 const MAX_EFFORT_SINCE = [0, 143, 0];
 
+// Ultra is a Codex orchestration choice, not a Kiro reasoning tier. Codex
+// 0.160.0 was verified to send max on the wire while adding its proactive
+// delegation instructions. Keep this adaptation out of the shared registry:
+// other clients may forward the literal effort instead. Earlier Codex builds
+// recognize the enum, but have not been verified to perform that translation.
+export function withKiroCodexUltra(models, version) {
+  const match = /(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.]+)?/.exec(String(version || ""));
+  if (!match) return models;
+  const [major, minor] = match.slice(1, 4).map(Number);
+  if (match[4] || (major === 0 && minor < 160)) {
+    return models;
+  }
+  const supported = new Set([
+    "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+    "claude-opus-5.5", "claude-sonnet-5.5",
+  ]);
+  return models.map((model) => {
+    if (
+      model.provider !== "kiro-prism" ||
+      !supported.has(model.upstreamModel) ||
+      model.slug !== `kiro-prism/${model.upstreamModel}` ||
+      !model.reasoningLevels?.some((level) => level.effort === "max") ||
+      model.reasoningLevels.some((level) => level.effort === "ultra")
+    ) return model;
+    return {
+      ...model,
+      reasoningLevels: [
+        ...model.reasoningLevels,
+        { effort: "ultra", description: "Maximum reasoning with proactive subagent delegation" },
+      ],
+    };
+  });
+}
+
 export function codexEffortVocabulary(version) {
   const match = /(\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.]+)?/.exec(String(version || ""));
   if (!match) return new Set(BASELINE_EFFORTS);
@@ -1140,8 +1174,12 @@ export function publishCatalog({ refreshNative = refresh, output = true } = {}) 
   // Clamp before announcements and agent sync so every surface Codex reads —
   // picker levels, defaults, and announcement copy — stays inside the effort
   // vocabulary the installed build can actually deserialize.
+  const installedCodexVersion = codexVersion();
   const { models: routedModels, announcedAt } = annotateNewModelAnnouncements(
-    clampModelEfforts(allMultiAgentModels, codexEffortVocabulary(codexVersion())),
+    clampModelEfforts(
+      withKiroCodexUltra(allMultiAgentModels, installedCodexVersion),
+      codexEffortVocabulary(installedCodexVersion),
+    ),
     readAnnouncedAt(),
     userSlugs,
     Date.now(),
