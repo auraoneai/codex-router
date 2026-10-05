@@ -7,8 +7,8 @@ on a task, find every line under "Topic files" whose condition matches the task
 and read each linked file in full: that file is **mandatory reading** for that
 task, not background. When a task matches several lines, read all of them. When
 unsure whether a line applies, read the file. Instructions cross-reference each
-other by section title; "Where each moved section lives" below maps every title
-to its file.
+other by section title; `docs/agents/SECTION-MAP.md` maps every title to its
+file.
 
 ## Repository maintenance workflow
 
@@ -95,7 +95,7 @@ Codex client surfaces and the macOS tray:
 
 Changing any file under `docs/agents/` follows the same rule as changing this
 index: move or edit instructions in one place only, and keep this index's
-conditions and the table below accurate.
+conditions and `docs/agents/SECTION-MAP.md` accurate.
 
 ## Requests to install or expose more models
 
@@ -188,52 +188,5 @@ runs against the real `CODEX_HOME`, and traffic gets a local
 
 ## Where each moved section lives
 
-- "Codex outcome" → `docs/agents/install-codex.md`
-- "Codex procedure" → `docs/agents/install-codex.md`
-- "DeepSeek Harness outcome" → `docs/agents/install-deepseek-harness.md`
-- "DeepSeek Harness procedure" → `docs/agents/install-deepseek-harness.md`
-- "Gemini CLI outcome" → `docs/agents/install-gemini-cli.md`
-- "Gemini CLI procedure" → `docs/agents/install-gemini-cli.md`
-- "Cursor outcome" → `docs/agents/install-cursor.md`
-- "Cursor procedure" → `docs/agents/install-cursor.md`
-- "Claude Code outcome" → `docs/agents/install-claude-code.md`
-- "OpenClaw outcome" → `docs/agents/install-openclaw.md`
-- "What the Gemini integration writes, and what it must never touch" → `docs/agents/install-gemini-cli.md`
-- "What the harness integration writes, and what it must never touch" → `docs/agents/install-deepseek-harness.md`
-- "The Python gateway is installed from a hash-verified lock" → `docs/agents/python-gateway-lock.md`
-- "`stop` and `start` act on the same layer, and the proxy survives either" → `docs/agents/service-and-gateway-lifecycle.md`
-- "The gateway is restarted in place; the router is not taken down with it" → `docs/agents/service-and-gateway-lifecycle.md`
-- "Add models for the current user" → `docs/agents/models-add-for-current-user.md`
-- "Subagent capability is researched, not asserted" → `docs/agents/subagents.md`
-- "Ship a model to every installer" → `docs/agents/models-ship-to-every-installer.md`
-- "Republish a native model at a different context window" → `docs/agents/models-ship-to-every-installer.md`
-- "Ship a new provider to every installer" → `docs/agents/models-ship-to-every-installer.md`
-- "Vision bridge for text-only models" → `docs/agents/vision-bridge.md`
-- "Anonymous remote providers" → `docs/agents/providers-anonymous-custom-local.md`
-- "Ox Alpha became GLM-5.3-Flash on OpenCode Go" → `docs/agents/opencode-go-glm-and-union-alpha.md`
-- "Union Alpha on OpenCode Go Messages must compact above the tool floor" → `docs/agents/opencode-go-glm-and-union-alpha.md`
-- "A provider whose models each name their own endpoint" → `docs/agents/providers-anonymous-custom-local.md`
-- "Cursor target" → `docs/agents/install-cursor.md`
-- "Local models as a provider" → `docs/agents/providers-anonymous-custom-local.md`
-- "Embeddings are a separate, explicitly gated route" → `docs/agents/embeddings.md`
-- "The Devin CLI provider is unverified, and says so" → `docs/agents/provider-devin-cli.md`
-- "The `codex` shim is opt-in and must never break `codex`" → `docs/agents/codex-shim.md`
-- "Detecting whether Codex is open" → `docs/agents/macos-tray-and-presence.md`
-- "The macOS app icon is committed, not built during a tray build" → `docs/agents/macos-tray-and-presence.md`
-- "Upstream retries are legal only before the first relayed byte" → `docs/agents/retries-and-failover.md`
-- "Moving a turn to another model is legal only before the first relayed byte" → `docs/agents/retries-and-failover.md`
-- "A completed function_call must carry parseable JSON arguments" → `docs/agents/stream-tool-call-integrity.md`
-- "Command Code is reached by two routes, and the plan picks which" → `docs/agents/provider-commandcode.md`
-- "LiteLLM's echoed prelude sets the pre-commit frame bounds" → `docs/agents/stream-frame-bounds-and-keepalive.md`
-- "DeepSeek Responses and Chat reasoning replay" → `docs/agents/stream-reasoning-and-phase.md`
-- "Substituting a prompt-token count a provider reported as zero" → `docs/agents/prompt-token-substitution.md`
-- "A silent Grok stream is kept alive, never replayed" → `docs/agents/stream-frame-bounds-and-keepalive.md`
-- "Routed assistant messages carry a phase label" → `docs/agents/stream-reasoning-and-phase.md`
-- "A model that writes its tool calls as text has them recovered, not relayed" → `docs/agents/stream-tool-call-integrity.md`
-- "Chat Completions reasoning reaches Codex as one reasoning item" → `docs/agents/stream-reasoning-and-phase.md`
-- "Routed subagent regression prevention" → `docs/agents/subagents.md`
-- "Installing the harness is one action, and it is never a side effect" → `docs/agents/install-deepseek-harness.md`
-- "Five clients, one publisher, one key each" → `docs/agents/published-clients.md`
-- "Native GPT for a client with no ChatGPT login of its own" → `docs/agents/native-gpt-session.md`
-- "A provider-prefixed slug is never forwarded to ChatGPT" → `docs/agents/native-gpt-session.md`
-- "A client the tray cannot watch keeps the router on" → `docs/agents/macos-tray-and-presence.md`
+When an instruction cross-references a section by title, find its file in
+`docs/agents/SECTION-MAP.md`.
