@@ -1411,9 +1411,13 @@ and catalog refreshes do not silently opt an existing installation into this
 provider switch.
 
 The optional native redirect is independent of this switch and of model
-failover. If native redirect is set, every unmatched native GPT turn that
-reaches the router continues to use its configured external route until
-`./bin/control native-redirect clear` is run.
+failover. If native redirect is set, ordinary unmatched native GPT turns use
+its configured external route until `./bin/control native-redirect clear` is run.
+Compaction with an explicit model always keeps that model: native models use
+native compaction, and provider-qualified models use routed compaction. Neither
+a prior routed turn in the same session nor the global redirect overrides an
+explicit compaction model. A compaction request with no model retains the
+existing operator-model fallback.
 
 ### Use Codex without an OpenAI login
 

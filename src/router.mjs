@@ -4721,26 +4721,23 @@ async function handleResponses(request, response, requestUrl) {
       );
       return;
     }
+    // Detect compaction before the optional background-model redirect. An
+    // explicit compaction model owns its history and must stay on that route.
+    const compactingTurn =
+      /\/responses\/compact$/.test(requestUrl.pathname) ||
+      (Array.isArray(payload.input) && payload.input.at(-1)?.type === "compaction_trigger");
     // An unregistered model on this endpoint is native GPT traffic -- Codex's
     // background agent sessions arrive here hardwired to a native slug no
     // matter which model the user picked. With the redirect opted in, send
     // them to the configured routed model; a target that is unknown or whose
     // provider is hidden leaves the turn native rather than trading a quota
     // failure for a routing error.
-    if (!registeredRoute && requestedModel) {
+    if (!registeredRoute && requestedModel && !compactingTurn) {
       const redirect = MODEL_BY_SLUG.get(readNativeRedirect());
       if (redirect && routeProviderEnabled(redirect.provider)) {
         registeredRoute = redirect;
       }
     }
-    // A compaction turn is not a model choice the operator made, so it must not
-    // overwrite the remembered model, and it is the case that most needs to
-    // inherit one. Both tests are pure reads of the path and the payload, so
-    // deriving them here rather than after dispatch changes nothing except
-    // making them available to the decision below.
-    const compactingTurn =
-      /\/responses\/compact$/.test(requestUrl.pathname) ||
-      (Array.isArray(payload.input) && payload.input.at(-1)?.type === "compaction_trigger");
     // A real turn on a routed model records what the operator is actually
     // using. A compaction without a model can inherit that hint. An explicit
     // model, including a native one, belongs to this request: the shared hint

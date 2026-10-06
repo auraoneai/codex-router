@@ -16,9 +16,10 @@ export const NATIVE_REDIRECT_PATH =
 // and similar utility work -- on a hardcoded native GPT model, regardless of
 // the model the user picked. When the OpenAI quota is exhausted those turns
 // all fail, and the features they power silently stop working. This optional
-// redirect sends every native turn that reaches the router to a routed model
+// redirect sends ordinary unregistered native turns to a routed model
 // instead, so the background machinery keeps running on the user's paid
-// provider. It is deliberately all-or-nothing: the native turns carry no
+// provider. Explicit compaction models are exempt: their history stays on the
+// requested native or routed path. Ordinary native turns carry no
 // reliable marker separating background work from a deliberately picked GPT
 // model, and the users who opt in are the ones with no native quota to spend.
 export function readNativeRedirect() {

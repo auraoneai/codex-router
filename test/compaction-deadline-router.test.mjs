@@ -28,6 +28,7 @@ async function mockServer(handler) {
 }
 
 function run(env) {
+  const isolatedHome = mkdtempSync(path.join(os.tmpdir(), "compaction-codex-home-"));
   const child = spawn(process.execPath, [path.join(root, "src", "router.mjs")], {
     cwd: root,
     env: {
@@ -38,9 +39,11 @@ function run(env) {
       KIMI_INTERNAL_KEY: INTERNAL_KEY,
       CODEX_ROUTER_SHOW_ALL_MODELS: "1",
       ...env,
+      CODEX_HOME: isolatedHome,
     },
     stdio: ["ignore", "ignore", "pipe"],
   });
+  child.once("exit", () => rmSync(isolatedHome, { recursive: true, force: true }));
   child.stderr.setEncoding("utf8");
   let errors = "";
   child.stderr.on("data", (chunk) => {
@@ -134,11 +137,14 @@ test("a compaction against a silent provider fails on its own deadline", async (
   }
 });
 
-test("explicit native compaction keeps its model despite another conversation's routed hint", async () => {
+test("explicit compaction models survive global redirect and prior routed turns", async () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "compaction-route-state-"));
   const operatorModelPath = path.join(stateDir, "operator-model.json");
   writeFileSync(operatorModelPath, JSON.stringify({
     version: 1, slug: "deepseek/deepseek-v4-pro", native: false,
+  }));
+  writeFileSync(path.join(stateDir, "native-redirect.json"), JSON.stringify({
+    version: 1, model: "deepseek/deepseek-v4-pro",
   }));
   const nativeRequests = [];
   const routedRequests = [];
@@ -182,9 +188,17 @@ test("explicit native compaction keeps its model despite another conversation's 
   const input = [{ type: "message", role: "user", content: [{ type: "input_text", text: "Keep my original model." }] }];
   try {
     await waitFor(`${routerBase(routerPort)}/models`, router);
+    // Prime the same session on a routed model before switching back to native.
+    const prior = await post("/responses", {
+      model: "deepseek/deepseek-v4-pro", prompt_cache_key: "switch-back", input,
+    });
+    await prior.text();
+    assert.equal(prior.status, 400);
+    assert.equal(routedRequests.length, 1);
+    routedRequests.length = 0;
     for (const endpoint of ["/responses/compact", "/responses"]) {
       const response = await post(endpoint, {
-        model: "gpt-6-astra", stream: false,
+        model: "gpt-6-astra", stream: false, prompt_cache_key: "switch-back",
         input: endpoint.endsWith("/compact") ? input : [...input, { type: "compaction_trigger" }],
       });
       assert.equal(response.status, 200, await response.text());
@@ -203,6 +217,13 @@ test("explicit native compaction keeps its model despite another conversation's 
     await response.text();
     assert.equal(response.status, 400);
     assert.equal(routedRequests.length, 2);
+    assert.equal(nativeRequests.length, 2);
+
+    // Ordinary requests still honor the separately opted-in background redirect.
+    const ordinary = await post("/responses", { model: "native-unregistered-test", input });
+    await ordinary.text();
+    assert.equal(ordinary.status, 400);
+    assert.equal(routedRequests.length, 3);
     assert.equal(nativeRequests.length, 2);
   } finally {
     if (router.exitCode === null && router.signalCode === null) {
