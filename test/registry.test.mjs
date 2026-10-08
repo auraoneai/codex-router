@@ -43,6 +43,33 @@ test("Prism Sonnet 5 migrates to the listed 5.5 preview without a duplicate pick
   assert.equal(LISTED_MODELS.some((entry) => entry.slug === "kiro-prism/claude-sonnet-5"), false);
 });
 
+test("Prism serves Claude Fable 5.1 as a listed 1M-context preview", () => {
+  // Kiro model governance enabled Fable 5.1 on 2026-10-08; Prism's live catalog
+  // publishes it with the same effort ladder, modalities and window as Sonnet 5.5.
+  const model = MODEL_BY_SLUG.get("kiro-prism/claude-fable-5.1");
+  assert.ok(model);
+  assert.equal(model.provider, "kiro-prism");
+  assert.equal(model.gatewayModel, "kiro-prism-claude-fable-5-1");
+  assert.equal(model.upstreamModel, "claude-fable-5.1");
+  assert.equal(model.listed, true);
+  assert.equal(model.displayName, "Claude Fable 5.1 Preview (Kiro Prism)");
+  assert.equal(model.contextWindow, 1_000_000);
+  assert.equal(model.autoCompact, 650_000);
+  assert.equal(model.maxOutputTokens, 128_000);
+  assert.equal(model.defaultEffort, "high");
+  assert.deepEqual(
+    model.reasoningLevels.map((level) => level.effort),
+    ["low", "medium", "high", "xhigh", "max"],
+  );
+  assert.match(model.description, /[Ee]xperimental preview/);
+  assert.match(model.description, /6x credits/);
+  assert.equal(model.multiAgentVersion, undefined);
+  assert.equal(LISTED_MODELS.some((entry) => entry.slug === "kiro-prism/claude-fable-5.1"), true);
+  const sonnet = MODEL_BY_SLUG.get("kiro-prism/claude-sonnet-5.5");
+  assert.deepEqual(model.inputModalities, sonnet.inputModalities);
+  assert.equal(new Set(MODELS.map((entry) => entry.gatewayModel)).size, MODELS.length);
+});
+
 test("provider registry exposes configured API and OAuth model families", () => {
   // Order follows the deterministic sorted walk of the config/ vendor tree;
   // picker placement comes from each model's priority field, not this list.
@@ -251,10 +278,10 @@ test("provider registry exposes configured API and OAuth model families", () => 
     ],
   );
   assert.equal(PROVIDERS.get("deepseek").baseUrl, "https://api.deepseek.com");
-  assert.equal(MODELS.filter((model) => model.provider === "kiro-prism").length, 9);
+  assert.equal(MODELS.filter((model) => model.provider === "kiro-prism").length, 10);
   // The canonical Prism catalog retired these routes, including explicit-slug
   // access. They must not survive as hidden entries after a catalog update.
-  assert.equal(MODEL_BY_SLUG.get("kiro-prism/claude-fable-5.1"), undefined);
+  // (claude-fable-5.1 was retired here until Kiro enabled it on 2026-10-08.)
   assert.equal(MODEL_BY_SLUG.get("kiro-prism/auto"), undefined);
   // Prism dropped the Grok lane from its catalogue, so no grok-* route resolves.
   assert.equal(MODEL_BY_SLUG.get("kiro-prism/grok-4.6"), undefined);

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- **Claude Fable 5.1 through Kiro Prism** (`kiro-prism/claude-fable-5.1`, listed as
+  "Claude Fable 5.1 Preview (Kiro Prism)"). Kiro model governance enabled it on
+  2026-10-08 (1M context, 6x credits, Enterprise Preview) and Prism's live
+  catalog now serves it with the same low-to-max effort ladder, text and image
+  input, and 1,000,000-token window as Claude Sonnet 5.5. It is a plain preview
+  entry: no multi-agent version and no Kiro Ultra choice until those are
+  verified for it. The earlier assertion that this route was retired from the
+  registry is replaced by a positive registry test.
+
 ### Changed
 
 - **`AGENTS.md` is now a compact index, and the instructions it held live in

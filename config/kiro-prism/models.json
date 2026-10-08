@@ -90,6 +90,50 @@
       "compHash": "kiro-prism-claude-sonnet-5-5-v1"
     },
     {
+      "slug": "kiro-prism/claude-fable-5.1",
+      "gatewayModel": "kiro-prism-claude-fable-5-1",
+      "upstreamModel": "claude-fable-5.1",
+      "provider": "kiro-prism",
+      "listed": true,
+      "displayName": "Claude Fable 5.1 Preview (Kiro Prism)",
+      "description": "Experimental preview of Claude Fable 5.1 through Kiro Prism · 1M context · 6x credits",
+      "priority": 99,
+      "defaultEffort": "high",
+      "reasoningLevels": [
+        {
+          "effort": "low",
+          "description": "Low reasoning effort"
+        },
+        {
+          "effort": "medium",
+          "description": "Medium reasoning effort"
+        },
+        {
+          "effort": "high",
+          "description": "High reasoning effort"
+        },
+        {
+          "effort": "xhigh",
+          "description": "Extra high reasoning effort"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning effort"
+        }
+      ],
+      "contextWindow": 1000000,
+      "autoCompact": 650000,
+      "maxOutputTokens": 128000,
+      "inputModalities": [
+        "text",
+        "image"
+      ],
+      "supportsReasoningSummaries": true,
+      "supportsToolSearch": true,
+      "supportsImageDetailOriginal": true,
+      "compHash": "kiro-prism-claude-fable-5-1-v1"
+    },
+    {
       "slug": "kiro-prism/gpt-5.6-sol",
       "gatewayModel": "kiro-prism-gpt-5-6-sol",
       "upstreamModel": "gpt-5.6-sol",

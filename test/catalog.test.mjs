@@ -838,13 +838,22 @@ test("Kiro Ultra is a verified Codex-only choice without mutating upstream metad
   const registry = JSON.parse(readFileSync(new URL("../config/kiro-prism/models.json", import.meta.url), "utf8"));
   const before = JSON.stringify(registry);
   const models = withKiroCodexUltra(registry.models, "codex-cli 0.160.0");
+  // Ultra is only offered where the delegation behavior was verified. Claude
+  // Fable 5.1 (enabled 2026-10-08) has a native max level but has not been
+  // verified for Ultra, so it stays on the plain ladder until it is.
+  const ultraVerified = new Set([
+    "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "claude-opus-5.5", "claude-sonnet-5.5",
+  ]);
   for (const model of models) {
     const nativeMax = model.reasoningLevels.some((level) => level.effort === "max");
-    assert.equal(model.reasoningLevels.some((level) => level.effort === "ultra"), nativeMax, model.slug);
+    const expectUltra = nativeMax && ultraVerified.has(model.upstreamModel);
+    assert.equal(model.reasoningLevels.some((level) => level.effort === "ultra"), expectUltra, model.slug);
     assert.equal(model.defaultEffort, registry.models.find((entry) => entry.slug === model.slug).defaultEffort);
     const published = routedModel(template, model);
-    assert.equal(published.supported_reasoning_levels.some((level) => level.effort === "ultra"), nativeMax);
+    assert.equal(published.supported_reasoning_levels.some((level) => level.effort === "ultra"), expectUltra);
   }
+  const fable = models.find((entry) => entry.slug === "kiro-prism/claude-fable-5.1");
+  assert.deepEqual(fable.reasoningLevels.map((level) => level.effort), ["low", "medium", "high", "xhigh", "max"]);
   assert.equal(JSON.stringify(registry), before);
   assert.deepEqual(withKiroCodexUltra(models, "codex-cli 0.160.0"), models);
 });
