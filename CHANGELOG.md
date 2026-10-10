@@ -35,7 +35,10 @@
   window left, and one whose spent window has not reset yet unless its credit
   fallback is on (its balance still moves). `chatgpt-account-pool usage` and
   the read after a reset-credit redemption still probe every account, and a
-  round that probed nothing no longer rewrites the cache.
+  round that probed nothing no longer rewrites the cache. The selected
+  account's own quota snapshot (`control account`), which also spawns an
+  app-server to rewarm, is now kept for five minutes instead of thirty
+  seconds; the tray's poll had been rewarming it almost every minute.
 
 - **The tray and the Claude usage probe poll far less.** The tray refreshed
   its usage tables by spawning `control <section> cached` -- a Node boot of

@@ -22,7 +22,11 @@ import { STATE_DIR } from "./paths.mjs";
 // seconds, so even the shortest TTL serves the vast majority of polls.
 export const CONTROL_SNAPSHOT_TTLS_MS = Object.freeze({
   "provider-usage": 90_000,
-  account: 30_000,
+  // `account` is the selected ChatGPT login's quota, and rewarming it spawns a
+  // Codex app-server. At 30 s the tray's poll rewarmed it -- one app-server --
+  // nearly every minute, for a weekly percentage that moves a point an hour.
+  // The pool's own probe and turn completion keep the table current between.
+  account: 5 * 60_000,
   providers: 20_000,
   probe: 60_000,
   // The overview fans out to one probe child per target, so it is the most
