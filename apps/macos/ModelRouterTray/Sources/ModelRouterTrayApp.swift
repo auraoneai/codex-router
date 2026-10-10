@@ -1056,6 +1056,7 @@ final class RouterStore: ObservableObject {
   private var isRefreshingAccountUsage = false
   private var lastNativeUsageRefreshAt = Date.distantPast
   private var usageDirectoryMonitorSource: DispatchSourceFileSystemObject?
+  private var usageDirectoryRefreshPending = false
 
   func setIslandInspecting(_ inspecting: Bool) {
     if isIslandInspecting != inspecting {
@@ -2150,9 +2151,11 @@ final class RouterStore: ObservableObject {
     startMonitoringUsageDirectory()
     await refreshNativeUsage()
     while !Task.isCancelled {
+      // Only an open island needs a fast table. A running turn does not: the
+      // end of every turn refreshes on its own (see the health poll), and the
+      // quota a turn moves is not shown until then anyway.
       let isViewingIsland = (islandMode != .off && isIslandInspecting)
-      let isBusy = (activityState != .idle || activeRequests.count > 0)
-      let sleepSeconds: UInt64 = (isViewingIsland || isBusy) ? 5 : 15
+      let sleepSeconds: UInt64 = isViewingIsland ? 5 : 30
       do {
         try await Task.sleep(nanoseconds: sleepSeconds * 1_000_000_000)
       } catch {
@@ -2188,9 +2191,14 @@ final class RouterStore: ObservableObject {
       eventMask: [.write, .extend, .attrib],
       queue: DispatchQueue.global(qos: .utility)
     )
+    // Every atomic rename in the state directory fires this, and the router
+    // writes several files per turn. Coalesce a burst into one refresh.
     source.setEventHandler { [weak self] in
       Task { @MainActor [weak self] in
-        guard let self else { return }
+        guard let self, !self.usageDirectoryRefreshPending else { return }
+        self.usageDirectoryRefreshPending = true
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        self.usageDirectoryRefreshPending = false
         await self.refreshChatGptAccountUsage()
         await self.refreshClaudeAccountUsage()
       }
@@ -2207,12 +2215,17 @@ final class RouterStore: ObservableObject {
     usageDirectoryMonitorSource = nil
   }
 
+  private func readStatusSection(_ section: String, fallback: [String]) async throws -> Data {
+    if let data = await RouterStatusSnapshot.read(section: section) { return data }
+    return try await runControl(arguments: fallback)
+  }
+
   func refreshAccountUsage() async {
     guard !isRefreshingAccountUsage else { return }
     isRefreshingAccountUsage = true
     defer { isRefreshingAccountUsage = false }
     do {
-      let output = try await runControl(arguments: ["account", "--json"])
+      let output = try await readStatusSection("account", fallback: ["account", "--json"])
       let nextUsage = try JSONDecoder().decode(CodexAccountUsage.self, from: output)
       if accountUsage != nextUsage { accountUsage = nextUsage }
       if accountUsageError != nil { accountUsageError = nil }
@@ -2232,7 +2245,8 @@ final class RouterStore: ObservableObject {
     isRefreshingChatGptAccountUsage = true
     defer { isRefreshingChatGptAccountUsage = false }
     do {
-      let output = try await runControl(arguments: ["chatgpt-account-pool", "usage", "cached"])
+      let output = try await readStatusSection(
+        "chatgpt-usage", fallback: ["chatgpt-account-pool", "usage", "cached"])
       let next = try JSONDecoder().decode(ChatGptAccountPoolUsage.self, from: output)
       if chatGptAccountUsage != next { chatGptAccountUsage = next }
       chatGptResetCreditCountHolds = chatGptResetCreditCountHolds.filter { accountId, hold in
@@ -2286,7 +2300,8 @@ final class RouterStore: ObservableObject {
     isRefreshingClaudeAccountUsage = true
     defer { isRefreshingClaudeAccountUsage = false }
     do {
-      let output = try await runControl(arguments: ["claude-account-pool", "usage", "cached"])
+      let output = try await readStatusSection(
+        "claude-usage", fallback: ["claude-account-pool", "usage", "cached"])
       let next = try JSONDecoder().decode(ChatGptAccountPoolUsage.self, from: output)
       if claudeAccountUsage != next { claudeAccountUsage = next }
       if claudeAccountUsageError != nil { claudeAccountUsageError = nil }
@@ -4511,6 +4526,64 @@ enum RouterHealthProbe {
     // failure exactly as it did when `control health` could not run.
     let (data, _) = try await session.data(for: request)
     return try JSONDecoder().decode(RouterHealth.self, from: data)
+  }
+}
+
+// The usage tables used to spawn `control <section> cached` for every refresh:
+// one Node boot (0.6-1.7 s of CPU) per section, three sections per refresh, on
+// a five-second cadence while a turn runs plus every state-directory change.
+// That was about a hundred processes a minute. The router already serves the
+// same bytes from its status snapshot endpoint -- `control` itself asks it
+// first -- so ask it natively, and fall back to `control` only when it cannot
+// answer, exactly as `control` falls back to computing locally.
+enum RouterStatusSnapshot {
+  private static let session: URLSession = {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.timeoutIntervalForRequest = 3
+    configuration.timeoutIntervalForResource = 3
+    configuration.connectionProxyDictionary = [kCFNetworkProxiesHTTPEnable as AnyHashable: 0]
+    return URLSession(configuration: configuration)
+  }()
+
+  static func url(section: String, environment: [String: String], home: URL) throws -> URL {
+    let port = try RouterHealthProbe.routerPort(environment: environment)
+    let stateDirectory = RouterStateDirectory.resolve(environment: environment, home: home)
+    guard let secret = RouterHealthProbe.callerSecret(stateDirectory: stateDirectory),
+      let url = URL(
+        string: "http://127.0.0.1:\(port)/_codex-router/\(secret)/v1/status/snapshot"
+          + "?sections=\(section)&refresh=0")
+    else {
+      throw RouterError("The local router status URL could not be built.")
+    }
+    return url
+  }
+
+  /// router-status-client.mjs `fetchSectionData`: a section that errored or
+  /// carries no data is a miss, and so is any transport or decode failure.
+  static func sectionData(_ body: Data, section: String) -> Data? {
+    guard let root = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+      root["ok"] as? Bool == true,
+      let sections = root["sections"] as? [String: Any],
+      let entry = sections[section] as? [String: Any],
+      entry["error"] == nil,
+      let data = entry["data"],
+      JSONSerialization.isValidJSONObject(data)
+    else { return nil }
+    return try? JSONSerialization.data(withJSONObject: data)
+  }
+
+  static func read(section: String) async -> Data? {
+    guard let url = try? url(
+      section: section,
+      environment: ProcessInfo.processInfo.environment,
+      home: FileManager.default.homeDirectoryForCurrentUser
+    ) else { return nil }
+    var request = URLRequest(url: url)
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    guard let (body, response) = try? await session.data(for: request),
+      (response as? HTTPURLResponse)?.statusCode == 200
+    else { return nil }
+    return sectionData(body, section: section)
   }
 }
 

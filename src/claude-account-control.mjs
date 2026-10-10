@@ -197,6 +197,7 @@ export async function handleClaudeAccountPool(action, value, {
           poolPath: filePath,
           homesDir,
           cachePath: usagePath,
+          force: true,
         });
       } catch {
         snapshot = { accounts: [] };

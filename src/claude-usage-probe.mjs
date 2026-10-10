@@ -48,6 +48,12 @@ export const USAGE_PROBE_LIMIT = 64;
 // names about a minute and then refuses the next ask too.
 export const USAGE_PROBE_RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
 export const USAGE_PROBE_RATE_LIMIT_BACKOFF_MAX_MS = 30 * 60_000;
+// An account with at least this much left on every window, read within the
+// age below, is not probed: no reading it could return would change which
+// account rotation picks, and the forwarder refreshes the account it is using
+// from every response's rate-limit headers anyway.
+export const USAGE_PROBE_COMFORTABLE_PERCENT = 50;
+export const USAGE_PROBE_COMFORTABLE_MAX_AGE_MS = 10 * 60_000;
 
 // Ties a cached auth-invalid row to the token that failed, so a refreshed or
 // re-imported login is not held out by a verdict about its predecessor. A
@@ -68,6 +74,21 @@ function previousReading(prev) {
     ...(prev?.updatedAt ? { updatedAt: prev.updatedAt } : {}),
     ...(prev?.fetchedAt ? { fetchedAt: prev.fetchedAt } : {}),
   };
+}
+
+function readingComfortable(row, now) {
+  if (!row || row.error || row.authInvalid) return false;
+  const readAtMs = claudeUsageRowObservedAtMs(row, undefined);
+  if (!Number.isFinite(readAtMs) || now - readAtMs > USAGE_PROBE_COMFORTABLE_MAX_AGE_MS) return false;
+  const windows = [row.fiveHour, row.weekly, row.fable].filter(Boolean);
+  if (!windows.length) return false;
+  // A window whose reset has passed reads as nothing, so it is never "plenty".
+  return windows.every((window) => {
+    const resetsAtMs = Number(window.resetsAtMs);
+    const live = !(Number.isFinite(resetsAtMs) && resetsAtMs > 0 && resetsAtMs <= now);
+    return live && Number.isFinite(window.remainingPercent) &&
+      window.remainingPercent >= USAGE_PROBE_COMFORTABLE_PERCENT;
+  });
 }
 
 function retryAfterMs(headers, now) {
@@ -245,6 +266,9 @@ export async function executeProbeClaudeAccountUsage({
   write = true,
   usageUrl = process.env.MODEL_ROUTER_CLAUDE_USAGE_URL || USAGE_URL,
   fetchImpl = globalThis.fetch,
+  // Probe accounts with plenty left too. The operator's explicit `usage` asks
+  // for this; the forwarder's schedules do not.
+  force = false,
 } = {}) {
   if (discoveryDisabled()) {
     return { version: 1, fetchedAt: new Date(now).toISOString(), accounts: [] };
@@ -275,10 +299,13 @@ export async function executeProbeClaudeAccountUsage({
     // No previous cache
   }
 
+  let probedAny = false;
   const probedAccounts = await Promise.all(candidates.map(async (account) => {
     const prev = prevAccountsById.get(account.id);
     // Still inside a rate-limit backoff: asking again only extends the refusal.
     if (prev && Number(prev.probeBackoffUntil) > now) return prev;
+    if (!force && readingComfortable(prev, now)) return prev;
+    probedAny = true;
     const base = {
       id: account.id,
       label: account.label || "",
@@ -473,7 +500,9 @@ export async function executeProbeClaudeAccountUsage({
     accounts,
   };
 
-  if (write) {
+  // A round that asked nothing learned nothing; rewriting the file would only
+  // wake every reader that watches it.
+  if (write && probedAny) {
     try {
       writePrivateJson(cachePath, snapshot, { directoryMode: 0o700, fileMode: 0o600 });
       invalidateClaudeAccountUsageCache();

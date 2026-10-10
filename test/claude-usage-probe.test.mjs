@@ -25,6 +25,7 @@ import {
   scheduleClaudePostTurnUsageProbe,
   scheduleClaudeResetAwareProbe,
   triggerClaudeEmergencyDepletionProbe,
+  USAGE_PROBE_COMFORTABLE_MAX_AGE_MS,
   USAGE_PROBE_RATE_LIMIT_BACKOFF_MS,
   USAGE_URL,
 } from "../src/claude-usage-probe.mjs";
@@ -600,6 +601,76 @@ test("a rate-limited probe keeps the last reading and its time, then backs off",
     const fifth = await executeProbeClaudeAccountUsage({ poolPath, homesDir, cachePath, usageUrl, now: latest });
     assert.equal(requests, 4);
     assert.equal(fifth.accounts[0].probeBackoffUntil, latest + 7_200_000);
+  } finally {
+    await close(server);
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("an account with plenty left on a recent reading is not probed", async () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "claude-probe-comfortable-"));
+  const poolPath = path.join(stateDir, "claude-account-pool.json");
+  const homesDir = path.join(stateDir, "claude-accounts");
+  const cachePath = path.join(stateDir, "claude-account-usage.json");
+
+  const plentyId = "clacct_000000000000plty";
+  const lowId = "clacct_0000000000000low";
+  for (const id of [plentyId, lowId]) {
+    mkdirSync(path.join(homesDir, id), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      path.join(homesDir, id, "credentials.json"),
+      JSON.stringify({ claudeAiOauth: { accessToken: `token-${id}`, expiresAt: Date.now() + 3600_000 } }),
+      { mode: 0o600 },
+    );
+  }
+  writeFileSync(poolPath, JSON.stringify({
+    version: 1,
+    policy: { enabled: true, mode: "switch" },
+    accounts: {
+      [plentyId]: createValidClaudeAccountRecord(plentyId),
+      [lowId]: createValidClaudeAccountRecord(lowId),
+    },
+  }), { mode: 0o600 });
+
+  const now = Date.now();
+  const readAt = new Date(now - 60_000).toISOString();
+  const window = (remainingPercent) => ({
+    usedPercent: 100 - remainingPercent, remainingPercent, resetsAtMs: now + 3600_000,
+  });
+  writeFileSync(cachePath, JSON.stringify({
+    version: 1,
+    fetchedAt: readAt,
+    accounts: [
+      { id: plentyId, fiveHour: window(90), weekly: window(70), fetchedAt: readAt },
+      { id: lowId, fiveHour: window(30), weekly: window(70), fetchedAt: readAt },
+    ],
+  }), { mode: 0o600 });
+
+  const asked = [];
+  const server = http.createServer((request, response) => {
+    asked.push(request.headers.authorization);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ five_hour: { utilization: 20 }, seven_day: { utilization: 20 } }));
+  });
+  const port = await listen(server);
+  const usageUrl = `http://127.0.0.1:${port}/api/oauth/usage`;
+
+  try {
+    await executeProbeClaudeAccountUsage({ poolPath, homesDir, cachePath, usageUrl, now });
+    // Only the account whose reading could change a rotation decision is asked.
+    assert.deepEqual(asked, [`Bearer token-${lowId}`]);
+
+    // An explicit `usage` asks every account regardless.
+    asked.length = 0;
+    clearInFlightProbesForTest();
+    await executeProbeClaudeAccountUsage({ poolPath, homesDir, cachePath, usageUrl, now, force: true });
+    assert.equal(asked.length, 2);
+
+    // A comfortable reading that has aged out is asked again.
+    asked.length = 0;
+    const later = now + USAGE_PROBE_COMFORTABLE_MAX_AGE_MS + 120_000;
+    await executeProbeClaudeAccountUsage({ poolPath, homesDir, cachePath, usageUrl, now: later });
+    assert.equal(asked.length, 2);
   } finally {
     await close(server);
     rmSync(stateDir, { recursive: true, force: true });

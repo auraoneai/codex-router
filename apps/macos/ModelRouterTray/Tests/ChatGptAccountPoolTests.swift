@@ -317,6 +317,20 @@ struct ChatGptAccountPoolTests {
     #expect(IslandAccountQuotaPresentation.rankText(nil) == "—")
   }
 
+  @Test("the status snapshot yields a section's data and treats anything else as a miss")
+  func statusSnapshotSection() throws {
+    let served = Data(#"{"ok":true,"sections":{"claude-usage":{"data":{"rotation":["a"],"accounts":[]},"stale":false}}}"#.utf8)
+    let data = try #require(RouterStatusSnapshot.sectionData(served, section: "claude-usage"))
+    let decoded = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+    #expect(decoded?["rotation"] as? [String] == ["a"])
+    // The miss shapes `control` falls back on must fall back here too.
+    let errored = Data(#"{"ok":true,"sections":{"claude-usage":{"error":"snapshot_unavailable"}}}"#.utf8)
+    #expect(RouterStatusSnapshot.sectionData(errored, section: "claude-usage") == nil)
+    #expect(RouterStatusSnapshot.sectionData(served, section: "account") == nil)
+    #expect(RouterStatusSnapshot.sectionData(Data(#"{"ok":false}"#.utf8), section: "claude-usage") == nil)
+    #expect(RouterStatusSnapshot.sectionData(Data("not json".utf8), section: "claude-usage") == nil)
+  }
+
   @Test("a refused probe beside a recent reading is not shown as a failure")
   func probeFailureNeedsAStaleReading() {
     let refused = ChatGptAccountPoolRow(

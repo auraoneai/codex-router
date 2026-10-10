@@ -28,6 +28,18 @@
 
 ### Fixed
 
+- **The tray and the Claude usage probe poll far less.** The tray refreshed
+  its usage tables by spawning `control <section> cached` -- a Node boot of
+  0.6-1.7 s CPU each, three per refresh -- every five seconds while a turn ran
+  and on every state-directory change, about a hundred processes a minute. It
+  now reads those sections from the router's status snapshot endpoint in
+  process (falling back to `control` only when the router cannot answer),
+  refreshes every 30 s unless the island is open, and coalesces a burst of
+  state-directory events into one refresh. The scheduled Claude probe skips an
+  account whose last reading, under ten minutes old, shows at least half of
+  every window left; `claude-account-pool usage` still probes every account,
+  and a round that asked nothing no longer rewrites the cache.
+
 - **A rate-limited Claude usage probe no longer reads as "probe failed".**
   Anthropic's usage endpoint answers 429 "Rate limited" when it is polled too
   often, and the two-minute schedule plus the post-turn and depletion probes
