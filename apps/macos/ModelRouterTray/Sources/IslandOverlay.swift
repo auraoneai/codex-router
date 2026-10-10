@@ -2279,6 +2279,8 @@ enum IslandAccountQuotaPresentation {
     // A revoked login is not a flaky probe: the probe's 401 is the answer, and
     // the fix is signing in again, so say that instead of "probe failed".
     if authInvalid { return "login expired" }
+    // `hasError` is a failed probe that left no usable reading; a refused probe
+    // beside a recent reading keeps the row's ordinary tag.
     if hasError { return "probe failed" }
     switch health {
     case .drained: return "spent"
@@ -2540,7 +2542,7 @@ private struct IslandAccountQuotaTable: View {
           if let tag = IslandAccountQuotaPresentation.tagKey(
             health: account.health,
             planType: account.planType,
-            hasError: account.error != nil,
+            hasError: account.probeFailureVisible,
             inRotation: !excluded,
             authInvalid: account.authInvalid
           ) {
@@ -2654,7 +2656,7 @@ private struct IslandAccountQuotaTable: View {
         : routerFormat("In rotation, position %d", rank)
     }
     if account.authInvalid { return routerLocalized("login expired") }
-    if account.error != nil { return routerLocalized("Usage probe failed for this subscription") }
+    if account.probeFailureVisible { return routerLocalized("Usage probe failed for this subscription") }
     if account.health == .drained { return routerLocalized("Out of rotation: quota is spent") }
     return routerLocalized("Out of rotation")
   }
@@ -2737,7 +2739,7 @@ private struct IslandAccountQuotaTable: View {
   }
 
   private func tagTint(_ account: ChatGptAccountPoolRow) -> Color {
-    if account.error != nil { return routerRed }
+    if account.probeFailureVisible { return routerRed }
     switch account.health {
     case .drained: return routerRed
     case .soft: return routerYellow

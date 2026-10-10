@@ -5051,12 +5051,16 @@ struct ChatGptAccountPoolRow: Decodable, Equatable, Identifiable {
   let resetCredits: ChatGptAccountResetCredits?
   let authInvalid: Bool
   let resetAttemptPending: Bool
+  /// Whether the figures on a row whose last probe failed are too old to trust.
+  /// Only the Claude projection sends it; nil (ChatGPT rows, older routers)
+  /// keeps treating every failed probe as stale.
+  let readingStale: Bool?
 
   enum CodingKeys: String, CodingKey {
     case id, label, preferred, planType, health
     case primaryRemainingPercent, secondaryRemainingPercent, resetsAt, error
     case primaryResetsAt, secondaryResetsAt
-    case resetCredits, authInvalid, resetAttemptPending
+    case resetCredits, authInvalid, resetAttemptPending, readingStale
   }
 
   init(from decoder: Decoder) throws {
@@ -5077,6 +5081,7 @@ struct ChatGptAccountPoolRow: Decodable, Equatable, Identifiable {
     resetCredits = try container.decodeIfPresent(ChatGptAccountResetCredits.self, forKey: .resetCredits)
     authInvalid = (try container.decodeIfPresent(Bool.self, forKey: .authInvalid)) ?? false
     resetAttemptPending = (try container.decodeIfPresent(Bool.self, forKey: .resetAttemptPending)) ?? false
+    readingStale = try container.decodeIfPresent(Bool.self, forKey: .readingStale)
   }
 
   init(
@@ -5093,7 +5098,8 @@ struct ChatGptAccountPoolRow: Decodable, Equatable, Identifiable {
     error: String? = nil,
     resetCredits: ChatGptAccountResetCredits? = nil,
     authInvalid: Bool = false,
-    resetAttemptPending: Bool = false
+    resetAttemptPending: Bool = false,
+    readingStale: Bool? = nil
   ) {
     self.id = id
     self.label = label
@@ -5109,7 +5115,12 @@ struct ChatGptAccountPoolRow: Decodable, Equatable, Identifiable {
     self.resetCredits = resetCredits
     self.authInvalid = authInvalid
     self.resetAttemptPending = resetAttemptPending
+    self.readingStale = readingStale
   }
+
+  /// A failed probe that left the row without a usable reading. A refused
+  /// probe beside a recent reading is not one: the figures shown still hold.
+  var probeFailureVisible: Bool { error != nil && readingStale != false }
 
   var bankedResetCount: Int { max(0, resetCredits?.availableCount ?? 0) }
   /// The upstream reset endpoint accepts a core limit only once it is at

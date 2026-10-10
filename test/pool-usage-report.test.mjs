@@ -92,3 +92,70 @@ test("usage builders refuse to run with discovery disabled", async () => {
     delete process.env.CODEX_ROUTER_NO_DISCOVERY;
   }
 });
+
+test("a failed Claude probe reports whether the reading it kept is still fresh", async () => {
+  const now = Date.parse("2026-10-10T14:00:00.000Z");
+  const recentId = "clacct_000000000000rcnt";
+  const oldId = "clacct_0000000000000old";
+  const fineId = "clacct_000000000000fine";
+  const poolPath = path.join(stateDir, "claude-pool-stale.json");
+  const usagePath = path.join(stateDir, "claude-usage-stale.json");
+  const account = (id) => ({
+    id,
+    state: "active",
+    paused: false,
+    priority: 50,
+    label: id,
+    createdAt: "2026-10-01T00:00:00.000Z",
+    identity: { accountId: `uuid-${id}`, email: `${id}@example.com` },
+    subscription: { status: "usable" },
+    health: { state: "healthy" },
+    turns: 0,
+    requests: 0,
+  });
+  writeFileSync(poolPath, JSON.stringify({
+    version: 1,
+    policy: { enabled: true, mode: "switch" },
+    accounts: Object.fromEntries(
+      [recentId, oldId, fineId].map((id) => [id, account(id)]),
+    ),
+  }), { mode: 0o600 });
+  const fiveHour = { usedPercent: 40, remainingPercent: 60, resetsAtMs: now + 3_600_000 };
+  const snapshot = {
+    fetchedAt: new Date(now).toISOString(),
+    accounts: [
+      {
+        id: recentId,
+        fiveHour,
+        fetchedAt: new Date(now - 60_000).toISOString(),
+        error: "Rate limited. Please try again later.",
+        rateLimited: true,
+      },
+      {
+        id: oldId,
+        fiveHour,
+        fetchedAt: new Date(now - 60 * 60_000).toISOString(),
+        error: "HTTP 500",
+      },
+      { id: fineId, fiveHour, fetchedAt: new Date(now).toISOString() },
+    ],
+  };
+  writeFileSync(usagePath, JSON.stringify(snapshot), { mode: 0o600 });
+  const report = await buildClaudeUsageReport({
+    filePath: poolPath,
+    homesDir: path.join(stateDir, "claude-homes-stale"),
+    usagePath,
+    snapshot,
+    now,
+  });
+  const byId = new Map(report.accounts.map((row) => [row.id, row]));
+
+  assert.equal(byId.get(recentId).readingStale, false);
+  assert.equal(byId.get(recentId).rateLimited, true);
+  assert.equal(byId.get(recentId).readingAt, Math.floor((now - 60_000) / 1000));
+  assert.equal(byId.get(oldId).readingStale, true);
+  assert.equal(byId.get(oldId).rateLimited, undefined);
+  // A row whose probe succeeded carries none of the failure detail.
+  assert.equal(byId.get(fineId).readingStale, undefined);
+  assert.equal(byId.get(fineId).error, undefined);
+});

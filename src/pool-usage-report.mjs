@@ -160,7 +160,11 @@ export async function buildClaudeUsageReport({
     leftoverHealth,
     windowIsLive,
   } = await import("./claude-account-rotation.mjs");
-  const { cachedClaudeAccountUsageById } = await import("./claude-account-usage.mjs");
+  const {
+    cachedClaudeAccountUsageById,
+    claudeUsageRowObservedAtMs,
+    USAGE_CACHE_MAX_AGE_MS,
+  } = await import("./claude-account-usage.mjs");
 
   // Rank on exactly what the forwarder ranks on: the same file, read through
   // the same per-row freshness rules.
@@ -228,8 +232,23 @@ export async function buildClaudeUsageReport({
       ...(isAuthInvalid ? { authErrorCode: row?.authErrorCode || "token_revoked" } : {}),
       ...(account.state !== "active" || account.paused ? { paused: true } : {}),
       ...(row?.error ? { error: row.error } : {}),
+      ...(row?.error ? probeFailureDetail(row) : {}),
     };
   });
+
+  // A failed probe keeps the last reading, so the error alone does not say
+  // whether the figures on the row are still worth trusting. Judge them by the
+  // row's own reading time -- never the document's, which every probe round
+  // bumps -- under the freshness bound rotation applies.
+  function probeFailureDetail(row) {
+    const readAtMs = claudeUsageRowObservedAtMs(row, undefined);
+    const readingStale = !Number.isFinite(readAtMs) || now - readAtMs > USAGE_CACHE_MAX_AGE_MS;
+    return {
+      readingStale,
+      ...(Number.isFinite(readAtMs) ? { readingAt: Math.floor(readAtMs / 1000) } : {}),
+      ...(row.rateLimited ? { rateLimited: true } : {}),
+    };
+  }
 
   return {
     fetchedAt: resolved?.fetchedAt || new Date().toISOString(),

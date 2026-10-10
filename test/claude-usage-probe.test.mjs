@@ -25,6 +25,7 @@ import {
   scheduleClaudePostTurnUsageProbe,
   scheduleClaudeResetAwareProbe,
   triggerClaudeEmergencyDepletionProbe,
+  USAGE_PROBE_RATE_LIMIT_BACKOFF_MS,
   USAGE_URL,
 } from "../src/claude-usage-probe.mjs";
 
@@ -515,6 +516,85 @@ test("a probe does not overwrite a reading the forwarder recorded while it was i
     const row = JSON.parse(readFileSync(cachePath, "utf8")).accounts.find((a) => a.id === accountId);
     assert.equal(row.fiveHour.remainingPercent, 3, "the newer passive reading survives the probe's write");
   } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+test("a rate-limited probe keeps the last reading and its time, then backs off", async () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "claude-probe-429-"));
+  const poolPath = path.join(stateDir, "claude-account-pool.json");
+  const homesDir = path.join(stateDir, "claude-accounts");
+  const cachePath = path.join(stateDir, "claude-account-usage.json");
+
+  const accountId = "clacct_0000000000000429";
+  const homeDir = path.join(homesDir, accountId);
+  mkdirSync(homeDir, { recursive: true, mode: 0o700 });
+  writeFileSync(
+    path.join(homeDir, "credentials.json"),
+    JSON.stringify({ claudeAiOauth: { accessToken: "valid-token", expiresAt: Date.now() + 3600_000 } }),
+    { mode: 0o600 },
+  );
+  writeFileSync(poolPath, JSON.stringify({
+    version: 1,
+    policy: { enabled: true, mode: "switch" },
+    accounts: { [accountId]: createValidClaudeAccountRecord(accountId) },
+  }), { mode: 0o600 });
+
+  const readAt = "2026-10-10T13:58:00.000Z";
+  const fiveHour = { usedPercent: 56, remainingPercent: 44, resetsAtMs: Date.now() + 3600_000 };
+  writeFileSync(cachePath, JSON.stringify({
+    version: 1,
+    fetchedAt: readAt,
+    accounts: [{ id: accountId, fiveHour, weekly: null, fetchedAt: readAt }],
+  }), { mode: 0o600 });
+
+  let requests = 0;
+  let retryAfter;
+  const server = http.createServer((request, response) => {
+    requests += 1;
+    response.writeHead(429, {
+      "content-type": "application/json",
+      ...(retryAfter ? { "retry-after": retryAfter } : {}),
+    });
+    response.end(JSON.stringify({ error: { type: "rate_limit_error", message: "Rate limited. Please try again later." } }));
+  });
+  const port = await listen(server);
+  const usageUrl = `http://127.0.0.1:${port}/api/oauth/usage`;
+
+  try {
+    const now = Date.now();
+    const first = await executeProbeClaudeAccountUsage({ poolPath, homesDir, cachePath, usageUrl, now });
+    const row = first.accounts[0];
+    assert.equal(requests, 1);
+    assert.match(row.error, /Rate limited/);
+    assert.equal(row.rateLimited, true);
+    assert.equal(row.authInvalid, undefined);
+    assert.deepEqual(row.fiveHour, fiveHour);
+    // The kept reading keeps the time it was read, not the time it was refused.
+    assert.equal(row.fetchedAt, readAt);
+    assert.equal(row.probeBackoffUntil, now + USAGE_PROBE_RATE_LIMIT_BACKOFF_MS);
+
+    // Inside the backoff the endpoint is not asked again.
+    const second = await executeProbeClaudeAccountUsage({
+      poolPath, homesDir, cachePath, usageUrl, now: now + 60_000,
+    });
+    assert.equal(requests, 1);
+    assert.equal(second.accounts[0].probeBackoffUntil, row.probeBackoffUntil);
+
+    // Once it lapses the probe asks again, and a repeat refusal doubles the wait.
+    const later = row.probeBackoffUntil + 1;
+    const third = await executeProbeClaudeAccountUsage({ poolPath, homesDir, cachePath, usageUrl, now: later });
+    assert.equal(requests, 2);
+    assert.equal(third.accounts[0].probeBackoffUntil, later + 2 * USAGE_PROBE_RATE_LIMIT_BACKOFF_MS);
+
+    // Retry-After, when the reply names one, sets the wait instead.
+    retryAfter = "120";
+    const evenLater = third.accounts[0].probeBackoffUntil + 1;
+    const fourth = await executeProbeClaudeAccountUsage({ poolPath, homesDir, cachePath, usageUrl, now: evenLater });
+    assert.equal(requests, 3);
+    assert.equal(fourth.accounts[0].probeBackoffUntil, evenLater + 120_000);
+  } finally {
+    await close(server);
     rmSync(stateDir, { recursive: true, force: true });
   }
 });

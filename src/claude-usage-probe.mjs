@@ -40,6 +40,13 @@ import { VERSION } from "./version.mjs";
 export const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
 export const USAGE_PROBE_TIMEOUT_MS = 12_000;
 export const USAGE_PROBE_LIMIT = 64;
+// The usage endpoint answers 429 "Rate limited" when it is polled too often --
+// the two-minute schedule plus the post-turn and depletion probes are enough
+// to reach it during active use. A refused account is left alone until
+// Retry-After, or this backoff when the reply names none, doubling per
+// consecutive refusal up to the cap.
+export const USAGE_PROBE_RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
+export const USAGE_PROBE_RATE_LIMIT_BACKOFF_MAX_MS = 30 * 60_000;
 
 // Ties a cached auth-invalid row to the token that failed, so a refreshed or
 // re-imported login is not held out by a verdict about its predecessor. A
@@ -47,6 +54,37 @@ export const USAGE_PROBE_LIMIT = 64;
 // a credential.
 function authFingerprintPrefix(tokenFingerprint) {
   return typeof tokenFingerprint === "string" && tokenFingerprint ? tokenFingerprint.slice(0, 16) : undefined;
+}
+
+// What a failed probe keeps from the row before it: the windows and the time
+// they were read. Dropping the time would let the row borrow the document's
+// fetch time and pass an old reading off as a new one.
+function previousReading(prev) {
+  return {
+    fiveHour: prev?.fiveHour ?? null,
+    weekly: prev?.weekly ?? null,
+    fable: prev?.fable ?? null,
+    ...(prev?.updatedAt ? { updatedAt: prev.updatedAt } : {}),
+    ...(prev?.fetchedAt ? { fetchedAt: prev.fetchedAt } : {}),
+  };
+}
+
+function retryAfterMs(headers, now) {
+  const value = headers?.get?.("retry-after");
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const at = Date.parse(value);
+  return Number.isFinite(at) && at > now ? at - now : undefined;
+}
+
+function rateLimitBackoffMs(prev, headers, now) {
+  const named = retryAfterMs(headers, now);
+  if (named !== undefined) return Math.min(USAGE_PROBE_RATE_LIMIT_BACKOFF_MAX_MS, Math.max(60_000, named));
+  const last = Number(prev?.probeBackoffMs);
+  return Number.isFinite(last) && last > 0
+    ? Math.min(USAGE_PROBE_RATE_LIMIT_BACKOFF_MAX_MS, last * 2)
+    : USAGE_PROBE_RATE_LIMIT_BACKOFF_MS;
 }
 
 function normalizeWindowJson(win, limit) {
@@ -238,6 +276,8 @@ export async function executeProbeClaudeAccountUsage({
 
   const probedAccounts = await Promise.all(candidates.map(async (account) => {
     const prev = prevAccountsById.get(account.id);
+    // Still inside a rate-limit backoff: asking again only extends the refusal.
+    if (prev && Number(prev.probeBackoffUntil) > now) return prev;
     const base = {
       id: account.id,
       label: account.label || "",
@@ -282,12 +322,8 @@ export async function executeProbeClaudeAccountUsage({
       if (!session?.accessToken || session?.expired) {
         return {
           ...base,
-          fiveHour: prev?.fiveHour ?? null,
-          weekly: prev?.weekly ?? null,
-          fable: prev?.fable ?? null,
+          ...previousReading(prev),
           error: "No access token available",
-          ...(prev?.updatedAt ? { updatedAt: prev.updatedAt } : {}),
-          ...(prev?.fetchedAt ? { fetchedAt: prev.fetchedAt } : {}),
         };
       }
 
@@ -342,14 +378,23 @@ export async function executeProbeClaudeAccountUsage({
         };
       }
 
-      if (!response.ok) {
-        const errorMsg = errorText || `HTTP ${response.status}`;
+      if (response.status === 429 || /rate.?limit/i.test(errorText)) {
+        const backoffMs = rateLimitBackoffMs(prev, response.headers, now);
         return {
           ...base,
-          fiveHour: prev?.fiveHour ?? null,
-          weekly: prev?.weekly ?? null,
-          fable: prev?.fable ?? null,
-          error: errorMsg,
+          ...previousReading(prev),
+          error: errorText || `HTTP ${response.status}`,
+          rateLimited: true,
+          probeBackoffMs: backoffMs,
+          probeBackoffUntil: now + backoffMs,
+        };
+      }
+
+      if (!response.ok) {
+        return {
+          ...base,
+          ...previousReading(prev),
+          error: errorText || `HTTP ${response.status}`,
         };
       }
 
@@ -386,10 +431,9 @@ export async function executeProbeClaudeAccountUsage({
       }
       return {
         ...base,
-        fiveHour: !isAuthInvalid && prev?.fiveHour ? prev.fiveHour : null,
-        weekly: !isAuthInvalid && prev?.weekly ? prev.weekly : null,
-        fable: !isAuthInvalid && prev?.fable ? prev.fable : null,
-        ...(isAuthInvalid ? { authInvalid: true, authErrorCode: "token_revoked" } : {}),
+        ...(isAuthInvalid
+          ? { fiveHour: null, weekly: null, fable: null, authInvalid: true, authErrorCode: "token_revoked" }
+          : previousReading(prev)),
         error: msg,
       };
     }

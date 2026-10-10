@@ -317,6 +317,20 @@ struct ChatGptAccountPoolTests {
     #expect(IslandAccountQuotaPresentation.rankText(nil) == "—")
   }
 
+  @Test("a refused probe beside a recent reading is not shown as a failure")
+  func probeFailureNeedsAStaleReading() {
+    let refused = ChatGptAccountPoolRow(
+      id: "clacct_a", label: "one@example.com", error: "Rate limited.", readingStale: false)
+    #expect(!refused.probeFailureVisible)
+    let stale = ChatGptAccountPoolRow(
+      id: "clacct_a", label: "one@example.com", error: "Rate limited.", readingStale: true)
+    #expect(stale.probeFailureVisible)
+    // ChatGPT rows and older routers send no freshness verdict: keep flagging.
+    let unjudged = ChatGptAccountPoolRow(id: "acct_a", label: "one@example.com", error: "HTTP 500")
+    #expect(unjudged.probeFailureVisible)
+    #expect(!ChatGptAccountPoolRow(id: "acct_a", label: "one@example.com").probeFailureVisible)
+  }
+
   @Test("the reason an account is unusable outranks its plan badge")
   func tagPrecedence() {
     #expect(

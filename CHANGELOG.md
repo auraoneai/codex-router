@@ -28,6 +28,18 @@
 
 ### Fixed
 
+- **A rate-limited Claude usage probe no longer reads as "probe failed".**
+  Anthropic's usage endpoint answers 429 "Rate limited" when it is polled too
+  often, and the two-minute schedule plus the post-turn and depletion probes
+  reached it during active use, so whole groups of Claude accounts flickered
+  "probe failed" in the island while their figures were minutes old. A refused
+  account is now left alone until the reply's Retry-After, or five minutes
+  doubling to thirty when it names none. A failed probe keeps the time its
+  last reading was taken instead of borrowing the document's, the report says
+  whether that reading is still within rotation's 20-minute freshness bound
+  (`readingStale`, `readingAt`, `rateLimited`), and the island tags a row
+  "probe failed" only when it is not.
+
 - Claude Code no longer auto-compacts on every turn with pooled Claude models.
   1M-window models are published with Claude Code's `[1m]` suffix, and model
   discovery (list and retrieve) reports each model's `max_input_tokens` and

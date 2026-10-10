@@ -117,6 +117,9 @@ export function recordClaudeAccountUsage(accountId, readingOrHeaders, {
     delete existing.authErrorCode;
     delete existing.authTokenFingerprint;
     delete existing.error;
+    // The usage endpoint's backoff (`probeBackoffUntil`) stays: a working
+    // token says nothing about when that endpoint will answer again.
+    delete existing.rateLimited;
   }
   const r = reading || {};
   const updated = {
