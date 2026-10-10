@@ -33,8 +33,9 @@
   often, and the two-minute schedule plus the post-turn and depletion probes
   reached it during active use, so whole groups of Claude accounts flickered
   "probe failed" in the island while their figures were minutes old. A refused
-  account is now left alone until the reply's Retry-After, or five minutes
-  doubling to thirty when it names none. A failed probe keeps the time its
+  account is now left alone for five minutes, doubling to thirty on repeat
+  refusals, and never for less than the reply's Retry-After (the endpoint
+  names about a minute, then refuses the next ask too). A failed probe keeps the time its
   last reading was taken instead of borrowing the document's, the report says
   whether that reading is still within rotation's 20-minute freshness bound
   (`readingStale`, `readingAt`, `rateLimited`), and the island tags a row

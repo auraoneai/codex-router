@@ -42,9 +42,10 @@ export const USAGE_PROBE_TIMEOUT_MS = 12_000;
 export const USAGE_PROBE_LIMIT = 64;
 // The usage endpoint answers 429 "Rate limited" when it is polled too often --
 // the two-minute schedule plus the post-turn and depletion probes are enough
-// to reach it during active use. A refused account is left alone until
-// Retry-After, or this backoff when the reply names none, doubling per
-// consecutive refusal up to the cap.
+// to reach it during active use. A refused account is left alone for this
+// backoff, doubling per consecutive refusal up to the cap, and never for less
+// than the reply's Retry-After. Retry-After alone is not enough: the endpoint
+// names about a minute and then refuses the next ask too.
 export const USAGE_PROBE_RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
 export const USAGE_PROBE_RATE_LIMIT_BACKOFF_MAX_MS = 30 * 60_000;
 
@@ -79,12 +80,12 @@ function retryAfterMs(headers, now) {
 }
 
 function rateLimitBackoffMs(prev, headers, now) {
-  const named = retryAfterMs(headers, now);
-  if (named !== undefined) return Math.min(USAGE_PROBE_RATE_LIMIT_BACKOFF_MAX_MS, Math.max(60_000, named));
   const last = Number(prev?.probeBackoffMs);
-  return Number.isFinite(last) && last > 0
+  const escalated = Number.isFinite(last) && last > 0
     ? Math.min(USAGE_PROBE_RATE_LIMIT_BACKOFF_MAX_MS, last * 2)
     : USAGE_PROBE_RATE_LIMIT_BACKOFF_MS;
+  const named = retryAfterMs(headers, now);
+  return named === undefined ? escalated : Math.max(escalated, named);
 }
 
 function normalizeWindowJson(win, limit) {

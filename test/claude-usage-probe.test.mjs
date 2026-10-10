@@ -587,12 +587,19 @@ test("a rate-limited probe keeps the last reading and its time, then backs off",
     assert.equal(requests, 2);
     assert.equal(third.accounts[0].probeBackoffUntil, later + 2 * USAGE_PROBE_RATE_LIMIT_BACKOFF_MS);
 
-    // Retry-After, when the reply names one, sets the wait instead.
-    retryAfter = "120";
+    // A short Retry-After does not cut the escalation short...
+    retryAfter = "60";
     const evenLater = third.accounts[0].probeBackoffUntil + 1;
     const fourth = await executeProbeClaudeAccountUsage({ poolPath, homesDir, cachePath, usageUrl, now: evenLater });
     assert.equal(requests, 3);
-    assert.equal(fourth.accounts[0].probeBackoffUntil, evenLater + 120_000);
+    assert.equal(fourth.accounts[0].probeBackoffUntil, evenLater + 4 * USAGE_PROBE_RATE_LIMIT_BACKOFF_MS);
+
+    // ...and a long one is honored past the cap.
+    retryAfter = "7200";
+    const latest = fourth.accounts[0].probeBackoffUntil + 1;
+    const fifth = await executeProbeClaudeAccountUsage({ poolPath, homesDir, cachePath, usageUrl, now: latest });
+    assert.equal(requests, 4);
+    assert.equal(fifth.accounts[0].probeBackoffUntil, latest + 7_200_000);
   } finally {
     await close(server);
     rmSync(stateDir, { recursive: true, force: true });
