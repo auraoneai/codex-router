@@ -342,3 +342,70 @@ test("probe-driven auth healing (Path B): successful probe clears auth-invalid s
     assert.equal(isAccountAuthInvalid("acct_healauth1"), false);
   } finally { b.cleanup(); resetRotationStateForTests(); }
 });
+
+test("accounts whose reading cannot change a rotation decision are not probed", async () => {
+  const b = box();
+  try {
+    const now = Date.now();
+    const resetsAt = Math.floor((now + 3600_000) / 1000);
+    const ids = ["acct_plentyplenty", "acct_lowlowlowlow", "acct_spentspentsp", "acct_creditcredit"];
+    writePool(b.pool, ids, {
+      selectedAccountId: "acct_lowlowlowlow",
+      perAccount: { acct_creditcredit: { creditFallback: true } },
+    });
+    const readAt = new Date(now - 60_000).toISOString();
+    const row = (id, remainingPercent) => ({
+      id,
+      planType: "plus",
+      primary: { remainingPercent, usedPercent: 100 - remainingPercent, windowDurationMins: 10080, resetsAt },
+      secondary: null,
+      fetchedAt: readAt,
+    });
+    const seed = {
+      version: 1,
+      fetchedAt: readAt,
+      accounts: [
+        row("acct_plentyplenty", 80),
+        row("acct_lowlowlowlow", 30),
+        row("acct_spentspentsp", 0),
+        row("acct_creditcredit", 0),
+      ],
+    };
+    writeFileSync(b.cache, JSON.stringify(seed));
+    const asked = [];
+    const readUsage = async ({ codexHome }) => {
+      asked.push(path.basename(codexHome));
+      return {
+        fetchedAt: new Date(now).toISOString(),
+        planType: "plus",
+        primary: { remainingPercent: 25, windowDurationMins: 10080, resetsAt },
+        secondary: null,
+      };
+    };
+    const options = { poolPath: b.pool, homesDir: b.homes, cachePath: b.cache, readUsage, now };
+
+    const snapshot = await probeChatGPTAccountUsage(options);
+    // Low quota, or a spent account still spending credits, can change the answer.
+    assert.deepEqual(asked.sort(), ["acct_creditcredit", "acct_lowlowlowlow"]);
+    const plenty = snapshot.accounts.find((entry) => entry.id === "acct_plentyplenty");
+    assert.equal(plenty.fetchedAt, readAt);
+    assert.equal(plenty.primary.remainingPercent, 80);
+
+    // The operator's explicit `usage` asks every account.
+    asked.length = 0;
+    writeFileSync(b.cache, JSON.stringify(seed));
+    await probeChatGPTAccountUsage({ ...options, force: true });
+    assert.equal(asked.length, 4);
+
+    // A round that asks nothing leaves the file alone.
+    const quiet = { ...seed, accounts: [row("acct_plentyplenty", 80), row("acct_spentspentsp", 0)] };
+    writePool(b.pool, ["acct_plentyplenty", "acct_spentspentsp"]);
+    writeFileSync(b.cache, JSON.stringify(quiet));
+    const before = statSync(b.cache).mtimeMs;
+    asked.length = 0;
+    await probeChatGPTAccountUsage(options);
+    assert.deepEqual(asked, []);
+    assert.equal(statSync(b.cache).mtimeMs, before);
+    assert.equal(JSON.parse(readFileSync(b.cache, "utf8")).fetchedAt, readAt);
+  } finally { b.cleanup(); }
+});

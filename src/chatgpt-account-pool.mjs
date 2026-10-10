@@ -484,7 +484,9 @@ export async function redeemChatGPTSubscriptionAccountResetCredit(accountValue, 
   }, { filePath });
   if (result.redeemed) {
     try {
-      const refreshed = await probeUsage({ poolPath: filePath, homesDir, freshAfterInFlight: true });
+      const refreshed = await probeUsage({
+        poolPath: filePath, homesDir, freshAfterInFlight: true, force: true,
+      });
       const usage = refreshed?.accounts?.find((entry) => entry.id === id);
       if (usage) return { ...result, usage, resetCredits: usage.resetCredits ?? null };
     } catch {

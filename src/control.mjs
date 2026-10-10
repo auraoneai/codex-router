@@ -3976,7 +3976,7 @@ async function handleChatGptAccountSwitch(action, value, completionLease) {
         snapshot = { accounts: [] };
       }
     } else {
-      snapshot = await probeChatGPTAccountUsage();
+      snapshot = await probeChatGPTAccountUsage({ force: true });
     }
     const { buildChatGPTUsageReport } = await import("./pool-usage-report.mjs");
     process.stdout.write(`${JSON.stringify(await buildChatGPTUsageReport(snapshot, {}))}\n`);

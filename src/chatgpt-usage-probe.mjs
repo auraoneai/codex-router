@@ -27,10 +27,44 @@ import {
   readCodexAccountUsage,
 } from "./codex-account-usage.mjs";
 import { protectPrivateFile } from "./file-security.mjs";
-import { clearAccountAuthInvalid } from "./chatgpt-rotation.mjs";
+import {
+  clearAccountAuthInvalid,
+  drainedUntilMs,
+  usageWindows,
+  windowIsLive,
+} from "./chatgpt-rotation.mjs";
 
 export const USAGE_PROBE_TIMEOUT_MS = 12_000;
 export const USAGE_PROBE_LIMIT = 8;
+// Each probe spawns a Codex app-server per account, so an account whose
+// reading cannot change a rotation decision is not asked. "Plenty" is at least
+// this much left on every window, read within the age below; the bound is
+// short because, unlike Claude, nothing refreshes the account in use between
+// probes.
+export const USAGE_PROBE_COMFORTABLE_PERCENT = 50;
+export const USAGE_PROBE_COMFORTABLE_MAX_AGE_MS = 10 * 60_000;
+
+function rowUsable(row) {
+  return Boolean(row) && !row.error && row.authInvalid !== true;
+}
+
+function readingComfortable(row, now) {
+  if (!rowUsable(row)) return false;
+  const readAtMs = Date.parse(row.fetchedAt);
+  if (!Number.isFinite(readAtMs) || now - readAtMs > USAGE_PROBE_COMFORTABLE_MAX_AGE_MS) return false;
+  const present = [row.primary, row.secondary].filter(Boolean);
+  // A window past its reset reads as nothing, so it is never "plenty".
+  if (!present.length || !present.every((window) => windowIsLive(window, now))) return false;
+  return usageWindows(row, now).every(
+    (window) => window.remainingPercent >= USAGE_PROBE_COMFORTABLE_PERCENT,
+  );
+}
+
+// A spent window with a known reset ahead cannot read differently until then,
+// and the router's reset-aware probe asks right after it.
+function spentUntilReset(row, now) {
+  return rowUsable(row) && drainedUntilMs(row, now) !== undefined;
+}
 
 function accountHome(accountId, homesDir) {
   return path.join(homesDir, accountId);
@@ -90,6 +124,10 @@ async function executeProbeChatGPTAccountUsage({
   write = true,
   primaryHome = CODEX_HOME,
   switchPath = CHATGPT_PROFILE_SWITCH_PATH,
+  // Probe accounts with plenty left, or spent, too. The operator's explicit
+  // `usage` and a reset-credit redemption -- which un-spends a window before
+  // its reset -- ask for this; the router's schedules do not.
+  force = false,
 } = {}) {
   let pool;
   try {
@@ -124,6 +162,7 @@ async function executeProbeChatGPTAccountUsage({
     // No previous cache
   }
 
+  let probedAny = false;
   const accounts = await Promise.all(candidates.map(async (account) => {
     const base = {
       id: account.id,
@@ -132,6 +171,15 @@ async function executeProbeChatGPTAccountUsage({
       preferred: account.id === selectedId,
     };
     const prev = prevAccountsById.get(account.id);
+    // The reading stays; who is selected comes from the pool, which can have
+    // moved since, and the tray marks the preferred row from it.
+    // A spent account with credit fallback on keeps spending purchased
+    // credits, so its balance still moves and it is asked as usual.
+    const spentAndIdle = spentUntilReset(prev, now) && account.creditFallback !== true;
+    if (!force && (readingComfortable(prev, now) || spentAndIdle)) {
+      return { ...prev, ...base };
+    }
+    probedAny = true;
     try {
       const codexHome = account.id === selectedProfile.selection && selectedProfile.home
         ? selectedProfile.home
@@ -177,7 +225,9 @@ async function executeProbeChatGPTAccountUsage({
     }
   }));
   const snapshot = { version: 1, fetchedAt: new Date(now).toISOString(), accounts };
-  if (write) {
+  // A round that asked nothing learned nothing; rewriting the file would also
+  // bump the document time rotation judges freshness by.
+  if (write && probedAny) {
     try {
       // The snapshot names accounts and their remaining quota, which is
       // operator metadata rather than a credential, but it lives beside the

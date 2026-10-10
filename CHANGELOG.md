@@ -28,6 +28,15 @@
 
 ### Fixed
 
+- **The ChatGPT usage probe stops spawning app-servers it does not need.**
+  Every two-minute round, post-turn probe, and depletion probe started a Codex
+  app-server for every pooled account. The scheduled probe now skips an
+  account whose reading, under ten minutes old, shows at least half of every
+  window left, and one whose spent window has not reset yet unless its credit
+  fallback is on (its balance still moves). `chatgpt-account-pool usage` and
+  the read after a reset-credit redemption still probe every account, and a
+  round that probed nothing no longer rewrites the cache.
+
 - **The tray and the Claude usage probe poll far less.** The tray refreshed
   its usage tables by spawning `control <section> cached` -- a Node boot of
   0.6-1.7 s CPU each, three per refresh -- every five seconds while a turn ran
