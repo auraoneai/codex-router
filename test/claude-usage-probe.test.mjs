@@ -660,6 +660,14 @@ test("an account with plenty left on a recent reading is not probed", async () =
     // Only the account whose reading could change a rotation decision is asked.
     assert.deepEqual(asked, [`Bearer token-${lowId}`]);
 
+    // A spent window cannot change before its reset, so it is not asked either.
+    asked.length = 0;
+    const spent = JSON.parse(readFileSync(cachePath, "utf8"));
+    spent.accounts.find((row) => row.id === lowId).weekly = window(0);
+    writeFileSync(cachePath, JSON.stringify(spent), { mode: 0o600 });
+    await executeProbeClaudeAccountUsage({ poolPath, homesDir, cachePath, usageUrl, now });
+    assert.deepEqual(asked, []);
+
     // An explicit `usage` asks every account regardless.
     asked.length = 0;
     clearInFlightProbesForTest();

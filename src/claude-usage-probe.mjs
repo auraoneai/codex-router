@@ -91,6 +91,18 @@ function readingComfortable(row, now) {
   });
 }
 
+// A window spent with a known reset still ahead cannot read differently until
+// that reset, and `scheduleClaudeResetAwareProbe` already asks right after it.
+// Probing it before then only spends the endpoint's rate limit.
+function spentUntilReset(row, now) {
+  if (!row || row.error || row.authInvalid) return false;
+  return [row.fiveHour, row.weekly].some((window) => {
+    const resetsAtMs = Number(window?.resetsAtMs);
+    return Number.isFinite(window?.remainingPercent) && window.remainingPercent <= 0.5 &&
+      Number.isFinite(resetsAtMs) && resetsAtMs > now;
+  });
+}
+
 function retryAfterMs(headers, now) {
   const value = headers?.get?.("retry-after");
   if (!value) return undefined;
@@ -304,7 +316,7 @@ export async function executeProbeClaudeAccountUsage({
     const prev = prevAccountsById.get(account.id);
     // Still inside a rate-limit backoff: asking again only extends the refusal.
     if (prev && Number(prev.probeBackoffUntil) > now) return prev;
-    if (!force && readingComfortable(prev, now)) return prev;
+    if (!force && (readingComfortable(prev, now) || spentUntilReset(prev, now))) return prev;
     probedAny = true;
     const base = {
       id: account.id,

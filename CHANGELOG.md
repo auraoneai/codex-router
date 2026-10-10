@@ -37,7 +37,9 @@
   refreshes every 30 s unless the island is open, and coalesces a burst of
   state-directory events into one refresh. The scheduled Claude probe skips an
   account whose last reading, under ten minutes old, shows at least half of
-  every window left; `claude-account-pool usage` still probes every account,
+  every window left, and one whose spent window has not reset yet (the
+  reset-aware probe asks right after it); `claude-account-pool usage` still
+  probes every account,
   and a round that asked nothing no longer rewrites the cache.
 
 - **A rate-limited Claude usage probe no longer reads as "probe failed".**
