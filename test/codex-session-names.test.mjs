@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  claudeCodeSessionIdFromHeaders,
   activityMetadataFromHeaders,
   sessionNameFromHeaders,
   threadIdFromHeaders,
@@ -81,4 +82,11 @@ test("groups subagent activity under its root session with a short agent name", 
       isSubagent: true,
     },
   );
+});
+
+test("Claude Code's session header is read for pool account stickiness", () => {
+  const sessionId = "7f3c2a1e-9b4d-4e8f-8a2b-1c2d3e4f5a6b";
+  assert.equal(claudeCodeSessionIdFromHeaders({ "x-claude-code-session-id": sessionId }), sessionId);
+  assert.equal(claudeCodeSessionIdFromHeaders({}), undefined);
+  assert.equal(claudeCodeSessionIdFromHeaders({ "x-claude-code-session-id": "x".repeat(300) }).length, 128);
 });

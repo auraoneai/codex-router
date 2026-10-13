@@ -56,6 +56,13 @@ function metadataThreadId(value) {
   return undefined;
 }
 
+// Claude Code names its session header differently from the Codex headers
+// `threadIdFromHeaders` reads; the Claude pool uses this one for account stickiness.
+export function claudeCodeSessionIdFromHeaders(headers = {}) {
+  const value = headerText(headers, "x-claude-code-session-id");
+  return value ? value.slice(0, 128) : undefined;
+}
+
 export function threadIdFromHeaders(headers = {}) {
   for (const name of ["thread-id", "session-id", "session_id"]) {
     const id = uuidIn(headerText(headers, name));

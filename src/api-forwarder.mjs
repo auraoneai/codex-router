@@ -67,7 +67,7 @@ import {
   createResponsesStreamTransform,
   normalizeOpenAIRequest,
 } from "./openai-adapters.mjs";
-import { threadIdFromHeaders } from "./codex-session-names.mjs";
+import { claudeCodeSessionIdFromHeaders, threadIdFromHeaders } from "./codex-session-names.mjs";
 import {
   createProviderLatencyTrace,
   validRouterCorrelationId,
@@ -2226,6 +2226,7 @@ async function handleRequest(request, response) {
     ? request.headers["x-codex-router-conversation"].slice(0, 128)
     : "";
   const conversationId = routerConversationId || threadIdFromHeaders(request.headers);
+  const poolConversationId = conversationId || claudeCodeSessionIdFromHeaders(request.headers);
   const affinityHeaders = prismAffinityHeaders(normalized.provider, conversationId);
   const controller = new AbortController();
   request.once("aborted", () => controller.abort());
@@ -2297,7 +2298,7 @@ async function handleRequest(request, response) {
         upstreamBody,
         route,
         requestUrl,
-        conversationId,
+        conversationId: poolConversationId,
         controller,
         latencyTrace,
         isResponseCommitted: () => response.headersSent || response.writableEnded || response.writableFinished,
