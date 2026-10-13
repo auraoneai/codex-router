@@ -974,6 +974,8 @@ const STATIC_MODEL_SLUG_ALIASES = new Map([
   ["claude/opus-5.5", "anthropic-api/claude-opus-5.5"],
   ["anthropic/claude-sonnet-5.5", "anthropic-api/claude-sonnet-5.5"],
   ["claude/sonnet-5.5", "anthropic-api/claude-sonnet-5.5"],
+  ["anthropic/claude-haiku-5.5", "anthropic-api/claude-haiku-5.5"],
+  ["claude/haiku-5.5", "anthropic-api/claude-haiku-5.5"],
 ]);
 
 function validatedStaticModelSlugAliases({ models, providers }) {

@@ -65,6 +65,22 @@ const AGENT_MODEL_VARIABLES = [
   "ANTHROPIC_DEFAULT_HAIKU_MODEL",
 ];
 
+// Claude Code's /model picker builds its Opus, Sonnet and Haiku rows from the
+// tier variables and collapses rows that resolve to the same id, so pointing
+// every tier at the session model leaves a single entry in the picker (and
+// runs `model: haiku` agents on the session model). Each tier takes the pool
+// model of its own family when the catalog publishes one.
+const TIER_POOL_SLUGS = {
+  ANTHROPIC_DEFAULT_OPUS_MODEL: "anthropic-api/claude-opus-5.5",
+  ANTHROPIC_DEFAULT_SONNET_MODEL: "anthropic-api/claude-sonnet-5.5",
+  ANTHROPIC_DEFAULT_HAIKU_MODEL: "anthropic-api/claude-haiku-5.5",
+  ANTHROPIC_SMALL_FAST_MODEL: "anthropic-api/claude-haiku-5.5",
+};
+
+function catalogEntry(catalog, slug) {
+  return catalog?.models?.find?.((candidate) => candidate?.slug === slug || candidate?.slug?.endsWith(slug.slice(slug.indexOf("/"))));
+}
+
 const CLAUDE_EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
 export function claudeRouterEnvironment({
@@ -127,27 +143,33 @@ export function claudeRouterEnvironment({
   }
   if (sessionModel) {
     for (const name of AGENT_MODEL_VARIABLES) {
-      env[name] = routedModel(env[name]) ? catalogSpelling(env[name], catalog) : sessionModel;
+      if (routedModel(env[name])) {
+        env[name] = catalogSpelling(env[name], catalog);
+        continue;
+      }
+      const tier = TIER_POOL_SLUGS[name] ? catalogEntry(catalog, TIER_POOL_SLUGS[name]) : undefined;
+      env[name] = typeof tier?.id === "string" ? tier.id : sessionModel;
     }
   }
 
-  const fable = catalog?.models?.find?.((m) => m.slug === "anthropic-api/claude-fable-5.1" || m.slug?.endsWith("claude-fable-5.1"));
+  const fable = catalogEntry(catalog, "anthropic-api/claude-fable-5.1");
   if (fable && !env.ANTHROPIC_CUSTOM_MODEL_OPTION) {
     env.ANTHROPIC_CUSTOM_MODEL_OPTION = fable.id;
     env.ANTHROPIC_CUSTOM_MODEL_OPTION_NAME = "Claude Fable 5.1";
     env.ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION = "Claude Fable 5.1 (Claude account pool)";
   }
 
-  const opus = catalog?.models?.find?.((m) => m.slug === "anthropic-api/claude-opus-5.5" || m.slug?.endsWith("claude-opus-5.5"));
-  if (opus && claudeRoutedSlug(env.ANTHROPIC_DEFAULT_OPUS_MODEL) === opus.slug && !env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME) {
-    env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME = "Claude Opus 5.5";
-    env.ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION = "Claude Opus 5.5 (Claude account pool)";
-  }
-
-  const sonnet = catalog?.models?.find?.((m) => m.slug === "anthropic-api/claude-sonnet-5.5" || m.slug?.endsWith("claude-sonnet-5.5"));
-  if (sonnet && claudeRoutedSlug(env.ANTHROPIC_DEFAULT_SONNET_MODEL) === sonnet.slug && !env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME) {
-    env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME = "Claude Sonnet 5.5";
-    env.ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION = "Claude Sonnet 5.5 (Claude account pool)";
+  const tierLabels = [
+    ["ANTHROPIC_DEFAULT_OPUS_MODEL", "anthropic-api/claude-opus-5.5", "Claude Opus 5.5"],
+    ["ANTHROPIC_DEFAULT_SONNET_MODEL", "anthropic-api/claude-sonnet-5.5", "Claude Sonnet 5.5"],
+    ["ANTHROPIC_DEFAULT_HAIKU_MODEL", "anthropic-api/claude-haiku-5.5", "Claude Haiku 5.5"],
+  ];
+  for (const [name, slug, label] of tierLabels) {
+    const entry = catalogEntry(catalog, slug);
+    if (entry && claudeRoutedSlug(env[name]) === entry.slug && !env[`${name}_NAME`]) {
+      env[`${name}_NAME`] = label;
+      env[`${name}_DESCRIPTION`] = `${label} (Claude account pool)`;
+    }
   }
 
   return env;
