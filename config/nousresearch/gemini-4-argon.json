@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "slug": "nousresearch/gemini-4-argon",
+      "gatewayModel": "nousresearch-gemini-4-argon",
+      "upstreamModel": "google/gemini-4-argon",
+      "provider": "nousresearch",
+      "listed": true,
+      "displayName": "Gemini 4 Argon (Nous Research)",
+      "description": "Google Gemini 4 Argon through the Nous Portal.",
+      "priority": 75,
+      "defaultEffort": "medium",
+      "reasoningLevels": [
+        {
+          "effort": "low",
+          "description": "Faster reasoning"
+        },
+        {
+          "effort": "medium",
+          "description": "Balanced reasoning"
+        },
+        {
+          "effort": "high",
+          "description": "Deep reasoning"
+        }
+      ],
+      "contextWindow": 1048576,
+      "autoCompact": 943000,
+      "inputModalities": [
+        "text"
+      ],
+      "compHash": "nousresearch-gemini-4-argon-v1"
+    }
+  ]
+}

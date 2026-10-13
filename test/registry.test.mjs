@@ -42,6 +42,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
     [
       "ainetcafe/kimi-k3",
       "anthropic-api/claude-fable-5.1",
+      "anthropic-api/claude-haiku-5.5",
       "anthropic-api/claude-opus-4.8",
       "anthropic-api/claude-opus-5.5",
       "anthropic-api/claude-sonnet-5.5",
@@ -112,6 +113,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "deepseek/deepseek-v4-pro",
       "deepseek/deepseek-v4.1-flash",
       "gemini-api/models/gemini-3.8-flash",
+      "gemini-api/models/gemini-4-argon",
       "grok-api/grok-4.5",
       "grok-oauth/grok-4.5",
       "kimi-api/kimi-k3",
@@ -135,6 +137,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "nousresearch/deepseek-v4.1-flash",
       "nousresearch/gemini-3.7-flash",
       "nousresearch/gemini-3.8-flash",
+      "nousresearch/gemini-4-argon",
       "nousresearch/glm-5.2",
       "nousresearch/glm-5.3",
       "nousresearch/gpt-5.6-terra",
@@ -206,6 +209,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
       "openrouter/claude-fable-5.1",
       "openrouter/deepseek-v4.1-flash",
       "openrouter/gemini-3.8-flash",
+      "openrouter/gemini-4-argon",
       "openrouter/tencent/hy4-preview",
       "openrouter/muse-spark-1.2-contributor",
       "openrouter/muse-spark-1.2",
@@ -690,6 +694,7 @@ test("provider registry exposes configured API and OAuth model families", () => 
   ).map((model) => model.slug);
   assert.deepEqual(originalDetailSlugs.sort(), [
     "anthropic-api/claude-fable-5.1",
+    "anthropic-api/claude-haiku-5.5",
     "anthropic-api/claude-opus-4.8",
     "anthropic-api/claude-opus-5.5",
     "anthropic-api/claude-sonnet-5.5",

@@ -25,6 +25,13 @@ const GEMINI_38_FLASH_ROUTES = [
   ["venice/gemini-3.8-flash", "gemini-3-8-flash", 1_000_000, 900_000],
 ];
 
+// Gemini 4 Argon routes confirmed 2026-10-13.
+const GEMINI_4_ARGON_ROUTES = [
+  ["gemini-api/models/gemini-4-argon", "models/gemini-4-argon", 1_048_576, 900_000],
+  ["openrouter/gemini-4-argon", "google/gemini-4-argon", 1_048_576, 943_000],
+  ["nousresearch/gemini-4-argon", "google/gemini-4-argon", 1_048_576, 943_000],
+];
+
 // Muse Spark 1.3 routes confirmed 2026-09-03.
 const MUSE_12_ROUTES = [
   ["openrouter/muse-spark-1.2", "meta/muse-spark-1.2", 1_048_576, 943_000],
@@ -64,6 +71,17 @@ const ADDITIONAL_ROUTES = [
 
 test("every Gemini 3.8 Flash route records the upstream id and window", () => {
   for (const [slug, upstreamModel, contextWindow, autoCompact] of GEMINI_38_FLASH_ROUTES) {
+    const model = MODEL_BY_SLUG.get(slug);
+    assert.ok(model, `${slug} is missing from the registry`);
+    assert.equal(model.upstreamModel, upstreamModel);
+    assert.equal(model.listed, true);
+    assert.equal(model.contextWindow, contextWindow);
+    assert.equal(model.autoCompact, autoCompact);
+  }
+});
+
+test("every Gemini 4 Argon route records the upstream id and window", () => {
+  for (const [slug, upstreamModel, contextWindow, autoCompact] of GEMINI_4_ARGON_ROUTES) {
     const model = MODEL_BY_SLUG.get(slug);
     assert.ok(model, `${slug} is missing from the registry`);
     assert.equal(model.upstreamModel, upstreamModel);
@@ -117,19 +135,25 @@ test("additional routes record their static metadata", () => {
   }
 });
 
-test("Gemini 3.8 Flash input modalities match catalog documentation", () => {
+test("Gemini 3.8 Flash and Gemini 4 Argon input modalities match catalog documentation", () => {
   // OpenRouter, Nous, and Command Code are text-only; Google and Venice have vision.
   const textOnlySlugs = [
     "openrouter/gemini-3.8-flash",
+    "openrouter/gemini-4-argon",
     "commandcode/gemini-3.8-flash",
     "nousresearch/gemini-3.8-flash",
+    "nousresearch/gemini-4-argon",
   ];
   for (const slug of textOnlySlugs) {
     const model = MODEL_BY_SLUG.get(slug);
     assert.deepEqual(model.inputModalities, ["text"]);
   }
 
-  for (const slug of ["gemini-api/models/gemini-3.8-flash", "venice/gemini-3.8-flash"]) {
+  for (const slug of [
+    "gemini-api/models/gemini-3.8-flash",
+    "gemini-api/models/gemini-4-argon",
+    "venice/gemini-3.8-flash",
+  ]) {
     assert.deepEqual(MODEL_BY_SLUG.get(slug).inputModalities, ["text", "image"]);
   }
 });
