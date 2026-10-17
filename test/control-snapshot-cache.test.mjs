@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const stateDir = mkdtempSync(path.join(os.tmpdir(), "control-snapshot-cache-"));
 process.env.MODEL_ROUTER_STATE_DIR = stateDir;
 
 const {
   CONTROL_SNAPSHOT_TTLS_MS,
   controlSnapshotPath,
+  invalidateControlSnapshots,
   readControlSnapshot,
   writeControlSnapshot,
 } = await import("../src/control-snapshot-cache.mjs");
@@ -63,10 +67,65 @@ test("invalid names fail closed without throwing", () => {
 });
 
 test("ships a TTL for every cached command", () => {
-  for (const name of ["provider-usage", "account", "providers", "probe"]) {
+  for (const name of [
+    "provider-usage",
+    "account",
+    "providers",
+    "probe",
+    "engineering-usage",
+    "tool-result-aging",
+  ]) {
     assert.ok(
       Number.isFinite(CONTROL_SNAPSHOT_TTLS_MS[name]) && CONTROL_SNAPSHOT_TTLS_MS[name] > 0,
       name,
     );
+  }
+});
+
+test("caches engineering-usage and tool-result-aging with default TTLs and invalidates snapshots", () => {
+  const events = [{ runId: "run-1", taskId: "task-1", attemptId: "attempt-1" }];
+  assert.equal(writeControlSnapshot("engineering-usage", events), true);
+  assert.deepEqual(readControlSnapshot("engineering-usage"), events);
+
+  const aging = { enabled: false, configured: false, environmentOverride: false };
+  assert.equal(writeControlSnapshot("tool-result-aging", aging), true);
+  assert.deepEqual(readControlSnapshot("tool-result-aging"), aging);
+
+  assert.equal(writeControlSnapshot("probe-codex", { target: "codex" }), true);
+  invalidateControlSnapshots(["engineering-usage", "tool-result-aging", "probe"]);
+  assert.equal(readControlSnapshot("engineering-usage"), undefined);
+  assert.equal(readControlSnapshot("tool-result-aging"), undefined);
+  assert.equal(readControlSnapshot("probe-codex", CONTROL_SNAPSHOT_TTLS_MS.probe), undefined);
+});
+
+test("engineeringUsageEventsForControl uses recentEngineeringUsageEvents and caches engineering-usage", () => {
+  const source = readFileSync(path.join(root, "src", "control.mjs"), "utf8");
+  const helper = source.match(/async function engineeringUsageEventsForControl[\s\S]*?\n}/)?.[0];
+  assert.ok(helper, "engineeringUsageEventsForControl should exist in src/control.mjs");
+  assert.match(helper, /readControlSnapshot\("engineering-usage"\)/);
+  assert.match(helper, /recentEngineeringUsageEvents\(\{\s*limit:\s*1_000\s*\}\)/);
+  assert.match(helper, /writeControlSnapshot\("engineering-usage",\s*events\)/);
+  assert.doesNotMatch(helper, /recentUsageEvents/);
+
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), "control-aging-cache-"));
+  try {
+    const env = {
+      ...process.env,
+      CODEX_HOME: tempDir,
+      MODEL_ROUTER_TARGET: "codex",
+      MODEL_ROUTER_STATE_DIR: tempDir,
+    };
+    delete env.CODEX_ROUTER_TOOL_RESULT_AGING;
+    const status = JSON.parse(
+      execFileSync(
+        process.execPath,
+        [path.join(root, "src", "control.mjs"), "tool-result-aging", "status"],
+        { cwd: root, encoding: "utf8", env },
+      ),
+    );
+    assert.equal(status.enabled, false);
+    assert.equal(existsSync(path.join(tempDir, "control-snapshot-tool-result-aging.json")), true);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
   }
 });

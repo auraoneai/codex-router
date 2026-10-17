@@ -110,3 +110,43 @@ test("the router and forwarder route every trace call through a guard", async ()
     );
   }
 });
+
+test("provider latency traces rotate once they exceed the byte cap", async () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "router-latency-rotate-"));
+  const previousStateDir = process.env.MODEL_ROUTER_STATE_DIR;
+  const previousCap = process.env.CODEX_ROUTER_MAX_LATENCY_TRACE_BYTES;
+  process.env.MODEL_ROUTER_STATE_DIR = stateDir;
+  process.env.CODEX_ROUTER_MAX_LATENCY_TRACE_BYTES = "300";
+  try {
+    const telemetry = await import(`../src/provider-latency-trace.mjs?rotate=${Date.now()}`);
+    assert.equal(telemetry.DEFAULT_MAX_LATENCY_TRACE_BYTES, 16 * 1024 * 1024);
+
+    const first = telemetry.createProviderLatencyTrace({ requestedModel: "first-model" });
+    first.finish({ statusCode: 200 });
+    const firstBytes = statSync(telemetry.PROVIDER_LATENCY_TRACES_PATH).size;
+    assert.ok(firstBytes > 150, "first trace record should be written");
+
+    const second = telemetry.createProviderLatencyTrace({ requestedModel: "second-model" });
+    second.finish({ statusCode: 200 });
+
+    const third = telemetry.createProviderLatencyTrace({ requestedModel: "third-model" });
+    third.finish({ statusCode: 200 });
+
+    const rotatedPath = `${telemetry.PROVIDER_LATENCY_TRACES_PATH}.1`;
+    assert.ok(statSync(rotatedPath).size > 0, "oversized latency trace log must rotate to .1");
+    const activeLines = readFileSync(telemetry.PROVIDER_LATENCY_TRACES_PATH, "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.equal(activeLines.at(-1).requestedModel, "third-model");
+    if (process.platform !== "win32") {
+      assert.equal(statSync(telemetry.PROVIDER_LATENCY_TRACES_PATH).mode & 0o777, 0o600);
+    }
+  } finally {
+    if (previousStateDir === undefined) delete process.env.MODEL_ROUTER_STATE_DIR;
+    else process.env.MODEL_ROUTER_STATE_DIR = previousStateDir;
+    if (previousCap === undefined) delete process.env.CODEX_ROUTER_MAX_LATENCY_TRACE_BYTES;
+    else process.env.CODEX_ROUTER_MAX_LATENCY_TRACE_BYTES = previousCap;
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});

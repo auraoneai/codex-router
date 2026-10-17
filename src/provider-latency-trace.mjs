@@ -2,6 +2,7 @@ import { appendFileSync, chmodSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
+import { rotateLog } from "./log-rotation.mjs";
 import { STATE_DIR } from "./paths.mjs";
 
 // Declared here rather than in paths.mjs for the same reason usage-events.mjs
@@ -10,6 +11,18 @@ export const PROVIDER_LATENCY_TRACES_PATH = path.join(
   STATE_DIR,
   "provider-latency-traces.jsonl",
 );
+
+export const DEFAULT_MAX_LATENCY_TRACE_BYTES = 16 * 1024 * 1024;
+const LATENCY_TRACE_ROTATION_CHECK_INTERVAL = 64;
+
+let ensuredStateDir = null;
+let initializedTracePath = null;
+let writesSinceRotationCheck = 0;
+
+function configuredMaxLatencyTraceBytes() {
+  const raw = Number(process.env.CODEX_ROUTER_MAX_LATENCY_TRACE_BYTES);
+  return Number.isSafeInteger(raw) && raw > 0 ? raw : DEFAULT_MAX_LATENCY_TRACE_BYTES;
+}
 
 const ROUTER_ID = /^router-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -35,15 +48,48 @@ function elapsedMs(startedAt) {
 }
 
 function writeTrace(record) {
+  const line = `${JSON.stringify(record)}\n`;
   try {
-    mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
-    appendFileSync(PROVIDER_LATENCY_TRACES_PATH, `${JSON.stringify(record)}\n`, {
+    if (ensuredStateDir !== STATE_DIR) {
+      mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+      ensuredStateDir = STATE_DIR;
+    }
+    const shouldCheckRotation =
+      initializedTracePath !== PROVIDER_LATENCY_TRACES_PATH ||
+      writesSinceRotationCheck >= LATENCY_TRACE_ROTATION_CHECK_INTERVAL ||
+      process.env.CODEX_ROUTER_MAX_LATENCY_TRACE_BYTES !== undefined;
+    if (shouldCheckRotation) {
+      writesSinceRotationCheck = 0;
+      const rotation = rotateLog(PROVIDER_LATENCY_TRACES_PATH, {
+        maxBytes: configuredMaxLatencyTraceBytes(),
+      });
+      if (rotation.rotated) {
+        initializedTracePath = null;
+      }
+    } else {
+      writesSinceRotationCheck += 1;
+    }
+    appendFileSync(PROVIDER_LATENCY_TRACES_PATH, line, {
       encoding: "utf8",
       mode: 0o600,
     });
-    chmodSync(PROVIDER_LATENCY_TRACES_PATH, 0o600);
+    if (initializedTracePath !== PROVIDER_LATENCY_TRACES_PATH) {
+      chmodSync(PROVIDER_LATENCY_TRACES_PATH, 0o600);
+      initializedTracePath = PROVIDER_LATENCY_TRACES_PATH;
+    }
   } catch {
-    // Observation-only telemetry must never fail a model request.
+    try {
+      mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+      ensuredStateDir = STATE_DIR;
+      appendFileSync(PROVIDER_LATENCY_TRACES_PATH, line, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      chmodSync(PROVIDER_LATENCY_TRACES_PATH, 0o600);
+      initializedTracePath = PROVIDER_LATENCY_TRACES_PATH;
+    } catch {
+      // Observation-only telemetry must never fail a model request.
+    }
   }
 }
 

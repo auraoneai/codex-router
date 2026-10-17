@@ -589,3 +589,148 @@ test("rows recorded before first-token timing are unmeasured, not wrong", () => 
   assert.equal(model.observedTokensPerSecond, null);
   assert.equal(model.observedFirstTokenMs, null);
 });
+
+test("providerUsageSnapshot uses incremental rollup across appends and preserves retained usage across ledger rotation", async () => {
+  const { spawnSync } = await import("node:child_process");
+  const { mkdtempSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { fileURLToPath } = await import("node:url");
+
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "model-router-provider-usage-rollup-"));
+  const script = `
+    import assert from "node:assert/strict";
+    import { existsSync, readFileSync, writeFileSync } from "node:fs";
+    import path from "node:path";
+    import { USAGE_EVENTS_PATH, USAGE_EVENTS_ROLLUP_PATH, recordUsageEvent } from "./src/usage-events.mjs";
+    import { aggregateProviderUsage, providerUsageSnapshot } from "./src/provider-usage.mjs";
+
+    // Write empty enabled-providers.json so account probes do not hit network
+    writeFileSync(path.join(process.env.MODEL_ROUTER_STATE_DIR, "enabled-providers.json"), "[]\\n", "utf8");
+
+    const now = Date.parse("2026-10-17T18:00:00.000Z");
+    const dayMs = 24 * 3_600_000;
+    const allRecorded = [];
+
+    function record(ev) {
+      recordUsageEvent(ev);
+      allRecorded.push({
+        meteringVersion: 1,
+        ...ev,
+        at: new Date(ev.at).toISOString(),
+      });
+    }
+
+    // 1. Record an event older than 90 days (belongs in retained, not 90d snapshot)
+    record({
+      at: now - 100 * dayMs,
+      provider: "deepseek",
+      model: "deepseek/deepseek-v4-pro",
+      status: 200,
+      durationMs: 2_000,
+      firstTokenMs: 500,
+      inputTokens: 5_000,
+      cachedInputTokens: 2_000,
+      outputTokens: 1_000,
+      totalTokens: 6_000,
+    });
+
+    // 2. Record 30 events across the 90-day and 24-hour windows to trigger rotation at 4096 bytes
+    for (let i = 0; i < 30; i += 1) {
+      const isRecent24h = i >= 20;
+      const eventAt = isRecent24h
+        ? now - (35 - i) * 60_000
+        : now - (40 - i) * dayMs;
+      record({
+        at: eventAt,
+        provider: i % 2 === 0 ? "deepseek" : "grok-oauth",
+        model: i % 2 === 0 ? "deepseek/deepseek-v4-flash" : "grok-oauth/grok-4.6",
+        status: i % 7 === 0 ? 500 : 200,
+        durationMs: 1_500,
+        firstTokenMs: 300,
+        inputTokens: 400 + i * 10,
+        cachedInputTokens: 100 + i * 5,
+        outputTokens: 120 + i * 2,
+        totalTokens: 520 + i * 12,
+      });
+    }
+
+    // Ensure rotation happened
+    assert.equal(existsSync(USAGE_EVENTS_PATH + ".1"), true);
+
+    const snap1 = await providerUsageSnapshot({ days: 90, now });
+    const rollup1 = JSON.parse(readFileSync(USAGE_EVENTS_ROLLUP_PATH, "utf8"));
+    const offsetAfterSnap1 = rollup1.byteOffset;
+    assert.ok(offsetAfterSnap1 > 0);
+
+    // 3. Append 2 more events after snapshot and rotation
+    record({
+      at: now - 5_000,
+      provider: "deepseek",
+      model: "deepseek/deepseek-v4-flash",
+      status: 200,
+      durationMs: 1_200,
+      firstTokenMs: 200,
+      inputTokens: 1_000,
+      cachedInputTokens: 600,
+      outputTokens: 300,
+      totalTokens: 1_300,
+    });
+    record({
+      at: now - 1_000,
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      status: 200,
+      durationMs: 1_000,
+      firstTokenMs: 200,
+      inputTokens: 800,
+      cachedInputTokens: 400,
+      outputTokens: 200,
+      totalTokens: 1_000,
+    });
+
+    const snap2 = await providerUsageSnapshot({ days: 90, now });
+    const rollup2 = JSON.parse(readFileSync(USAGE_EVENTS_ROLLUP_PATH, "utf8"));
+    assert.ok(rollup2.byteOffset > offsetAfterSnap1, "checkpoint byteOffset advanced on append");
+
+    // Compare against pure aggregateProviderUsage on the full unrotated event list
+    const expected90d = aggregateProviderUsage(
+      allRecorded.filter((e) => Date.parse(e.at) >= now - 90 * dayMs),
+      { days: 90, now },
+    );
+    const expectedRetained = aggregateProviderUsage(allRecorded, {
+      days: Number.POSITIVE_INFINITY,
+      now,
+    });
+
+    assert.deepEqual(snap2.contextEfficiency, expected90d.contextEfficiency);
+    assert.equal(snap2.retained.from, allRecorded[0].at);
+    assert.equal(snap2.retained.to, allRecorded.at(-1).at);
+
+    for (const providerId of ["deepseek", "grok-oauth", "openai"]) {
+      const actual90 = snap2.providers.find((p) => p.id === providerId);
+      const exp90 = expected90d.providers.find((p) => p.id === providerId);
+      const { account: _omitAccount, ...actual90WithoutAccount } = actual90;
+      assert.deepEqual(actual90WithoutAccount, exp90);
+
+      const actualRet = snap2.retained.providers.find((p) => p.id === providerId);
+      const expRet = expectedRetained.providers.find((p) => p.id === providerId);
+      assert.deepEqual(actualRet, expRet);
+    }
+  `;
+  try {
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      cwd: root,
+      env: {
+        ...process.env,
+        MODEL_ROUTER_STATE_DIR: stateDir,
+        CODEX_ROUTER_MAX_USAGE_EVENTS_BYTES: "4096",
+      },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});

@@ -666,3 +666,203 @@ test("engineering usage adds bounded correlation with measured, estimated, and u
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
+
+test("reverse tail reader and forward chunked reader handle multi-chunk files and out-of-order slack windows", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "model-router-tail-chunks-"));
+  const filePath = path.join(dir, "events.jsonl");
+  try {
+    const { readRecentUsageEventLines, forEachUsageEventLine } = await import("../src/usage-events.mjs");
+    const baseMs = Date.parse("2026-10-17T12:00:00.000Z");
+    const totalRows = 120;
+    const rawLines = [];
+    for (let index = 0; index < totalRows; index += 1) {
+      // Introduce a slight 2-minute out-of-order swap around the cutoff boundary
+      const offsetMinutes =
+        index === 60 ? 59 : index === 59 ? 61 : totalRows - index;
+      const at = new Date(baseMs - offsetMinutes * 60_000).toISOString();
+      rawLines.push(
+        JSON.stringify({
+          meteringVersion: 1,
+          at,
+          model: `provider/model-${index}`,
+          provider: "provider",
+          status: 200,
+          durationMs: index + 1,
+          inputTokens: 100 + index,
+          ...(index % 10 === 0
+            ? {
+                engineering: {
+                  bindingId: `bind-${index}`,
+                  usage: { inputTokens: { kind: "measured", value: 100 + index } },
+                },
+              }
+            : {}),
+        }),
+      );
+    }
+    writeFileSync(filePath, `${rawLines.join("\n")}\n`, "utf8");
+
+    // Forward chunked reader with tiny 256-byte chunks reconstructs every line in order
+    const forwardLines = [];
+    forEachUsageEventLine((line) => forwardLines.push(line), {
+      filePath,
+      chunkBytes: 256,
+    });
+    assert.deepEqual(forwardLines, rawLines);
+
+    // Reverse tail reader with tiny 256-byte chunks and limit = 15 returns the exact last 15 lines
+    const tail15 = readRecentUsageEventLines({
+      filePath,
+      chunkBytes: 256,
+      maxMatchingLines: 15,
+    });
+    assert.deepEqual(tail15, rawLines.slice(-15));
+
+    // Cutoff window with 10-minute slack catches out-of-order completion at index 59
+    const cutoffIso = new Date(baseMs - 60 * 60_000).toISOString();
+    const expectedSinceCutoff = rawLines.filter((line) => {
+      const parsed = JSON.parse(line);
+      return parsed.at >= cutoffIso;
+    });
+    const actualSinceCutoff = readRecentUsageEventLines({
+      filePath,
+      chunkBytes: 256,
+      cutoffIso,
+    });
+    assert.deepEqual(actualSinceCutoff, expectedSinceCutoff);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("incremental rollup checkpoint and size-bounded rotation preserve ceilings and aging totals", () => {
+  const stateDir = mkdtempSync(path.join(os.tmpdir(), "model-router-rollup-rotate-"));
+  const script = `
+    import assert from "node:assert/strict";
+    import { existsSync, readFileSync, statSync } from "node:fs";
+    import {
+      USAGE_EVENTS_PATH,
+      USAGE_EVENTS_ROLLUP_PATH,
+      recordUsageEvent,
+      observedInputCeilings,
+      toolResultAgingTotals,
+      recentUsageEvents,
+      recentEngineeringUsageEvents,
+    } from "./src/usage-events.mjs";
+
+    const now = Date.parse("2026-10-17T16:00:00.000Z");
+
+    // 1. Record an early event with a huge accepted input ceiling and aging savings
+    recordUsageEvent({
+      at: now - 5 * 3_600_000,
+      model: "qwen-plan/qwen3.8-max",
+      provider: "qwen-plan",
+      status: 200,
+      durationMs: 250,
+      inputTokens: 450_000,
+      cachedInputTokens: 225_000,
+      outputTokens: 500,
+      toolResultsEvaluated: 8,
+      toolResultBytesLargest: 90_000,
+      toolResultsAged: 3,
+      toolResultBytesSaved: 80_000,
+    });
+
+    // Trigger initial rollup checkpoint
+    let ceilings = observedInputCeilings();
+    assert.equal(ceilings.get("qwen-plan/qwen3.8-max"), 450_000);
+    assert.equal(existsSync(USAGE_EVENTS_ROLLUP_PATH), true);
+    const firstRollup = JSON.parse(readFileSync(USAGE_EVENTS_ROLLUP_PATH, "utf8"));
+    assert.equal(firstRollup.schemaVersion, 1);
+    assert.ok(firstRollup.byteOffset > 0);
+    assert.ok(typeof firstRollup.firstLineHash === "string" && firstRollup.firstLineHash.length === 64);
+
+    // 2. Append enough events to exceed CODEX_ROUTER_MAX_USAGE_EVENTS_BYTES (4096) and trigger rotation
+    for (let i = 0; i < 35; i += 1) {
+      recordUsageEvent({
+        at: now - (40 - i) * 60_000,
+        model: i % 2 === 0 ? "qwen-plan/qwen3.8-max" : "deepseek/deepseek-v4",
+        provider: i % 2 === 0 ? "qwen-plan" : "deepseek",
+        status: 200,
+        durationMs: 100 + i,
+        inputTokens: 10_000 + i * 100,
+        outputTokens: 200,
+        ...(i === 10
+          ? {
+              toolResultsEvaluated: 4,
+              toolResultBytesLargest: 120_000,
+              toolResultsShaped: 2,
+              toolResultBytesSaved: 40_000,
+            }
+          : {}),
+        ...(i >= 30
+          ? {
+              engineering: {
+                bindingId: "bind-" + i,
+                taskId: "task-" + i,
+              },
+            }
+          : {}),
+      });
+    }
+
+    // Verify rotation occurred and active file is bounded while .1 archive exists
+    assert.equal(existsSync(USAGE_EVENTS_PATH + ".1"), true);
+    const activeSizeAfterRotate = statSync(USAGE_EVENTS_PATH).size;
+    assert.ok(activeSizeAfterRotate < 4096, "active file was trimmed on rotation");
+
+    // 3. Append one more post-rotation event to verify incremental delta folding after rotation
+    recordUsageEvent({
+      at: now - 30_000,
+      model: "deepseek/deepseek-v4",
+      provider: "deepseek",
+      status: 200,
+      durationMs: 95,
+      inputTokens: 310_000,
+      cachedInputTokens: 155_000,
+      outputTokens: 150,
+      toolResultsEvaluated: 2,
+      toolResultBytesLargest: 50_000,
+      toolResultsAged: 1,
+      toolResultBytesSaved: 20_000,
+    });
+
+    // Verify historical ceiling from rotated-out first event AND new ceiling after rotation are both preserved!
+    ceilings = observedInputCeilings();
+    assert.equal(ceilings.get("qwen-plan/qwen3.8-max"), 450_000);
+    assert.equal(ceilings.get("deepseek/deepseek-v4"), 310_000);
+
+    // Verify cumulative aging totals across rotated prefix + kept tail + post-rotation append
+    const aging = toolResultAgingTotals({ now });
+    assert.equal(aging.requests, 3);
+    assert.equal(aging.evaluatedRequests, 3);
+    assert.equal(aging.largestResultBytes, 120_000);
+    assert.equal(aging.resultsAged, 4);
+    assert.equal(aging.resultsShaped, 2);
+    assert.equal(aging.bytesSaved, 140_000);
+    assert.equal(aging.estimatedTokensSaved, 35_000);
+    assert.equal(aging.ranges["24h"].savedTokens, 35_000);
+    assert.equal(aging.ranges["24h"].requests, 3);
+    assert.equal(aging.ranges["24h"].cache.agedTurns, 2);
+    assert.equal(aging.ranges["24h"].cache.agedRate, 0.5);
+
+    // Verify recentEngineeringUsageEvents still reads recent engineering turns from the tail
+    const eng = recentEngineeringUsageEvents({ limit: 3 });
+    assert.equal(eng.length, 3);
+    assert.deepEqual(eng.map((e) => e.bindingId), ["bind-32", "bind-33", "bind-34"]);
+  `;
+  try {
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      cwd: root,
+      env: {
+        ...process.env,
+        MODEL_ROUTER_STATE_DIR: stateDir,
+        CODEX_ROUTER_MAX_USAGE_EVENTS_BYTES: "4096",
+      },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});

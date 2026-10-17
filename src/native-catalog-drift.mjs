@@ -1,7 +1,12 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import path from "node:path";
 import { NATIVE_CATALOG_PATH, CONFIG_PATH } from "./paths.mjs";
 import { nativeCatalogIsReusable, readModelsCache, routedCatalogConfigured } from "./catalog.mjs";
-import { codexBinaryFingerprint, codexVersion } from "./codex-binary.mjs";
+import {
+  codexBinaryFingerprint as rawCodexBinaryFingerprint,
+  codexVersion as rawCodexVersion,
+  findCodexBinary,
+} from "./codex-binary.mjs";
 import { refreshNativeAccountCatalog } from "./native-account-catalog.mjs";
 import { discoveryDisabled } from "./discovery-mode.mjs";
 import { routedCodexAgentStatus } from "./codex-agent-catalog.mjs";
@@ -12,6 +17,74 @@ import {
 } from "./multi-agent-state.mjs";
 import { readHiddenModels } from "./model-picker-state.mjs";
 import { selectedConfiguredListedModels } from "./provider-selection.mjs";
+
+const binaryIdentityCache = new Map();
+
+function binaryStatKey(stats) {
+  return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeMs}:${stats.ctimeMs}`;
+}
+
+export function codexBinaryFingerprint(binaryOrOptions = findCodexBinary()) {
+  const options =
+    binaryOrOptions && typeof binaryOrOptions === "object"
+      ? binaryOrOptions
+      : { binaryPath: binaryOrOptions };
+  const binaryPath = options.binaryPath ?? findCodexBinary();
+  if (!binaryPath) return undefined;
+  const stat = options.stat || statSync;
+  const compute = options.compute || rawCodexBinaryFingerprint;
+  try {
+    const resolvedPath = path.resolve(binaryPath);
+    const stats = stat(resolvedPath);
+    const statKey = binaryStatKey(stats);
+    const cached = binaryIdentityCache.get(resolvedPath);
+    if (cached && cached.statKey === statKey && cached.sha256 !== undefined) {
+      return cached.sha256;
+    }
+    const sha256 = compute(resolvedPath);
+    if (sha256 !== undefined) {
+      binaryIdentityCache.set(resolvedPath, {
+        statKey,
+        sha256,
+        version: cached?.statKey === statKey ? cached.version : undefined,
+      });
+    }
+    return sha256;
+  } catch {
+    return undefined;
+  }
+}
+
+export function cachedCodexVersion(binaryOrOptions = findCodexBinary()) {
+  const options =
+    binaryOrOptions && typeof binaryOrOptions === "object"
+      ? binaryOrOptions
+      : { binaryPath: binaryOrOptions };
+  const binaryPath = options.binaryPath ?? findCodexBinary();
+  if (!binaryPath) return undefined;
+  const stat = options.stat || statSync;
+  const readVersion = options.readVersion || rawCodexVersion;
+  try {
+    const resolvedPath = path.resolve(binaryPath);
+    const stats = stat(resolvedPath);
+    const statKey = binaryStatKey(stats);
+    const cached = binaryIdentityCache.get(resolvedPath);
+    if (cached && cached.statKey === statKey && cached.version !== undefined) {
+      return cached.version;
+    }
+    const version = readVersion();
+    if (version !== undefined) {
+      binaryIdentityCache.set(resolvedPath, {
+        statKey,
+        sha256: cached?.statKey === statKey ? cached.sha256 : undefined,
+        version,
+      });
+    }
+    return version;
+  } catch {
+    return undefined;
+  }
+}
 
 // Marker prefix config-manager.mjs writes around router-owned Codex blocks.
 // Keep this compatibility surface aligned with target-integration.mjs.
@@ -98,8 +171,9 @@ export function nativeCatalogDriftDetected() {
     const parsed = JSON.parse(readFileSync(NATIVE_CATALOG_PATH, "utf8"));
 
     // Check account-cache, CLI-version, and installed-binary identity.
-    const version = codexVersion();
-    const binaryFingerprint = codexBinaryFingerprint();
+    const binary = findCodexBinary();
+    const version = cachedCodexVersion(binary);
+    const binaryFingerprint = codexBinaryFingerprint(binary);
     return !nativeCatalogIsReusable(
       parsed,
       version,

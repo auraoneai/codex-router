@@ -245,3 +245,49 @@ test("routed agent startup drift detection fails closed on inactive or uncertain
     "an uncertain config read must not trigger repair",
   );
 });
+
+test("codexBinaryFingerprint caches by file stat and invalidates when size or mtime changes", async () => {
+  const { codexBinaryFingerprint, cachedCodexVersion } = await import("../src/native-catalog-drift.mjs");
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), "native-drift-fp-cache-"));
+  const binaryPath = path.join(tempDir, "codex");
+  writeFileSync(binaryPath, "v1-binary-bytes");
+
+  try {
+    let computeCalls = 0;
+    const compute = (resolved) => {
+      computeCalls += 1;
+      return createHash("sha256").update(readFileSync(resolved)).digest("hex");
+    };
+
+    const first = codexBinaryFingerprint({ binaryPath, compute });
+    const second = codexBinaryFingerprint({ binaryPath, compute });
+    assert.equal(first, second);
+    assert.equal(computeCalls, 1, "unchanged stat must return cached sha256 without recomputing");
+
+    let versionCalls = 0;
+    const v1 = cachedCodexVersion({
+      binaryPath,
+      readVersion: () => {
+        versionCalls += 1;
+        return "codex-cli 0.154.0";
+      },
+    });
+    const v2 = cachedCodexVersion({
+      binaryPath,
+      readVersion: () => {
+        versionCalls += 1;
+        return "codex-cli 0.154.0";
+      },
+    });
+    assert.equal(v1, "codex-cli 0.154.0");
+    assert.equal(v2, "codex-cli 0.154.0");
+    assert.equal(versionCalls, 1, "unchanged stat must reuse cached version alongside sha256");
+
+    writeFileSync(binaryPath, "v2-binary-bytes-longer");
+    const third = codexBinaryFingerprint({ binaryPath, compute });
+    assert.notEqual(third, first, "changed binary content/size must invalidate cache");
+    assert.equal(computeCalls, 2);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});

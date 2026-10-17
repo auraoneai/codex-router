@@ -8,6 +8,7 @@ import { readControlHealth } from "./control-health.mjs";
 import { readControlActivity } from "./control-activity.mjs";
 import {
   CONTROL_SNAPSHOT_TTLS_MS,
+  invalidateControlSnapshots,
   readControlSnapshot,
   writeControlSnapshot,
 } from "./control-snapshot-cache.mjs";
@@ -57,6 +58,7 @@ import {
 } from "./process-tree.mjs";
 import { inheritedProxyEnvironment } from "./proxy-environment.mjs";
 import { installStableFetchTransport } from "./fetch-transport.mjs";
+import { recentEngineeringUsageEvents } from "./usage-events.mjs";
 
 // The tray launches this control process from the desktop session, which can
 // be silent about the proxy even when installation explicitly recorded one.
@@ -112,6 +114,15 @@ const restartBearingOverlayOperation = new Set([
 const selfReplacingControl =
   args[0] === "maintenance" ||
   (args[0] === "tray" && ["refresh", "rebuild"].includes(args[1]));
+const fastReadOnlyControl =
+  process.env.CODEX_ROUTER_FAST_READ_PROCESS === "1" ||
+  (process.platform !== "win32" && (
+    args.includes("--probe") ||
+    (args.length === 1 && args[0] === "--json") ||
+    (args[0] === "provider-usage" && (args.length === 1 || (args.length === 2 && args[1] === "--json"))) ||
+    (args[0] === "chatgpt-account-pool" && args[1] === "usage" && args[2] === "cached") ||
+    (args[0] === "claude-account-pool" && args[1] === "usage" && args[2] === "cached")
+  ));
 // Restart-bearing overlay transactions may use two complete 640-second
 // forward/rollback epochs. The control owner retains another ten seconds to
 // retire the inner process tree before a desktop watchdog may intervene.
@@ -120,7 +131,7 @@ const maximumControlOperationMs = boundedAntigravityOperation
   : restartBearingOverlayOperation
     ? 1_310_000
     : 850_000;
-if (!selfReplacingControl && !boundedOperationChild(process.env, {
+if (!selfReplacingControl && !fastReadOnlyControl && !boundedOperationChild(process.env, {
   maximumMs: maximumControlOperationMs,
 })) {
   // Every ordinary control invocation enters one separately terminable tree.
@@ -528,6 +539,7 @@ async function emitProbeSet(provider, desired) {
   // The selection helpers own variant-family semantics: toggling a provider
   // that has protocol variants (or is one) toggles the whole family.
   const next = desired === "on" ? enableProvider(provider) : disableProvider(provider);
+  invalidateControlSnapshots(["probe", "providers"]);
   process.stdout.write(JSON.stringify({ target: TARGET, enabledProviders: next }));
 }
 
@@ -595,15 +607,14 @@ async function routerCatalogSnapshot() {
   };
 }
 
-async function engineeringUsageEventsForControl() {
-  const { recentUsageEvents } = await import("./usage-events.mjs");
-  return recentUsageEvents({ sinceMs: 90 * 24 * 60 * 60 * 1000, limit: 10_000 })
-    .filter((event) => (
-      typeof event?.runId === "string" &&
-      typeof event?.taskId === "string" &&
-      typeof event?.attemptId === "string" &&
-      event?.usage && typeof event.usage === "object"
-    ));
+async function engineeringUsageEventsForControl({ refresh = false } = {}) {
+  if (!refresh && !args.includes("--refresh")) {
+    const cached = readControlSnapshot("engineering-usage");
+    if (cached) return cached;
+  }
+  const events = recentEngineeringUsageEvents({ limit: 1_000 });
+  writeControlSnapshot("engineering-usage", events);
+  return events;
 }
 
 async function engineeringCatalogSnapshot() {
@@ -759,7 +770,6 @@ async function handleEngineering(commandArgs) {
   }
   const { executeEngineeringControlAction } = await import("./engineering/http.mjs");
   const { readEngineeringPolicyState } = await import("./engineering/policy-state.mjs");
-  const usageEvents = await engineeringUsageEventsForControl();
   let body;
   let inventory = {};
   if (action === "run") {
@@ -826,6 +836,7 @@ async function handleEngineering(commandArgs) {
     const updated = replaceEngineeringPolicy(policy, {
       expectedRevision: engineeringExpectedRevision(replaceArgs),
     });
+    const usageEvents = await engineeringUsageEventsForControl();
     process.stdout.write(`${JSON.stringify(engineeringControlSnapshot({ state: updated, usageEvents }), null, 2)}\n`);
     return;
   }
@@ -862,6 +873,9 @@ async function handleEngineering(commandArgs) {
   } else {
     assertEngineeringArguments(commandArgs.slice(1));
   }
+  const usageEvents = action === "policy" || action === "preview"
+    ? []
+    : await engineeringUsageEventsForControl();
   const result = executeEngineeringControlAction(action, {
     body,
     usageEvents,
@@ -2246,16 +2260,29 @@ async function handleToolResultAgingPurge(flags) {
   if (result.failed.length) process.exitCode = 1;
 }
 
+async function cachedToolResultAgingSnapshot({ refresh = false } = {}) {
+  const { toolResultAgingSnapshot } = await import("./tool-result-aging-state.mjs");
+  const environmentOverride = process.env.CODEX_ROUTER_TOOL_RESULT_AGING === "0";
+  if (!refresh && !args.includes("--refresh")) {
+    const cached = readControlSnapshot("tool-result-aging");
+    if (cached && cached.environmentOverride === environmentOverride) {
+      return cached;
+    }
+  }
+  const snapshot = toolResultAgingSnapshot();
+  writeControlSnapshot("tool-result-aging", snapshot);
+  return snapshot;
+}
+
 async function handleToolResultAging(action, nativeAction, flags = []) {
   const {
     setNativeToolResultAgingEnabled,
     setRetentionTtlDays,
     setToolResultAgingEnabled,
-    toolResultAgingSnapshot,
   } = await import("./tool-result-aging-state.mjs");
   const desired = action || "status";
   if (desired === "status") {
-    process.stdout.write(`${JSON.stringify(toolResultAgingSnapshot())}\n`);
+    process.stdout.write(`${JSON.stringify(await cachedToolResultAgingSnapshot())}\n`);
     return;
   }
   if (desired === "purge") {
@@ -2275,7 +2302,8 @@ async function handleToolResultAging(action, nativeAction, flags = []) {
     } else {
       setRetentionTtlDays(requested.replace(/d$/u, ""));
     }
-    process.stdout.write(`${JSON.stringify(toolResultAgingSnapshot())}\n`);
+    invalidateControlSnapshots(["probe"]);
+    process.stdout.write(`${JSON.stringify(await cachedToolResultAgingSnapshot({ refresh: true }))}\n`);
     return;
   }
   if (desired === "native") {
@@ -2283,14 +2311,16 @@ async function handleToolResultAging(action, nativeAction, flags = []) {
       throw new Error(TOOL_RESULT_AGING_USAGE);
     }
     setNativeToolResultAgingEnabled(nativeAction === "on");
-    process.stdout.write(`${JSON.stringify(toolResultAgingSnapshot())}\n`);
+    invalidateControlSnapshots(["probe"]);
+    process.stdout.write(`${JSON.stringify(await cachedToolResultAgingSnapshot({ refresh: true }))}\n`);
     return;
   }
   if (desired !== "on" && desired !== "off") {
     throw new Error(TOOL_RESULT_AGING_USAGE);
   }
   setToolResultAgingEnabled(desired === "on");
-  process.stdout.write(`${JSON.stringify(toolResultAgingSnapshot())}\n`);
+  invalidateControlSnapshots(["probe"]);
+  process.stdout.write(`${JSON.stringify(await cachedToolResultAgingSnapshot({ refresh: true }))}\n`);
 }
 
 // Failover has one switch, one optional order, and one escape hatch. The

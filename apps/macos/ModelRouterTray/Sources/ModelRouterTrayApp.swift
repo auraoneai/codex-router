@@ -1056,6 +1056,11 @@ final class RouterStore: ObservableObject {
   private var isRefreshingAccountUsage = false
   private var lastNativeUsageRefreshAt = Date.distantPast
   private var usageDirectoryMonitorSource: DispatchSourceFileSystemObject?
+  private var usageDirectoryDebounceTask: Task<Void, Never>? = nil
+  private var lastObservedUsageSnapshotMtimes: [String: Date] = [:]
+  private var lastPostTurnFullRefreshAt: Date? = nil
+  private var postTurnRefreshTask: Task<Void, Never>? = nil
+  nonisolated static let postTurnFullRefreshCooldown: TimeInterval = 15.0
 
   func setIslandInspecting(_ inspecting: Bool) {
     if isIslandInspecting != inspecting {
@@ -2175,13 +2180,27 @@ final class RouterStore: ObservableObject {
     await refreshNativeUsage()
   }
 
+  nonisolated static func watchedUsageSnapshotModificationDates(in directory: URL) -> [String: Date] {
+    var dates: [String: Date] = [:]
+    let fileManager = FileManager.default
+    for fileName in ["chatgpt-usage-snapshot.json", "claude-usage-snapshot.json"] {
+      let fileURL = directory.appendingPathComponent(fileName, isDirectory: false)
+      if let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
+         let modifiedAt = attributes[.modificationDate] as? Date {
+        dates[fileName] = modifiedAt
+      }
+    }
+    return dates
+  }
+
   private func startMonitoringUsageDirectory() {
     stopMonitoringUsageDirectory()
-    let stateDir = RouterStateDirectory.resolve(
+    let usageDir = RouterStateDirectory.resolve(
       environment: ProcessInfo.processInfo.environment,
       home: FileManager.default.homeDirectoryForCurrentUser
     )
-    let fd = open(stateDir.path, O_EVTONLY)
+    lastObservedUsageSnapshotMtimes = Self.watchedUsageSnapshotModificationDates(in: usageDir)
+    let fd = open(usageDir.path, O_EVTONLY)
     guard fd >= 0 else { return }
     let source = DispatchSource.makeFileSystemObjectSource(
       fileDescriptor: fd,
@@ -2191,8 +2210,19 @@ final class RouterStore: ObservableObject {
     source.setEventHandler { [weak self] in
       Task { @MainActor [weak self] in
         guard let self else { return }
-        await self.refreshChatGptAccountUsage()
-        await self.refreshClaudeAccountUsage()
+        self.usageDirectoryDebounceTask?.cancel()
+        self.usageDirectoryDebounceTask = Task { @MainActor [weak self] in
+          do {
+            try await Task.sleep(nanoseconds: 1_500_000_000)
+          } catch {
+            return
+          }
+          guard let self, !Task.isCancelled else { return }
+          let currentMtimes = Self.watchedUsageSnapshotModificationDates(in: usageDir)
+          guard currentMtimes != self.lastObservedUsageSnapshotMtimes else { return }
+          self.lastObservedUsageSnapshotMtimes = currentMtimes
+          await self.refreshNativeUsageIfStale(maxAge: 1.0)
+        }
       }
     }
     source.setCancelHandler {
@@ -2203,6 +2233,8 @@ final class RouterStore: ObservableObject {
   }
 
   private func stopMonitoringUsageDirectory() {
+    usageDirectoryDebounceTask?.cancel()
+    usageDirectoryDebounceTask = nil
     usageDirectoryMonitorSource?.cancel()
     usageDirectoryMonitorSource = nil
   }
@@ -3746,7 +3778,7 @@ final class RouterStore: ObservableObject {
       if (previousActivityState == .generating && health.activity.state != .generating)
           || (nextActiveRequestCount < previousRequestCount) {
         Task { [weak self] in
-          await self?.refreshNativeUsageIfStale(maxAge: 2.0)
+          await self?.refreshNativeUsageIfStale(maxAge: 10.0)
         }
       }
       if activeModel != health.activity.model { activeModel = health.activity.model }
@@ -3788,10 +3820,33 @@ final class RouterStore: ObservableObject {
         // A completed request writes its usage event before the health activity
         // clears. Pull both the provider aggregate and the snapshot now, so
         // speed, cache reuse, and tool-result savings update with this turn
-        // instead of waiting for their normal background polling intervals.
-        Task {
-          await refreshProviderUsage()
-          await refresh()
+        // instead of waiting for their normal background polling intervals,
+        // while coalescing bursts across rapid multi-agent completions.
+        let now = Date()
+        let elapsed = lastPostTurnFullRefreshAt.map { now.timeIntervalSince($0) } ?? .greatestFiniteMagnitude
+        if elapsed >= Self.postTurnFullRefreshCooldown {
+          postTurnRefreshTask?.cancel()
+          postTurnRefreshTask = nil
+          lastPostTurnFullRefreshAt = now
+          Task { [weak self] in
+            guard let self else { return }
+            await self.refreshProviderUsage()
+            await self.refresh()
+          }
+        } else if postTurnRefreshTask == nil {
+          let remaining = max(0.1, Self.postTurnFullRefreshCooldown - elapsed)
+          postTurnRefreshTask = Task { @MainActor [weak self] in
+            do {
+              try await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+            } catch {
+              return
+            }
+            guard let self, !Task.isCancelled else { return }
+            self.postTurnRefreshTask = nil
+            self.lastPostTurnFullRefreshAt = Date()
+            await self.refreshProviderUsage()
+            await self.refresh()
+          }
         }
       }
     } catch {

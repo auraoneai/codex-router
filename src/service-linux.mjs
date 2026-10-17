@@ -219,8 +219,23 @@ if (command === "render") {
     // No user systemd session, or the unit is not loaded.
   }
   process.stdout.write(`${JSON.stringify({ restarts })}\n`);
+} else if (command === "stop") {
+  systemctl(["stop", unitName], { quiet: true });
+  rotateLog(LOG_PATH);
+  process.stdout.write(`${JSON.stringify({ state: "stopped" })}\n`);
+} else if (command === "restart") {
+  systemctl(["stop", unitName], { quiet: true });
+  rotateLog(LOG_PATH);
+  systemctl(["start", unitName], { quiet: true });
+  process.stdout.write(`${JSON.stringify({ state: "running" })}\n`);
 } else {
-  const verb = { start: "start", stop: "stop", restart: "restart" }[command];
-  systemctl([verb, unitName], { quiet: true });
-  process.stdout.write(`${JSON.stringify({ state: command === "stop" ? "stopped" : "running" })}\n`);
+  let active = false;
+  try {
+    active = systemctl(["is-active", unitName]).trim() === "active";
+  } catch {
+    // Inactive services return non-zero.
+  }
+  if (!active) rotateLog(LOG_PATH);
+  systemctl(["start", unitName], { quiet: true });
+  process.stdout.write(`${JSON.stringify({ state: "running" })}\n`);
 }

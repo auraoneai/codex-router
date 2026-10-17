@@ -1,10 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { rotateLog } from "./log-rotation.mjs";
+import { logRotationPlan, rotateLog } from "./log-rotation.mjs";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -281,14 +282,31 @@ if (command === "render") {
   process.stdout.write(`${JSON.stringify({ installed: false })}\n`);
 } else if (command === "stop") {
   bootout();
+  rotateLog(LOG_PATH);
   process.stdout.write(`${JSON.stringify({ state: "stopped" })}\n`);
 } else if (command === "start") {
-  if (!loaded()) bootstrap();
+  if (!loaded()) {
+    rotateLog(LOG_PATH);
+    bootstrap();
+  }
   process.stdout.write(`${JSON.stringify({ state: "running" })}\n`);
 } else if (command === "restart") {
   if (loaded()) {
-    run(["kickstart", "-k", service], { quiet: true });
+    let needsRotation = false;
+    try {
+      needsRotation = logRotationPlan(statSync(LOG_PATH).size) === "rotate";
+    } catch {
+      // Missing or unreadable log is left alone.
+    }
+    if (needsRotation) {
+      bootout();
+      rotateLog(LOG_PATH);
+      bootstrap();
+    } else {
+      run(["kickstart", "-k", service], { quiet: true });
+    }
   } else {
+    rotateLog(LOG_PATH);
     bootstrap();
   }
   process.stdout.write(`${JSON.stringify({ state: "running" })}\n`);

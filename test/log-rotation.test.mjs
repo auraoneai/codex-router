@@ -124,3 +124,42 @@ test("rotating twice does not lose the log to a failed replace", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("macOS, Linux, and Windows service managers rotate LOG_PATH on stop and restart", () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+  const macos = readFileSync(path.join(root, "src", "service-macos.mjs"), "utf8");
+  const macosStop = macos.slice(
+    macos.indexOf('command === "stop"'),
+    macos.indexOf('command === "start"'),
+  );
+  assert.match(macosStop, /bootout\(\);[\s\S]*?rotateLog\(LOG_PATH\);/);
+  const macosStart = macos.slice(
+    macos.indexOf('command === "start"'),
+    macos.indexOf('command === "restart"'),
+  );
+  assert.match(macosStart, /rotateLog\(LOG_PATH\);[\s\S]*?bootstrap\(\);/);
+  const macosRestart = macos.slice(macos.indexOf('command === "restart"'));
+  assert.match(macosRestart, /bootout\(\);[\s\S]*?rotateLog\(LOG_PATH\);[\s\S]*?bootstrap\(\);/);
+
+  const linux = readFileSync(path.join(root, "src", "service-linux.mjs"), "utf8");
+  const linuxStop = linux.slice(
+    linux.indexOf('command === "stop"'),
+    linux.indexOf('command === "restart"'),
+  );
+  assert.match(linuxStop, /systemctl\(\["stop",\s*unitName\][\s\S]*?rotateLog\(LOG_PATH\);/);
+  const linuxRestart = linux.slice(linux.indexOf('command === "restart"'));
+  assert.match(
+    linuxRestart,
+    /systemctl\(\["stop",\s*unitName\][\s\S]*?rotateLog\(LOG_PATH\);[\s\S]*?systemctl\(\["start",\s*unitName\]/,
+  );
+
+  const windows = readFileSync(path.join(root, "src", "service-windows.mjs"), "utf8");
+  assert.match(windows, /endTask\(\);\s*rotateLog\(LOG_PATH\);\s*installTask\(\);/);
+  const windowsStop = windows.slice(windows.indexOf('command === "stop"'));
+  assert.match(windowsStop, /endTask\(\);[\s\S]*?rotateLog\(LOG_PATH\);/);
+  assert.match(
+    windowsStop,
+    /if \(command === "restart"\) endTask\(\);\s*rotateLog\(LOG_PATH\);\s*setTaskEnabled\(true\);/,
+  );
+});

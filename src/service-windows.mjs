@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { rotateLog } from "./log-rotation.mjs";
 import {
   existsSync,
   mkdirSync,
@@ -492,6 +493,7 @@ if (command === "render") {
     // running instance, and MultipleInstances IgnoreNew would then drop the new
     // hidden run — the console window would survive until the next logon.
     endTask();
+    rotateLog(LOG_PATH);
     installTask();
     schtasks(["/Run", "/TN", taskName], { quiet: true, mutating: true });
   } catch (error) {
@@ -582,6 +584,7 @@ if (command === "render") {
     setTaskEnabled(false);
     endTask();
   }
+  rotateLog(LOG_PATH);
   process.stdout.write(`${JSON.stringify({ state: "stopped" })}\n`);
 } else {
   // start and restart. `stop` above has always guarded on taskExists(); these
@@ -607,6 +610,7 @@ if (command === "render") {
     process.exitCode = 1;
   } else {
     if (command === "restart") endTask();
+    rotateLog(LOG_PATH);
     setTaskEnabled(true);
     schtasks(["/Run", "/TN", taskName], { quiet: true, mutating: true });
     process.stdout.write(`${JSON.stringify({ state: "running" })}\n`);

@@ -1,7 +1,15 @@
+import { existsSync } from "node:fs";
 import { PROVIDERS } from "./model-registry.mjs";
 import { providerAccountUsageSnapshot } from "./provider-account-usage.mjs";
 import { canonicalProviderId, readProviderSelection } from "./provider-selection.mjs";
-import { allUsageEvents } from "./usage-events.mjs";
+import {
+  USAGE_EVENTS_PATH,
+  USAGE_EVENTS_ROLLUP_PATH,
+  allUsageEvents,
+  syncUsageEventsRollup,
+} from "./usage-events.mjs";
+
+export const PROVIDER_USAGE_ROLLUP_PATH = USAGE_EVENTS_ROLLUP_PATH;
 
 // OpenAI's account stream reports dailyUsageBuckets keyed by UTC calendar day.
 // These router-derived buckets were keyed by the machine's local day, so the
@@ -348,38 +356,405 @@ export function tokensGeneratedAfterFirstToken(event, outputTokens) {
   return inclusiveOutputTokens;
 }
 
+function seedByProviderMap() {
+  return new Map(
+    [NATIVE_OPENAI, ...[...PROVIDERS.values()].filter((provider) => !provider.variantOf)].map(
+      (provider) => [provider.id, providerUsageRecord(provider)],
+    ),
+  );
+}
+
+function getOrCreateProvider(byProvider, providerId) {
+  let provider = byProvider.get(providerId);
+  if (!provider) {
+    provider = providerUsageRecord({
+      id: providerId,
+      displayName:
+        providerId === "unknown"
+          ? "Unknown provider"
+          : `Historical provider (${providerId})`,
+      kind: "openai-compatible",
+    });
+    provider.credentialType = "unknown";
+    byProvider.set(providerId, provider);
+  }
+  return provider;
+}
+
+function finalizeAggregatedProviders(
+  byProvider,
+  { now, cacheTelemetrySeen, last24hCachedInputTokens, dailyCachedInputTokens },
+) {
+  return {
+    fetchedAt: new Date(now).toISOString(),
+    scope: "local-router",
+    ...(cacheTelemetrySeen
+      ? {
+          contextEfficiency: {
+            last24hCachedInputTokens,
+            dailyCachedInputTokens: [...dailyCachedInputTokens.entries()]
+              .sort(([left], [right]) => left.localeCompare(right))
+              .map(([startDate, cachedInputTokens]) => ({ startDate, cachedInputTokens })),
+          },
+        }
+      : {}),
+    providers: [...byProvider.values()].map(({ daily, models, ...provider }) => ({
+      ...provider,
+      dailyUsageBuckets: [...daily.values()].sort((left, right) =>
+        left.startDate.localeCompare(right.startDate),
+      ),
+      models: [...models.values()]
+        .map(({ speedSamples, firstTokenSamples, ...model }) => {
+          const rates = speedSamples
+            .map((sample) => (sample.outputTokens * 1_000) / sample.generationDurationMs)
+            .sort((left, right) => left - right);
+          return {
+            ...model,
+            speedSampleCount: speedSamples.length,
+            observedFirstTokenMs: firstTokenSamples.length
+              ? [...firstTokenSamples].sort((left, right) => left - right)[
+                  Math.floor(firstTokenSamples.length / 2)
+                ]
+              : null,
+            observedTokensPerSecond: rates.length
+              ? Math.round(rates[Math.floor(rates.length / 2)] * 10) / 10
+              : null,
+          };
+        })
+        .sort(
+          (left, right) => right.totalTokens - left.totalTokens || right.requests - left.requests,
+        ),
+    })),
+  };
+}
+
+function applyRecentTupleToProvider(provider, day, tuple) {
+  const [
+    at,
+    ,
+    ,
+    slug,
+    isSuccess,
+    isMetered,
+    inputTokens,
+    regularInput,
+    measuredCached,
+    ,
+    outputTokens,
+    totalTokens,
+    speedSample,
+    firstTokenSample,
+  ] = tuple;
+  provider.requests += 1;
+  if (isSuccess) provider.successfulRequests += 1;
+  if (isMetered) provider.meteredRequests += 1;
+  provider.inputTokens += inputTokens;
+  provider.regularInputTokens += regularInput;
+  provider.cachedInputTokens += measuredCached;
+  provider.outputTokens += outputTokens;
+  provider.totalTokens += totalTokens;
+
+  const bucket = provider.daily.get(day) || {
+    startDate: day,
+    tokens: 0,
+    requests: 0,
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+  };
+  bucket.tokens += totalTokens;
+  bucket.requests += 1;
+  bucket.inputTokens += inputTokens;
+  bucket.cachedInputTokens += measuredCached;
+  bucket.outputTokens += outputTokens;
+  provider.daily.set(day, bucket);
+
+  const isoAt = new Date(at).toISOString();
+  const model = provider.models.get(slug) || {
+    slug,
+    displayName: modelDisplayName(slug),
+    requests: 0,
+    successfulRequests: 0,
+    meteredRequests: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    speedSamples: [],
+    firstTokenSamples: [],
+    lastUsedAt: isoAt,
+  };
+  model.requests += 1;
+  if (isSuccess) model.successfulRequests += 1;
+  if (isMetered) model.meteredRequests += 1;
+  model.inputTokens += inputTokens;
+  model.outputTokens += outputTokens;
+  model.totalTokens += totalTokens;
+  if (speedSample) {
+    model.speedSamples.push(speedSample);
+    if (model.speedSamples.length > 20) model.speedSamples.shift();
+  }
+  if (firstTokenSample !== null && firstTokenSample !== undefined) {
+    model.firstTokenSamples.push(firstTokenSample);
+    if (model.firstTokenSamples.length > 20) model.firstTokenSamples.shift();
+  }
+  if (at >= Date.parse(model.lastUsedAt)) model.lastUsedAt = isoAt;
+  provider.models.set(slug, model);
+}
+
+function buildSnapshotsFromRollup(rollupProviderUsage, { days = 90, now = Date.now() } = {}) {
+  const cutoff = now - days * 24 * 60 * 60 * 1_000;
+  const rolling24hCutoff = now - ROLLING_24H_MS;
+  const recentEvents = Array.isArray(rollupProviderUsage?.recentEvents)
+    ? rollupProviderUsage.recentEvents
+    : [];
+  const oldestRecentAt = recentEvents.length > 0 ? recentEvents[0][0] : Number.POSITIVE_INFINITY;
+
+  // 1. Build rolling `days` snapshot
+  const snapshotByProvider = seedByProviderMap();
+  let snapshotCacheSeen = false;
+  let snapshotLast24hCached = 0;
+  const snapshotDailyCached = new Map();
+
+  const dailyBuckets = rollupProviderUsage?.dailyBuckets || {};
+  const sortedDays = Object.keys(dailyBuckets).sort();
+  for (const day of sortedDays) {
+    const dayBucket = dailyBuckets[day];
+    if (!dayBucket || dayBucket.maxAt < cutoff || dayBucket.minAt > now) continue;
+    const straddles = dayBucket.minAt < cutoff || dayBucket.maxAt > now;
+    if (straddles && dayBucket.minAt >= oldestRecentAt) {
+      for (const tuple of recentEvents) {
+        if (tuple[1] !== day) continue;
+        const at = tuple[0];
+        if (at < cutoff || at > now) continue;
+        const provider = getOrCreateProvider(snapshotByProvider, tuple[2]);
+        applyRecentTupleToProvider(provider, day, tuple);
+        if (tuple[9]) {
+          snapshotCacheSeen = true;
+          snapshotDailyCached.set(day, (snapshotDailyCached.get(day) || 0) + tuple[8]);
+        }
+      }
+      continue;
+    }
+
+    if (dayBucket.cacheTelemetrySeen) {
+      snapshotCacheSeen = true;
+      snapshotDailyCached.set(
+        day,
+        (snapshotDailyCached.get(day) || 0) + (dayBucket.cachedInputTokens || 0),
+      );
+    }
+    for (const [providerId, dProv] of Object.entries(dayBucket.providers || {})) {
+      const provider = getOrCreateProvider(snapshotByProvider, providerId);
+      provider.requests += dProv.requests || 0;
+      provider.successfulRequests += dProv.successfulRequests || 0;
+      provider.meteredRequests += dProv.meteredRequests || 0;
+      provider.inputTokens += dProv.inputTokens || 0;
+      provider.regularInputTokens += dProv.regularInputTokens || 0;
+      provider.cachedInputTokens += dProv.cachedInputTokens || 0;
+      provider.outputTokens += dProv.outputTokens || 0;
+      provider.totalTokens += dProv.totalTokens || 0;
+      provider.daily.set(day, {
+        startDate: day,
+        tokens: dProv.totalTokens || 0,
+        requests: dProv.requests || 0,
+        inputTokens: dProv.inputTokens || 0,
+        cachedInputTokens: dProv.cachedInputTokens || 0,
+        outputTokens: dProv.outputTokens || 0,
+      });
+      for (const [slug, dModel] of Object.entries(dProv.models || {})) {
+        const model = provider.models.get(slug) || {
+          slug,
+          displayName: dModel.displayName || modelDisplayName(slug),
+          requests: 0,
+          successfulRequests: 0,
+          meteredRequests: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          speedSamples: [],
+          firstTokenSamples: [],
+          lastUsedAt: dModel.lastUsedAt,
+        };
+        model.requests += dModel.requests || 0;
+        model.successfulRequests += dModel.successfulRequests || 0;
+        model.meteredRequests += dModel.meteredRequests || 0;
+        model.inputTokens += dModel.inputTokens || 0;
+        model.outputTokens += dModel.outputTokens || 0;
+        model.totalTokens += dModel.totalTokens || 0;
+        if (Array.isArray(dModel.speedSamples) && dModel.speedSamples.length > 0) {
+          model.speedSamples.push(...dModel.speedSamples);
+          if (model.speedSamples.length > 20) {
+            model.speedSamples.splice(0, model.speedSamples.length - 20);
+          }
+        }
+        if (Array.isArray(dModel.firstTokenSamples) && dModel.firstTokenSamples.length > 0) {
+          model.firstTokenSamples.push(...dModel.firstTokenSamples);
+          if (model.firstTokenSamples.length > 20) {
+            model.firstTokenSamples.splice(0, model.firstTokenSamples.length - 20);
+          }
+        }
+        if (Date.parse(dModel.lastUsedAt) >= Date.parse(model.lastUsedAt)) {
+          model.lastUsedAt = dModel.lastUsedAt;
+        }
+        provider.models.set(slug, model);
+      }
+    }
+  }
+
+  // 2. Build all-time `retained` snapshot
+  const retainedByProvider = seedByProviderMap();
+  const retainedState = rollupProviderUsage?.retained || {};
+  const retainedCacheSeen = Boolean(retainedState.cacheTelemetrySeen);
+  let retainedLast24hCached = 0;
+  const retainedDailyCached = new Map(
+    Object.entries(retainedState.dailyCachedInputTokens || {}),
+  );
+
+  for (const [providerId, rProv] of Object.entries(retainedState.providers || {})) {
+    const provider = getOrCreateProvider(retainedByProvider, providerId);
+    provider.requests = rProv.requests || 0;
+    provider.successfulRequests = rProv.successfulRequests || 0;
+    provider.meteredRequests = rProv.meteredRequests || 0;
+    provider.inputTokens = rProv.inputTokens || 0;
+    provider.regularInputTokens = rProv.regularInputTokens || 0;
+    provider.cachedInputTokens = rProv.cachedInputTokens || 0;
+    provider.outputTokens = rProv.outputTokens || 0;
+    provider.totalTokens = rProv.totalTokens || 0;
+    for (const [day, dBucket] of Object.entries(rProv.daily || {})) {
+      provider.daily.set(day, { ...dBucket });
+    }
+    for (const [slug, rModel] of Object.entries(rProv.models || {})) {
+      provider.models.set(slug, {
+        ...rModel,
+        displayName: rModel.displayName || modelDisplayName(slug),
+        speedSamples: Array.isArray(rModel.speedSamples) ? [...rModel.speedSamples] : [],
+        firstTokenSamples: Array.isArray(rModel.firstTokenSamples)
+          ? [...rModel.firstTokenSamples]
+          : [],
+      });
+    }
+  }
+
+  // 3. Populate rolling 24h counters on both snapshot and retained from recentEvents
+  const snapshot24hFloor = Math.max(cutoff, rolling24hCutoff);
+  for (const tuple of recentEvents) {
+    const [
+      at,
+      ,
+      providerId,
+      ,
+      ,
+      isMetered,
+      inputTokens,
+      regularInput,
+      measuredCached,
+      hasCache,
+      outputTokens,
+      totalTokens,
+    ] = tuple;
+    if (at > now) continue;
+    if (at >= rolling24hCutoff) {
+      const rProvider = getOrCreateProvider(retainedByProvider, providerId);
+      rProvider.last24hInputTokens += inputTokens;
+      rProvider.last24hRegularInputTokens += regularInput;
+      rProvider.last24hCachedInputTokens += measuredCached;
+      rProvider.last24hOutputTokens += outputTokens;
+      rProvider.last24hTokens += totalTokens;
+      rProvider.last24hRequests += 1;
+      if (isMetered) rProvider.last24hMeteredRequests += 1;
+      if (hasCache) retainedLast24hCached += measuredCached;
+    }
+    if (at >= snapshot24hFloor) {
+      const sProvider = getOrCreateProvider(snapshotByProvider, providerId);
+      sProvider.last24hInputTokens += inputTokens;
+      sProvider.last24hRegularInputTokens += regularInput;
+      sProvider.last24hCachedInputTokens += measuredCached;
+      sProvider.last24hOutputTokens += outputTokens;
+      sProvider.last24hTokens += totalTokens;
+      sProvider.last24hRequests += 1;
+      if (isMetered) sProvider.last24hMeteredRequests += 1;
+      if (hasCache) snapshotLast24hCached += measuredCached;
+    }
+  }
+
+  const snapshot = finalizeAggregatedProviders(snapshotByProvider, {
+    now,
+    cacheTelemetrySeen: snapshotCacheSeen,
+    last24hCachedInputTokens: snapshotLast24hCached,
+    dailyCachedInputTokens: snapshotDailyCached,
+  });
+  const retained = finalizeAggregatedProviders(retainedByProvider, {
+    now,
+    cacheTelemetrySeen: retainedCacheSeen,
+    last24hCachedInputTokens: retainedLast24hCached,
+    dailyCachedInputTokens: retainedDailyCached,
+  });
+
+  const retainedFrom = Number.isFinite(retainedState.fromMs)
+    ? retainedState.fromMs
+    : Number.POSITIVE_INFINITY;
+  const retainedTo = Number.isFinite(retainedState.toMs)
+    ? retainedState.toMs
+    : Number.NEGATIVE_INFINITY;
+
+  return { snapshot, retained, retainedFrom, retainedTo };
+}
+
 export async function providerUsageSnapshot(options = {}) {
   const days = options.days || 90;
   const now = options.now ?? Date.now();
-  // The retained view already requires one complete parse. Derive the bounded
-  // rolling view from that sanitized result instead of parsing the same
-  // append-only ledger a second time in this short-lived control process.
-  const retainedEvents = allUsageEvents();
-  const cutoff = now - days * 24 * 60 * 60 * 1_000;
-  const recentEvents = retainedEvents
-    .filter((event) => Date.parse(event.at) >= cutoff)
-    .slice(-100_000);
-  const snapshot = aggregateProviderUsage(
-    recentEvents,
-    { ...options, days, now },
-  );
-  // Keep the bounded snapshot for fast rolling/status views, but also expose
-  // the complete append-only ledger so the control center can answer the
-  // user's natural question: "how much has this router burned so far?" This
-  // is deliberately a separate scope; it is not the OpenAI account rollup.
-  const retained = aggregateProviderUsage(retainedEvents, {
-    ...options,
-    days: Number.POSITIVE_INFINITY,
-    now,
-  });
+  let snapshot;
+  let retained;
   let retainedFrom = Number.POSITIVE_INFINITY;
   let retainedTo = Number.NEGATIVE_INFINITY;
-  for (const event of retainedEvents) {
-    const at = Date.parse(event.at);
-    if (!Number.isFinite(at) || at > now) continue;
-    retainedFrom = Math.min(retainedFrom, at);
-    retainedTo = Math.max(retainedTo, at);
+
+  if (Array.isArray(options.events)) {
+    const retainedEvents = options.events;
+    const cutoff = now - days * 24 * 60 * 60 * 1_000;
+    const recentEvents = retainedEvents
+      .filter((event) => Date.parse(event.at) >= cutoff)
+      .slice(-100_000);
+    snapshot = aggregateProviderUsage(recentEvents, { ...options, days, now });
+    retained = aggregateProviderUsage(retainedEvents, {
+      ...options,
+      days: Number.POSITIVE_INFINITY,
+      now,
+    });
+    for (const event of retainedEvents) {
+      const at = Date.parse(event.at);
+      if (!Number.isFinite(at) || at > now) continue;
+      retainedFrom = Math.min(retainedFrom, at);
+      retainedTo = Math.max(retainedTo, at);
+    }
+  } else {
+    const rollup = syncUsageEventsRollup();
+    const toMs = rollup.providerUsage?.retained?.toMs;
+    if (toMs !== null && Number.isFinite(toMs) && now < toMs && !existsSync(`${USAGE_EVENTS_PATH}.1`)) {
+      const retainedEvents = allUsageEvents();
+      const cutoff = now - days * 24 * 60 * 60 * 1_000;
+      const recentEvents = retainedEvents
+        .filter((event) => Date.parse(event.at) >= cutoff)
+        .slice(-100_000);
+      snapshot = aggregateProviderUsage(recentEvents, { ...options, days, now });
+      retained = aggregateProviderUsage(retainedEvents, {
+        ...options,
+        days: Number.POSITIVE_INFINITY,
+        now,
+      });
+      for (const event of retainedEvents) {
+        const at = Date.parse(event.at);
+        if (!Number.isFinite(at) || at > now) continue;
+        retainedFrom = Math.min(retainedFrom, at);
+        retainedTo = Math.max(retainedTo, at);
+      }
+    } else {
+      ({ snapshot, retained, retainedFrom, retainedTo } = buildSnapshotsFromRollup(
+        rollup.providerUsage,
+        { days, now },
+      ));
+    }
   }
+
   const accounts = await providerAccountUsageSnapshot({
     ...options,
     providerIds: readProviderSelection(),

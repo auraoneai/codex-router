@@ -11,7 +11,7 @@
 // read so explicit refreshes stay fresh. A missing, malformed, oversized, or
 // stale entry fails open to a recompute, so the cache can never wedge a
 // status surface.
-import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import path from "node:path";
 
 import { writePrivateFile } from "./file-security.mjs";
@@ -25,10 +25,14 @@ export const CONTROL_SNAPSHOT_TTLS_MS = Object.freeze({
   account: 30_000,
   providers: 20_000,
   probe: 60_000,
+  "engineering-usage": 60_000,
+  "tool-result-aging": 60_000,
 });
 
 const MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 const SNAPSHOT_NAME = /^[a-z0-9][a-z0-9._-]{0,80}$/;
+const ARRAY_SNAPSHOT_NAMES = new Set(["engineering-usage"]);
+const PROBE_TARGETS = Object.freeze(["codex", "dsh", "gemini", "cursor", "claude", "openclaw"]);
 
 export function controlSnapshotPath(name) {
   if (typeof name !== "string" || !SNAPSHOT_NAME.test(name)) {
@@ -37,7 +41,7 @@ export function controlSnapshotPath(name) {
   return path.join(STATE_DIR, `control-snapshot-${name}.json`);
 }
 
-export function readControlSnapshot(name, ttlMs) {
+export function readControlSnapshot(name, ttlMs = CONTROL_SNAPSHOT_TTLS_MS[name]) {
   if (!Number.isFinite(ttlMs) || ttlMs <= 0) return undefined;
   try {
     const target = controlSnapshotPath(name);
@@ -47,7 +51,8 @@ export function readControlSnapshot(name, ttlMs) {
     if (stat.size > MAX_SNAPSHOT_BYTES) return undefined;
     if (Date.now() - stat.mtimeMs > ttlMs) return undefined;
     const parsed = JSON.parse(readFileSync(target, "utf8"));
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    if (!parsed || typeof parsed !== "object") return undefined;
+    if (Array.isArray(parsed) && !ARRAY_SNAPSHOT_NAMES.has(name)) return undefined;
     return parsed;
   } catch {
     return undefined;
@@ -55,11 +60,28 @@ export function readControlSnapshot(name, ttlMs) {
 }
 
 export function writeControlSnapshot(name, value) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value) && !ARRAY_SNAPSHOT_NAMES.has(name)) return false;
   try {
     writePrivateFile(controlSnapshotPath(name), JSON.stringify(value));
     return true;
   } catch {
     return false;
+  }
+}
+
+export function invalidateControlSnapshots(names = Object.keys(CONTROL_SNAPSHOT_TTLS_MS)) {
+  const list = Array.isArray(names) ? names : [names];
+  for (const name of list) {
+    const candidates = name === "probe"
+      ? [name, ...PROBE_TARGETS.map((target) => `probe-${target}`)]
+      : [name];
+    for (const candidate of candidates) {
+      try {
+        unlinkSync(controlSnapshotPath(candidate));
+      } catch {
+        // Best-effort cache invalidation: missing or inaccessible files are ignored.
+      }
+    }
   }
 }

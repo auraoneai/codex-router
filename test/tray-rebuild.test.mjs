@@ -1521,3 +1521,44 @@ test("a custom menu-bar image is copied into Application Support", () => {
     "the picker must not persist the original user path",
   );
 });
+
+test("the macOS tray usage directory watcher filters and debounces snapshot mtimes", () => {
+  const source = readFileSync(
+    path.join(root, "apps", "macos", "ModelRouterTray", "Sources", "ModelRouterTrayApp.swift"),
+    "utf8",
+  );
+  const watcherStart = source.indexOf("nonisolated static func watchedUsageSnapshotModificationDates(");
+  const watcherEnd = source.indexOf("func refreshAccountUsage()", watcherStart);
+  assert.ok(watcherStart > 0 && watcherEnd > watcherStart, "usage directory watcher helpers must remain readable");
+  const watcherSection = source.slice(watcherStart, watcherEnd);
+
+  assert.match(watcherSection, /\["chatgpt-usage-snapshot\.json", "claude-usage-snapshot\.json"\]/);
+  assert.doesNotMatch(watcherSection, /control-snapshot-|usage-widget\.json|usage-events\.jsonl/);
+  assert.match(watcherSection, /lastObservedUsageSnapshotMtimes = Self\.watchedUsageSnapshotModificationDates\(in: usageDir\)/);
+  assert.match(watcherSection, /self\.usageDirectoryDebounceTask\?\.cancel\(\)/);
+  assert.match(watcherSection, /Task\.sleep\(nanoseconds: 1_500_000_000\)/);
+  assert.match(watcherSection, /guard currentMtimes != self\.lastObservedUsageSnapshotMtimes else \{ return \}/);
+  assert.match(watcherSection, /await self\.refreshNativeUsageIfStale\(maxAge: 1\.0\)/);
+  assert.match(
+    watcherSection.slice(watcherSection.indexOf("private func stopMonitoringUsageDirectory()")),
+    /usageDirectoryDebounceTask\?\.cancel\(\)[\s\S]*usageDirectoryDebounceTask = nil/,
+  );
+});
+
+test("the macOS tray coalesces post-turn refreshes across rapid turn completions", () => {
+  const source = readFileSync(
+    path.join(root, "apps", "macos", "ModelRouterTray", "Sources", "ModelRouterTrayApp.swift"),
+    "utf8",
+  );
+  assert.match(source, /nonisolated static let postTurnFullRefreshCooldown: TimeInterval = 15\.0/);
+  const activityStart = source.indexOf("private func refreshActivity() async");
+  const activityEnd = source.indexOf("private func recordActivityHealthFailure()", activityStart);
+  assert.ok(activityStart > 0 && activityEnd > activityStart, "refreshActivity must remain readable");
+  const activitySection = source.slice(activityStart, activityEnd);
+
+  assert.match(activitySection, /refreshNativeUsageIfStale\(maxAge: 10\.0\)/);
+  assert.doesNotMatch(activitySection, /refreshNativeUsageIfStale\(maxAge: 2\.0\)/);
+  assert.match(activitySection, /lastPostTurnFullRefreshAt/);
+  assert.match(activitySection, /Self\.postTurnFullRefreshCooldown/);
+  assert.match(activitySection, /postTurnRefreshTask/);
+});
